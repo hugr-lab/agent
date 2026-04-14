@@ -1,0 +1,9 @@
+llm:
+  routes:
+    default: gemma4-26b
+    # Phase 5+: different models per intent
+    # tool_calling: gemma-local
+    # summarization: gemma-tiny
+
+skills:
+  path: ./skills
