@@ -108,14 +108,29 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		client.WithTransport(hugrTransport),
 	)
 
-	// Dynamic toolset: system tools always available, MCP tools added via skill-load.
+	// Load YAML config (model, max_tokens, routes, skills path).
+	yamlCfg, err := file.NewConfigProvider("config.yaml")
+	if err != nil {
+		logger.Debug("config.yaml not loaded", "err", err)
+	} else {
+		if m := yamlCfg.GetString("llm.model"); m != "" {
+			cfg.Agent.Model = m
+		}
+		if mt := yamlCfg.GetInt("llm.max_tokens"); mt > 0 {
+			cfg.Agent.MaxTokens = mt
+		}
+		if sp := yamlCfg.GetString("skills.path"); sp != "" {
+			cfg.Agent.SkillsPath = sp
+		}
+	}
+
+	// Dynamic toolset: system tools always available, MCP tools added at startup.
 	toolset := hugen.NewDynamicToolset()
 
 	// LLM via Hugr.
-	// tool_choice is "required" until a skill is loaded (forces tool calling),
-	// then switches to "auto" so the model can respond with text.
 	llm := hugr.New(hugrClient, cfg.Agent.Model,
 		hugr.WithLogger(logger),
+		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
 		hugr.WithToolChoiceFunc(func() string {
 			return "auto"
 		}),
@@ -124,18 +139,14 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	// Intent-based router. Factory allows config-driven route changes.
 	router := intent.NewRouter(llm)
 	router.WithFactory(func(modelName string) model.LLM {
-		return hugr.New(hugrClient, modelName, hugr.WithLogger(logger))
+		return hugr.New(hugrClient, modelName,
+			hugr.WithLogger(logger),
+			hugr.WithMaxTokens(cfg.Agent.MaxTokens),
+		)
 	}).WithLogger(logger)
 
-	// Load YAML config for routes and skill path.
-	yamlCfg, err := file.NewConfigProvider("config.yaml")
-	if err != nil {
-		logger.Debug("config.yaml not loaded", "err", err)
-	} else {
+	if yamlCfg != nil {
 		router.LoadRoutesFromConfig(yamlCfg)
-		if sp := yamlCfg.GetString("skills.path"); sp != "" {
-			cfg.Agent.SkillsPath = sp
-		}
 		yamlCfg.OnChange(func() {
 			logger.Info("config.yaml changed, reloading routes")
 			router.LoadRoutesFromConfig(yamlCfg)

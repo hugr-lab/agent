@@ -59,6 +59,7 @@ type AgentConfig struct {
 	Model        string // Hugr LLM data source name
 	Constitution string // Path to system prompt file
 	SkillsPath   string // Directory containing skill packages
+	MaxTokens    int    // Max completion tokens per LLM call (0 = provider default)
 	Port         int    // Web server port
 	BaseURL      string // Public base URL (e.g. https://agent.example.com)
 }
@@ -75,6 +76,7 @@ func Load() (*Config, error) {
 	v.SetDefault("AGENT_MODEL", "gemma4-26b")
 	v.SetDefault("AGENT_CONSTITUTION", "constitution/base.md")
 	v.SetDefault("AGENT_SKILLS_PATH", "./skills")
+	v.SetDefault("AGENT_MAX_TOKENS", 0)
 	v.SetDefault("AGENT_PORT", 10000)
 
 	// Read .env file (optional — env vars take precedence)
@@ -102,6 +104,7 @@ func Load() (*Config, error) {
 			Model:        v.GetString("AGENT_MODEL"),
 			Constitution: v.GetString("AGENT_CONSTITUTION"),
 			SkillsPath:   v.GetString("AGENT_SKILLS_PATH"),
+			MaxTokens:    v.GetInt("AGENT_MAX_TOKENS"),
 			Port:         port,
 			BaseURL:      baseURL(v.GetString("AGENT_BASE_URL"), port),
 		},

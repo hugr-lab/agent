@@ -44,11 +44,12 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 // HugrModel implements the ADK model.LLM interface using Hugr GraphQL subscriptions.
 // LLM responses stream via WebSocket as Arrow IPC RecordBatches.
 type HugrModel struct {
-	name          string
-	hugrModel     string
-	client        *client.Client
-	logger        *slog.Logger
-	toolChoiceFunc func() string // returns "auto" or "required"; nil defaults to "auto"
+	name           string
+	hugrModel      string
+	client         *client.Client
+	logger         *slog.Logger
+	maxTokens      int            // default max completion tokens (0 = provider default)
+	toolChoiceFunc func() string  // returns "auto" or "required"; nil defaults to "auto"
 }
 
 // Option configures a HugrModel.
@@ -62,6 +63,11 @@ func WithLogger(l *slog.Logger) Option {
 // WithName sets the ADK model name.
 func WithName(name string) Option {
 	return func(m *HugrModel) { m.name = name }
+}
+
+// WithMaxTokens sets the default max completion tokens per LLM call.
+func WithMaxTokens(n int) Option {
+	return func(m *HugrModel) { m.maxTokens = n }
 }
 
 // WithToolChoiceFunc sets a dynamic tool_choice provider.
@@ -110,6 +116,11 @@ func (m *HugrModel) GenerateContent(
 		vars := map[string]any{
 			"model":    m.hugrModel,
 			"messages": messages,
+		}
+
+		// Default max_tokens from model config, overridden by ADK request.
+		if m.maxTokens > 0 {
+			vars["max_tokens"] = m.maxTokens
 		}
 
 		if req.Config != nil {

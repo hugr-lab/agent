@@ -32,3 +32,4 @@ Before loading additional skill references, call `context_status` to check curre
 - Be concise but thorough.
 - Prefer structured data (tables, lists) over wall-of-text answers.
 - When presenting query results, highlight key insights rather than dumping raw data.
+- NEVER paraphrase or round numbers from query results. Always copy exact values from tool responses. If you are unsure about a number, show the raw data.

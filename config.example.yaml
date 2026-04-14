@@ -1,9 +1,10 @@
 llm:
+  model: claude-sonnet
+  max_tokens: 4096
   routes:
-    default: gemma4-26b
-    # Phase 5+: different models per intent
-    # tool_calling: gemma-local
-    # summarization: gemma-tiny
+    default: claude-sonnet
+    # tool_calling: claude-haiku
+    # summarization: claude-haiku
 
 skills:
   path: ./skills
