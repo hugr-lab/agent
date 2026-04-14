@@ -29,54 +29,73 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 	role := mapRole(c.Role)
 	var result []string
 
+	// Collect all function calls and text parts separately.
+	// OpenAI requires all tool_calls from one turn in a single assistant message.
+	var textParts []string
+	var toolCalls []types.LLMToolCall
+	var toolResponses []types.LLMMessage
+
 	for _, p := range c.Parts {
 		switch {
-		case p.Text != "":
-			msg := types.LLMMessage{
-				Role:    role,
-				Content: p.Text,
-			}
-			b, err := json.Marshal(msg)
-			if err != nil {
-				return nil, fmt.Errorf("marshal text message: %w", err)
-			}
-			result = append(result, string(b))
-
 		case p.FunctionCall != nil:
 			args := p.FunctionCall.Args
 			if args == nil {
 				args = map[string]any{}
 			}
-			msg := types.LLMMessage{
-				Role:    "assistant",
-				Content: "",
-				ToolCalls: []types.LLMToolCall{{
-					ID:        p.FunctionCall.ID,
-					Name:      p.FunctionCall.Name,
-					Arguments: args,
-				}},
-			}
-			b, err := json.Marshal(msg)
-			if err != nil {
-				return nil, fmt.Errorf("marshal function call message: %w", err)
-			}
-			result = append(result, string(b))
+			toolCalls = append(toolCalls, types.LLMToolCall{
+				ID:        p.FunctionCall.ID,
+				Name:      p.FunctionCall.Name,
+				Arguments: args,
+			})
 
 		case p.FunctionResponse != nil:
-			msg := types.LLMMessage{
+			toolResponses = append(toolResponses, types.LLMMessage{
 				Role:       "tool",
 				Content:    formatFunctionResponse(p.FunctionResponse.Response),
 				ToolCallID: p.FunctionResponse.ID,
-			}
-			b, err := json.Marshal(msg)
-			if err != nil {
-				return nil, fmt.Errorf("marshal function response message: %w", err)
-			}
-			result = append(result, string(b))
+			})
+
+		case p.Text != "":
+			textParts = append(textParts, p.Text)
 		}
 	}
 
-	// If content has multiple text parts, merge them into one message.
+	// Emit text + tool_calls as a single assistant message (OpenAI requires
+	// all tool_calls from one turn in one message).
+	if len(toolCalls) > 0 {
+		text := strings.Join(textParts, "")
+		msg := types.LLMMessage{
+			Role:      "assistant",
+			Content:   text,
+			ToolCalls: toolCalls,
+		}
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("marshal assistant message: %w", err)
+		}
+		result = append(result, string(b))
+	} else if len(textParts) > 0 {
+		msg := types.LLMMessage{
+			Role:    role,
+			Content: strings.Join(textParts, ""),
+		}
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("marshal text message: %w", err)
+		}
+		result = append(result, string(b))
+	}
+
+	// Emit each tool response as a separate message.
+	for _, tr := range toolResponses {
+		b, err := json.Marshal(tr)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool response: %w", err)
+		}
+		result = append(result, string(b))
+	}
+
+	// If content had parts but none matched, emit an empty message.
 	if len(result) == 0 && len(c.Parts) > 0 {
 		msg := types.LLMMessage{Role: role, Content: ""}
 		b, _ := json.Marshal(msg)
