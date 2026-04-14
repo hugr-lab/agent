@@ -30,4 +30,4 @@ specs/
 design/
 source-doc/
 __debug_bin*
-agent
+/agent
