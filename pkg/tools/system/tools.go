@@ -35,7 +35,7 @@ func packTool(req *model.LLMRequest, name string, decl *genai.FunctionDeclaratio
 		req.Tools = make(map[string]any)
 	}
 	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
+		return nil // already registered in this request
 	}
 	req.Tools[name] = t
 
