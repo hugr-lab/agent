@@ -6,14 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 
 	"github.com/hugr-lab/hugen/interfaces"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
-	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -23,7 +20,6 @@ type Deps struct {
 	Prompt      *hugen.PromptBuilder
 	Toolset     *hugen.DynamicToolset
 	Tokens      *hugen.TokenEstimator
-	Transport   http.RoundTripper // for MCP connections with auth
 	Logger      *slog.Logger
 	activeSkill string // currently loaded skill name (empty = none)
 }
@@ -146,38 +142,18 @@ func (t *skillLoadTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 		return nil, fmt.Errorf("skill_load: %w", err)
 	}
 
-	// Unload previous skill if any.
+	// Unload previous skill instructions/references if switching skills.
 	if prev := t.deps.activeSkill; prev != "" && prev != name {
-		t.deps.Toolset.RemoveToolset("skill:" + prev)
 		t.deps.Prompt.ClearSkill()
 		t.deps.Logger.Info("skill_load: unloaded previous skill", "skill", prev)
 	}
 	t.deps.activeSkill = name
 
 	// Inject skill instructions into prompt and clear catalog.
+	// MCP tools are pre-loaded at startup — skill_load only manages
+	// instructions and references, not MCP connections.
 	t.deps.Prompt.SetSkillInstructions(skill.Instructions)
 	t.deps.Prompt.ClearCatalog()
-
-	// Connect MCP toolset if the skill has an endpoint.
-	if skill.MCPEndpoint != "" {
-		transport := &sdkmcp.StreamableClientTransport{
-			Endpoint:             skill.MCPEndpoint,
-			DisableStandaloneSSE: true,
-			HTTPClient:           &http.Client{Transport: t.deps.Transport},
-		}
-		mcpTools, err := mcptoolset.New(mcptoolset.Config{
-			Transport: transport,
-		})
-		if err != nil {
-			t.deps.Logger.Error("skill_load: MCP connect failed", "skill", name, "err", err)
-			return map[string]any{
-				"loaded":    name,
-				"mcp_error": err.Error(),
-			}, nil
-		}
-		t.deps.Toolset.AddToolset("skill:"+name, mcpTools)
-		t.deps.Logger.Info("skill_load: MCP tools connected", "skill", name, "endpoint", skill.MCPEndpoint)
-	}
 
 	// Build reference list for the response.
 	refs := make([]string, 0, len(skill.References))

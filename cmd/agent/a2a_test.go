@@ -180,12 +180,11 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2acli
 
 	if cfg.skills != nil {
 		sysDeps := &system.Deps{
-			Skills:    cfg.skills,
-			Prompt:    prompt,
-			Toolset:   toolset,
-			Tokens:    tokens,
-			Transport: http.DefaultTransport,
-			Logger:    slog.Default(),
+			Skills:  cfg.skills,
+			Prompt:  prompt,
+			Toolset: toolset,
+			Tokens:  tokens,
+			Logger:  slog.Default(),
 		}
 		toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
 	}

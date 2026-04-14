@@ -199,12 +199,11 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	tokens := hugen.NewTokenEstimator()
 
 	sysDeps := &system.Deps{
-		Skills:    skillProvider,
-		Prompt:    prompt,
-		Toolset:   toolset,
-		Tokens:    tokens,
-		Transport: hugrTransport,
-		Logger:    logger,
+		Skills:  skillProvider,
+		Prompt:  prompt,
+		Toolset: toolset,
+		Tokens:  tokens,
+		Logger:  logger,
 	}
 	toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
 

@@ -2,7 +2,6 @@ package system
 
 import (
 	"log/slog"
-	"net/http"
 	"testing"
 
 	testadapters "github.com/hugr-lab/hugen/adapters/test"
@@ -14,12 +13,11 @@ import (
 
 func testDeps(skills interfaces.SkillProvider) *Deps {
 	return &Deps{
-		Skills:    skills,
-		Prompt:    hugen.NewPromptBuilder("Base."),
-		Toolset:   hugen.NewDynamicToolset(),
-		Tokens:    hugen.NewTokenEstimator(),
-		Transport: http.DefaultTransport,
-		Logger:    slog.Default(),
+		Skills:  skills,
+		Prompt:  hugen.NewPromptBuilder("Base."),
+		Toolset: hugen.NewDynamicToolset(),
+		Tokens:  hugen.NewTokenEstimator(),
+		Logger:  slog.Default(),
 	}
 }
 
