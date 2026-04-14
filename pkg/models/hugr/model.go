@@ -198,19 +198,21 @@ func (m *HugrModel) GenerateContent(
 						switch ev.Type {
 						case "content_delta":
 							fullContent.WriteString(ev.Content)
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case out <- &model.LLMResponse{
-								Content: &genai.Content{
-									Role:  "model",
-									Parts: []*genai.Part{{Text: ev.Content}},
-								},
-								Partial: true,
-							}:
+							if stream {
+								select {
+								case <-ctx.Done():
+									return ctx.Err()
+								case out <- &model.LLMResponse{
+									Content: &genai.Content{
+										Role:  "model",
+										Parts: []*genai.Part{{Text: ev.Content}},
+									},
+									Partial: true,
+								}:
+								}
 							}
 						case "reasoning":
-							if ev.Content != "" {
+							if ev.Content != "" && stream {
 								select {
 								case <-ctx.Done():
 									return ctx.Err()
@@ -225,13 +227,21 @@ func (m *HugrModel) GenerateContent(
 							}
 						case "tool_use":
 							if ev.ToolCalls != "" {
-								allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
+								tc, err := parseToolCalls(ev.ToolCalls)
+								if err != nil {
+									return fmt.Errorf("parse tool_use: %w", err)
+								}
+								allToolCalls = append(allToolCalls, tc...)
 							}
 
 						case "finish":
 							finishEvent = ev
 							if ev.ToolCalls != "" {
-								allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
+								tc, err := parseToolCalls(ev.ToolCalls)
+								if err != nil {
+									return fmt.Errorf("parse finish tool_calls: %w", err)
+								}
+								allToolCalls = append(allToolCalls, tc...)
 							}
 
 						case "error":
@@ -360,39 +370,41 @@ func intVal(v any) int {
 //   - Anthropic/Gemini streaming: tool calls not yet sent in stream events.
 //
 // This function handles all variants.
-func parseToolCalls(raw string) []types.LLMToolCall {
+func parseToolCalls(raw string) ([]types.LLMToolCall, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return nil, nil
+	}
+
+	truncated := raw
+	if len(truncated) > 200 {
+		truncated = truncated[:200] + "..."
 	}
 
 	switch {
 	case strings.HasPrefix(raw, "["):
-		// Standard format: [{id, name, arguments}, ...]
 		var calls []types.LLMToolCall
 		if err := json.Unmarshal([]byte(raw), &calls); err != nil {
-			return nil
+			return nil, fmt.Errorf("unmarshal tool_calls array: %w (raw: %s)", err, truncated)
 		}
-		return calls
+		return calls, nil
 
 	case strings.HasPrefix(raw, "{"):
-		// Single object — try as LLMToolCall first.
 		var tc types.LLMToolCall
 		if err := json.Unmarshal([]byte(raw), &tc); err != nil {
-			return nil
+			return nil, fmt.Errorf("unmarshal tool_call object: %w (raw: %s)", err, truncated)
 		}
 		if tc.Name != "" {
-			return []types.LLMToolCall{tc}
+			return []types.LLMToolCall{tc}, nil
 		}
 		// Raw arguments without name/id wrapper (OpenAI streaming via Hugr).
-		// Arguments will be matched to the tool by ADK.
 		var args any
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return nil
+			return nil, fmt.Errorf("unmarshal tool_call args: %w (raw: %s)", err, truncated)
 		}
-		return []types.LLMToolCall{{Arguments: args}}
+		return []types.LLMToolCall{{Arguments: args}}, nil
 
 	default:
-		return nil
+		return nil, fmt.Errorf("unexpected tool_calls format (raw: %s)", truncated)
 	}
 }

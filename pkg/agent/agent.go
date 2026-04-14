@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"context"
 	"log/slog"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"google.golang.org/adk/agent"
@@ -86,4 +88,26 @@ func calibrateTokens(cfg AgentConfig) llmagent.AfterModelCallback {
 		// Return nil to not alter the response.
 		return nil, nil
 	}
+}
+
+// StartSessionCleanup starts a background goroutine that periodically removes
+// stale session state from PromptBuilder and DynamicToolset.
+// Call cancel on the returned context to stop the goroutine.
+func StartSessionCleanup(ctx context.Context, prompt *PromptBuilder, toolset *DynamicToolset, maxAge time.Duration, logger *slog.Logger) {
+	go func() {
+		ticker := time.NewTicker(maxAge / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p := prompt.CleanupStaleSessions(maxAge)
+				t := toolset.CleanupStaleSessions(maxAge)
+				if p+t > 0 && logger != nil {
+					logger.Info("session cleanup", "prompt_sessions", p, "toolset_sessions", t)
+				}
+			}
+		}
+	}()
 }

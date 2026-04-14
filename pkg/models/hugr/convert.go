@@ -16,6 +16,9 @@ import (
 func adkToHugrMessages(contents []*genai.Content) ([]string, error) {
 	var messages []string
 	for _, c := range contents {
+		if c == nil {
+			continue
+		}
 		msgs, err := contentToHugrMessages(c)
 		if err != nil {
 			return nil, fmt.Errorf("convert content (role=%s): %w", c.Role, err)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -108,6 +109,11 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		cfg.Hugr.URL+"/ipc",
 		client.WithTransport(hugrTransport),
 	)
+
+	// Default HUGR_MCP_URL so skills' mcp.yaml can reference ${HUGR_MCP_URL}.
+	if os.Getenv("HUGR_MCP_URL") == "" {
+		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
+	}
 
 	// Load YAML config (model, max_tokens, routes, skills path).
 	yamlCfg, err := file.NewConfigProvider("config.yaml")
@@ -231,6 +237,10 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	if err != nil {
 		return nil, nil, fmt.Errorf("create agent: %w", err)
 	}
+
+	// Background cleanup of stale session state (1 hour TTL).
+	hugen.StartSessionCleanup(context.Background(), prompt, toolset, 1*time.Hour, logger)
+
 	return a, hugrClient, nil
 }
 
@@ -395,7 +405,7 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		return fmt.Errorf("create REST server: %w", err)
 	}
 	router.PathPrefix("/api").Handler(
-		corsMiddleware(http.StripPrefix("/api", apiServer)),
+		corsMiddleware(cfg.Agent.BaseURL, http.StripPrefix("/api", apiServer)),
 	)
 
 	ui := webui.NewLauncher()
@@ -420,9 +430,15 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	return serveAndShutdown(ctx, srv, hugrClient, logger)
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+func corsMiddleware(baseURL string, next http.Handler) http.Handler {
+	// Extract origin from baseURL (e.g. "http://localhost:10000" → same).
+	// Allow "*" only for localhost; restrict to baseURL origin otherwise.
+	origin := baseURL
+	if strings.Contains(baseURL, "localhost") || strings.Contains(baseURL, "127.0.0.1") {
+		origin = "*"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {

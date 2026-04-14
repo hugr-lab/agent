@@ -227,6 +227,11 @@ func (t *skillRefTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("skill_ref: missing required parameters: skill, ref")
 	}
 
+	// Validate that the requested skill is the one loaded in this session.
+	if active := t.deps.Prompt.ActiveSkill(ctx.SessionID()); active != skill {
+		return nil, fmt.Errorf("skill_ref: skill %q is not loaded (active: %q) — call skill_load first", skill, active)
+	}
+
 	content, err := t.deps.Skills.LoadRef(ctx, skill, ref)
 	if err != nil {
 		return nil, fmt.Errorf("skill_ref: %w", err)

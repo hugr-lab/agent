@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hugr-lab/hugen/interfaces"
 )
@@ -11,11 +12,12 @@ import (
 // sessionPromptState holds per-session prompt state: active skill, instructions,
 // catalog override, and appended references.
 type sessionPromptState struct {
-	activeSkill string   // currently loaded skill name
-	skillInstr  string   // active skill instructions
-	catalog     string   // session-specific catalog (overrides default)
-	catalogSet  bool     // true if catalog was explicitly set/cleared for this session
-	extras      []string // appended reference documents
+	activeSkill  string    // currently loaded skill name
+	skillInstr   string    // active skill instructions
+	catalog      string    // session-specific catalog (overrides default)
+	catalogSet   bool      // true if catalog was explicitly set/cleared for this session
+	extras       []string  // appended reference documents
+	lastAccessed time.Time // for TTL-based cleanup
 }
 
 // PromptBuilder assembles the system prompt from a global constitution plus
@@ -44,11 +46,28 @@ func (p *PromptBuilder) getSession(sessionID string) *sessionPromptState {
 // getOrCreateSession returns existing or creates new session state. Caller must hold write lock.
 func (p *PromptBuilder) getOrCreateSession(sessionID string) *sessionPromptState {
 	if s, ok := p.sessions[sessionID]; ok {
+		s.lastAccessed = time.Now()
 		return s
 	}
-	s := &sessionPromptState{}
+	s := &sessionPromptState{lastAccessed: time.Now()}
 	p.sessions[sessionID] = s
 	return s
+}
+
+// CleanupStaleSessions removes sessions not accessed for longer than maxAge.
+// Returns the number of removed sessions.
+func (p *PromptBuilder) CleanupStaleSessions(maxAge time.Duration) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for id, s := range p.sessions {
+		if s.lastAccessed.Before(cutoff) {
+			delete(p.sessions, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 // SetDefaultCatalog sets the skill catalog shown to new sessions that haven't

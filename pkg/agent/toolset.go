@@ -3,6 +3,7 @@ package agent
 
 import (
 	"sync"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/tool"
@@ -18,6 +19,7 @@ type DynamicToolset struct {
 	mu              sync.RWMutex
 	children        map[string]tool.Toolset            // global (system tools)
 	sessionChildren map[string]map[string]tool.Toolset // sessionID -> name -> toolset
+	sessionAccess   map[string]time.Time               // sessionID -> last access time
 }
 
 var _ tool.Toolset = (*DynamicToolset)(nil)
@@ -27,6 +29,7 @@ func NewDynamicToolset() *DynamicToolset {
 	return &DynamicToolset{
 		children:        make(map[string]tool.Toolset),
 		sessionChildren: make(map[string]map[string]tool.Toolset),
+		sessionAccess:   make(map[string]time.Time),
 	}
 }
 
@@ -98,6 +101,7 @@ func (d *DynamicToolset) AddSessionToolset(sessionID, name string, ts tool.Tools
 		d.sessionChildren[sessionID] = m
 	}
 	m[name] = ts
+	d.sessionAccess[sessionID] = time.Now()
 }
 
 // RemoveSessionToolset removes a session-scoped toolset by name.
@@ -133,4 +137,22 @@ func (d *DynamicToolset) CleanupSession(sessionID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.sessionChildren, sessionID)
+	delete(d.sessionAccess, sessionID)
+}
+
+// CleanupStaleSessions removes sessions not accessed for longer than maxAge.
+// Returns the number of removed sessions.
+func (d *DynamicToolset) CleanupStaleSessions(maxAge time.Duration) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for id, t := range d.sessionAccess {
+		if t.Before(cutoff) {
+			delete(d.sessionChildren, id)
+			delete(d.sessionAccess, id)
+			removed++
+		}
+	}
+	return removed
 }

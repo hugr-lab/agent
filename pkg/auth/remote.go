@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -29,9 +30,10 @@ type RemoteStore struct {
 // and the URL of the token exchange service.
 func NewRemoteStore(accessToken, tokenURL string) *RemoteStore {
 	return &RemoteStore{
-		tokenURL: tokenURL,
-		token:    accessToken,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		tokenURL:  tokenURL,
+		token:     accessToken,
+		expiresAt: time.Now().Add(30 * time.Second), // use initial token briefly before first refresh
+		client:    &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -101,20 +103,20 @@ func (s *RemoteStore) exchange(ctx context.Context, expiredToken string) (string
 	}
 	defer resp.Body.Close()
 
-	var result exchangeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", 0, fmt.Errorf("token exchange: decode response: %w", err)
+	// Check status before decoding — non-200 may return HTML, not JSON.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", 0, fmt.Errorf("token exchange: %d — credentials rejected", resp.StatusCode)
 	}
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		if result.AccessToken == "" {
-			return "", 0, fmt.Errorf("token exchange: empty access_token in response")
-		}
-		return result.AccessToken, result.ExpiresIn, nil
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return "", 0, fmt.Errorf("token exchange: %s", result.Error)
-	default:
+	if resp.StatusCode != http.StatusOK {
 		return "", 0, fmt.Errorf("token exchange: unexpected status %d", resp.StatusCode)
 	}
+
+	var result exchangeResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return "", 0, fmt.Errorf("token exchange: decode response: %w", err)
+	}
+	if result.AccessToken == "" {
+		return "", 0, fmt.Errorf("token exchange: empty access_token in response")
+	}
+	return result.AccessToken, result.ExpiresIn, nil
 }

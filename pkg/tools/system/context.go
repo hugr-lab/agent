@@ -41,5 +41,6 @@ func (t *contextStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error)
 		"last_prompt_tokens":     lastPrompt,
 		"last_completion_tokens": lastCompletion,
 		"source":                 t.tokens.Source(),
+		"note":                   "last_prompt/completion_tokens are global (across all sessions)",
 	}, nil
 }
