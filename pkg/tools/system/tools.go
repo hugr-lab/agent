@@ -19,12 +19,13 @@ import (
 
 // Deps holds shared dependencies for all system tools.
 type Deps struct {
-	Skills    interfaces.SkillProvider
-	Prompt    *hugen.PromptBuilder
-	Toolset   *hugen.DynamicToolset
-	Tokens    *hugen.TokenEstimator
-	Transport http.RoundTripper // for MCP connections with auth
-	Logger    *slog.Logger
+	Skills      interfaces.SkillProvider
+	Prompt      *hugen.PromptBuilder
+	Toolset     *hugen.DynamicToolset
+	Tokens      *hugen.TokenEstimator
+	Transport   http.RoundTripper // for MCP connections with auth
+	Logger      *slog.Logger
+	activeSkill string // currently loaded skill name (empty = none)
 }
 
 // packTool registers a tool's function declaration into the LLM request.
@@ -144,6 +145,14 @@ func (t *skillLoadTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 	if err != nil {
 		return nil, fmt.Errorf("skill_load: %w", err)
 	}
+
+	// Unload previous skill if any.
+	if prev := t.deps.activeSkill; prev != "" && prev != name {
+		t.deps.Toolset.RemoveToolset("skill:" + prev)
+		t.deps.Prompt.ClearSkill()
+		t.deps.Logger.Info("skill_load: unloaded previous skill", "skill", prev)
+	}
+	t.deps.activeSkill = name
 
 	// Inject skill instructions into prompt and clear catalog.
 	t.deps.Prompt.SetSkillInstructions(skill.Instructions)

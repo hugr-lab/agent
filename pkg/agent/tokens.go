@@ -5,7 +5,7 @@ import "sync"
 // TokenEstimator tracks context token usage with a heuristic estimate
 // that calibrates itself from real LLM usage metadata via EMA.
 type TokenEstimator struct {
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	ratio float64 // chars-to-tokens ratio (calibrated via EMA)
 	alpha float64 // EMA smoothing factor
 
@@ -26,8 +26,8 @@ func NewTokenEstimator() *TokenEstimator {
 
 // Estimate returns an approximate token count for the given text.
 func (t *TokenEstimator) Estimate(text string) int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	n := int(float64(len(text)) * t.ratio)
 	if n == 0 && len(text) > 0 {
 		return 1
@@ -58,8 +58,8 @@ func (t *TokenEstimator) Calibrate(promptChars, promptTokens, completionTokens i
 
 // Source returns "measured" if the estimator has been calibrated, "estimated" otherwise.
 func (t *TokenEstimator) Source() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	if t.calibrated {
 		return "measured"
 	}
@@ -68,7 +68,7 @@ func (t *TokenEstimator) Source() string {
 
 // LastUsage returns the most recent LLM usage metadata.
 func (t *TokenEstimator) LastUsage() (promptTokens, completionTokens int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	return t.lastPromptTokens, t.lastCompletionTokens
 }

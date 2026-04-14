@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"log/slog"
+	"sync"
 
 	"github.com/hugr-lab/hugen/interfaces"
 	"google.golang.org/adk/model"
@@ -14,10 +15,10 @@ import (
 type ModelFactory func(hugrModelName string) model.LLM
 
 // Router wraps a base model.LLM and routes requests by intent.
-// In Phase 2, all intents map to the same model. In later phases,
-// different intents can be routed to different models (e.g. cheap
-// models for classification, powerful for reasoning).
+// Thread-safe: routes can be updated via LoadRoutesFromConfig (called
+// from file watcher goroutine) while GenerateContent runs concurrently.
 type Router struct {
+	mu           sync.RWMutex
 	defaultModel model.LLM
 	routes       map[Intent]model.LLM
 	factory      ModelFactory
@@ -47,11 +48,15 @@ func (r *Router) WithLogger(l *slog.Logger) *Router {
 
 // SetRoute maps an intent to a specific model.
 func (r *Router) SetRoute(intent Intent, m model.LLM) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.routes[intent] = m
 }
 
 // ModelFor returns the model mapped to the given intent, falling back to default.
 func (r *Router) ModelFor(intent Intent) model.LLM {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if m, ok := r.routes[intent]; ok {
 		return m
 	}
@@ -64,6 +69,9 @@ func (r *Router) LoadRoutesFromConfig(cfg interfaces.ConfigProvider) {
 	if r.factory == nil || cfg == nil {
 		return
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	intents := []Intent{IntentDefault, IntentToolCalling, IntentSummarization, IntentClassification}
 	for _, intent := range intents {
@@ -79,9 +87,6 @@ func (r *Router) LoadRoutesFromConfig(cfg interfaces.ConfigProvider) {
 }
 
 // model.LLM interface — delegates via ModelFor(IntentDefault).
-// ADK calls GenerateContent on the Router directly, so it must
-// resolve through the route table (not bypass to defaultModel).
-
 func (r *Router) Name() string {
 	return r.ModelFor(IntentDefault).Name()
 }
