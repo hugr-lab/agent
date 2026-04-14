@@ -171,11 +171,6 @@ func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
 	})
 }
 
-// RegisterCallbackRouteOnMux adds /auth/login and /auth/callback to a gorilla/mux router.
-func (s *OIDCStore) RegisterCallbackRouteOnMux(router interface{ HandleFunc(string, func(http.ResponseWriter, *http.Request)) *interface{} }) {
-	// Not needed — use RegisterCallbackRoute with http.ServeMux.
-}
-
 // PromptLogin prints the login URL and optionally opens the browser.
 func (s *OIDCStore) PromptLogin() {
 	loginURL := strings.TrimSuffix(s.cfg.RedirectURL, "/auth/callback") + "/auth/login"

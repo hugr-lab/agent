@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -44,11 +45,20 @@ func (h HugrConfig) CanDiscoverOIDC() bool {
 	return h.OIDCIssuer == "" && h.OIDCClientID == "" && h.URL != ""
 }
 
+func baseURL(configured string, port int) string {
+	if configured != "" {
+		return strings.TrimRight(configured, "/")
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
+}
+
+
 // AgentConfig holds agent runtime settings.
 type AgentConfig struct {
 	Model        string // Hugr LLM data source name
 	Constitution string // Path to system prompt file
 	Port         int    // Web server port
+	BaseURL      string // Public base URL (e.g. https://agent.example.com)
 }
 
 // Load reads configuration from .env file and environment variables.
@@ -68,6 +78,7 @@ func Load() (*Config, error) {
 	_ = v.ReadInConfig()
 
 	hugrURL := strings.TrimRight(v.GetString("HUGR_URL"), "/")
+	port := v.GetInt("AGENT_PORT")
 
 	return &Config{
 		Hugr: HugrConfig{
@@ -82,7 +93,8 @@ func Load() (*Config, error) {
 		Agent: AgentConfig{
 			Model:        v.GetString("AGENT_MODEL"),
 			Constitution: v.GetString("AGENT_CONSTITUTION"),
-			Port:         v.GetInt("AGENT_PORT"),
+			Port:         port,
+			BaseURL:      baseURL(v.GetString("AGENT_BASE_URL"), port),
 		},
 	}, nil
 }

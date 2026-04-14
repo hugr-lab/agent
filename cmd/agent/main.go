@@ -44,8 +44,12 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	logLevel := slog.LevelInfo
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logLevel = slog.LevelDebug
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: logLevel,
 	}))
 
 	logger.Info("hugr-agent starting",
@@ -180,7 +184,7 @@ func buildHugrTransport(cfg *config.Config, logger *slog.Logger, mux *http.Serve
 		store, err := auth.NewOIDCStore(context.Background(), auth.OIDCConfig{
 			IssuerURL:   oidcIssuer,
 			ClientID:    oidcClientID,
-			RedirectURL: fmt.Sprintf("http://localhost:%d/auth/callback", cfg.Agent.Port),
+			RedirectURL: cfg.Agent.BaseURL + "/auth/callback",
 			Logger:      logger,
 		})
 		if err != nil {
@@ -199,20 +203,18 @@ func buildHugrTransport(cfg *config.Config, logger *slog.Logger, mux *http.Serve
 	return http.DefaultTransport
 }
 
-// setupA2A registers A2A endpoints on the mux.
-func setupA2A(mux *http.ServeMux, a agent.Agent, sessionSvc session.Service, artifactSvc artifact.Service, port int) {
+// a2aHandlers returns the agent card handler and JSON-RPC invoke handler.
+func a2aHandlers(a agent.Agent, sessionSvc session.Service, artifactSvc artifact.Service, baseURL string) (cardHandler, invokeHandler http.Handler) {
 	agentCard := &a2a.AgentCard{
 		Name:               a.Name(),
 		Description:        a.Description(),
 		DefaultInputModes:  []string{"text/plain"},
 		DefaultOutputModes: []string{"text/plain"},
-		URL:                fmt.Sprintf("http://localhost:%d/invoke", port),
+		URL:                baseURL + "/invoke",
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 		Skills:             adka2a.BuildAgentSkills(a),
 		Capabilities:       a2a.AgentCapabilities{Streaming: true},
 	}
-	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
-
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:         a.Name(),
@@ -221,31 +223,11 @@ func setupA2A(mux *http.ServeMux, a agent.Agent, sessionSvc session.Service, art
 			ArtifactService: artifactSvc,
 		},
 	})
-	reqHandler := a2asrv.NewHandler(executor)
-	mux.Handle("/invoke", a2asrv.NewJSONRPCHandler(reqHandler))
+	return a2asrv.NewStaticAgentCardHandler(agentCard), a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
 }
 
-// runA2A starts the A2A server (default mode).
-func runA2A(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	sessionSvc := session.InMemoryService()
-	artifactSvc := artifact.InMemoryService()
-
-	mux := http.NewServeMux()
-	hugrTransport := buildHugrTransport(cfg, logger, mux)
-
-	a, hugrClient, err := buildAgent(cfg, logger, hugrTransport)
-	if err != nil {
-		return fmt.Errorf("build agent: %w", err)
-	}
-	setupA2A(mux, a, sessionSvc, artifactSvc, cfg.Agent.Port)
-
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Agent.Port), Handler: mux}
-	logger.Info("A2A server listening",
-		"addr", srv.Addr,
-		"invoke", fmt.Sprintf("http://localhost:%d/invoke", cfg.Agent.Port),
-		"card", fmt.Sprintf("http://localhost:%d%s", cfg.Agent.Port, a2asrv.WellKnownAgentCardPath),
-	)
-
+// serveAndShutdown starts the HTTP server and handles graceful shutdown.
+func serveAndShutdown(ctx context.Context, srv *http.Server, hugrClient *client.Client, logger *slog.Logger) error {
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -255,8 +237,32 @@ func runA2A(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 		logger.Info("shutting down: closing subscriptions")
 		hugrClient.CloseSubscriptions()
 	}()
-
 	return srv.ListenAndServe()
+}
+
+// runA2A starts the A2A server (default mode).
+func runA2A(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+	sessionSvc := session.InMemoryService()
+	artifactSvc := artifact.InMemoryService()
+
+	smux := http.NewServeMux()
+	hugrTransport := buildHugrTransport(cfg, logger, smux)
+
+	a, hugrClient, err := buildAgent(cfg, logger, hugrTransport)
+	if err != nil {
+		return fmt.Errorf("build agent: %w", err)
+	}
+
+	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, cfg.Agent.BaseURL)
+	smux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
+	smux.Handle("/invoke", invokeH)
+
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Agent.Port), Handler: smux}
+	logger.Info("A2A server listening",
+		"addr", srv.Addr,
+		"invoke", cfg.Agent.BaseURL+"/invoke",
+	)
+	return serveAndShutdown(ctx, srv, hugrClient, logger)
 }
 
 // runWithDevUI starts A2A + ADK REST API + dev UI.
@@ -266,6 +272,7 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 
 	router := mux.NewRouter()
 
+	// OIDC callback routes on a separate ServeMux (gorilla/mux can't use http.ServeMux patterns).
 	authMux := http.NewServeMux()
 	hugrTransport := buildHugrTransport(cfg, logger, authMux)
 	router.PathPrefix("/auth/").Handler(authMux)
@@ -274,33 +281,14 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	if err != nil {
 		return fmt.Errorf("build agent: %w", err)
 	}
-	agentLoader := agent.NewSingleLoader(a)
 
 	// A2A.
-	agentCard := &a2a.AgentCard{
-		Name:               a.Name(),
-		Description:        a.Description(),
-		DefaultInputModes:  []string{"text/plain"},
-		DefaultOutputModes: []string{"text/plain"},
-		URL:                fmt.Sprintf("http://localhost:%d/invoke", cfg.Agent.Port),
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		Skills:             adka2a.BuildAgentSkills(a),
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
-	}
-	router.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, cfg.Agent.BaseURL)
+	router.Handle(a2asrv.WellKnownAgentCardPath, cardH)
+	router.Handle("/invoke", invokeH)
 
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:         a.Name(),
-			Agent:           a,
-			SessionService:  sessionSvc,
-			ArtifactService: artifactSvc,
-		},
-	})
-	reqHandler := a2asrv.NewHandler(executor)
-	router.Handle("/invoke", a2asrv.NewJSONRPCHandler(reqHandler))
-
-	// ADK REST API at /api.
+	// ADK REST API + dev UI.
+	agentLoader := agent.NewSingleLoader(a)
 	memorySvc := memory.InMemoryService()
 	apiServer, err := adkrest.NewServer(adkrest.ServerConfig{
 		SessionService:  sessionSvc,
@@ -317,9 +305,8 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		corsMiddleware(http.StripPrefix("/api", apiServer)),
 	)
 
-	// Dev UI.
 	ui := webui.NewLauncher()
-	apiAddr := fmt.Sprintf("http://localhost:%d/api", cfg.Agent.Port)
+	apiAddr := cfg.Agent.BaseURL + "/api"
 	if _, err := ui.Parse([]string{"-api_server_address", apiAddr}); err != nil {
 		return fmt.Errorf("parse webui flags: %w", err)
 	}
@@ -334,21 +321,10 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Agent.Port), Handler: router}
 	logger.Info("A2A + dev UI server listening",
 		"addr", srv.Addr,
-		"invoke", fmt.Sprintf("http://localhost:%d/invoke", cfg.Agent.Port),
-		"ui", fmt.Sprintf("http://localhost:%d/", cfg.Agent.Port),
+		"invoke", cfg.Agent.BaseURL+"/invoke",
+		"ui", cfg.Agent.BaseURL+"/",
 	)
-
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		logger.Info("shutting down: draining requests")
-		srv.Shutdown(shutdownCtx)
-		logger.Info("shutting down: closing subscriptions")
-		hugrClient.CloseSubscriptions()
-	}()
-
-	return srv.ListenAndServe()
+	return serveAndShutdown(ctx, srv, hugrClient, logger)
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
