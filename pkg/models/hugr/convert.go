@@ -43,13 +43,17 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 			result = append(result, string(b))
 
 		case p.FunctionCall != nil:
+			args := p.FunctionCall.Args
+			if args == nil {
+				args = map[string]any{}
+			}
 			msg := types.LLMMessage{
 				Role:    "assistant",
 				Content: "",
 				ToolCalls: []types.LLMToolCall{{
 					ID:        p.FunctionCall.ID,
 					Name:      p.FunctionCall.Name,
-					Arguments: p.FunctionCall.Args,
+					Arguments: args,
 				}},
 			}
 			b, err := json.Marshal(msg)
@@ -132,9 +136,15 @@ func adkToHugrTools(genaiTools []*genai.Tool) ([]string, error) {
 			} else if decl.Parameters != nil {
 				params = schemaToMap(decl.Parameters)
 			}
-			// OpenAI/Hugr requires parameters to be an object, never null.
+			// OpenAI/Hugr requires parameters to be a valid JSON Schema object.
+			// Must include "type", "properties", and "required" — some model
+			// Jinja templates (Gemma4) crash on undefined fields.
 			if params == nil {
-				params = map[string]any{"type": "object", "properties": map[string]any{}}
+				params = map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+					"required":   []string{},
+				}
 			}
 
 			hugrTool := types.LLMTool{

@@ -23,6 +23,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/models/hugr"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/hugr-lab/query-engine/client"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher"
@@ -34,6 +35,7 @@ import (
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/mcptoolset"
 )
 
 func main() {
@@ -106,9 +108,17 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		client.WithTransport(hugrTransport),
 	)
 
+	// Dynamic toolset: system tools always available, MCP tools added via skill-load.
+	toolset := hugen.NewDynamicToolset()
+
 	// LLM via Hugr.
+	// tool_choice is "required" until a skill is loaded (forces tool calling),
+	// then switches to "auto" so the model can respond with text.
 	llm := hugr.New(hugrClient, cfg.Agent.Model,
 		hugr.WithLogger(logger),
+		hugr.WithToolChoiceFunc(func() string {
+			return "auto"
+		}),
 	)
 
 	// Intent-based router. Factory allows config-driven route changes.
@@ -153,8 +163,28 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		logger.Info("skill catalog loaded", "count", len(skills))
 	}
 
-	// Dynamic toolset: system tools always available, MCP tools added via skill-load.
-	toolset := hugen.NewDynamicToolset()
+	// Pre-load Hugr MCP tools at startup (ADK caches tools per invocation,
+	// so DynamicToolset changes during skill_load don't take effect).
+	mcpEndpoint := os.Getenv("HUGR_MCP_URL")
+	if mcpEndpoint != "" {
+		mcpTransport := &sdkmcp.StreamableClientTransport{
+			Endpoint:             mcpEndpoint,
+			DisableStandaloneSSE: true,
+			HTTPClient:           &http.Client{Transport: hugrTransport},
+		}
+		mcpTools, err := mcptoolset.New(mcptoolset.Config{
+			Transport: mcpTransport,
+		})
+		if err != nil {
+			logger.Error("MCP tools connection failed", "endpoint", mcpEndpoint, "err", err)
+		} else {
+			toolset.AddToolset("mcp:hugr", mcpTools)
+			logger.Info("MCP tools connected", "endpoint", mcpEndpoint)
+		}
+	} else {
+		logger.Warn("HUGR_MCP_URL not set — MCP tools unavailable")
+	}
+
 	tokens := hugen.NewTokenEstimator()
 
 	sysDeps := &system.Deps{

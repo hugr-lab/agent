@@ -64,3 +64,15 @@ func (d *DynamicToolset) HasToolset(name string) bool {
 	_, ok := d.children[name]
 	return ok
 }
+
+// HasSkillToolsets returns true if any skill toolset (prefixed "skill:") is loaded.
+func (d *DynamicToolset) HasSkillToolsets() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for name := range d.children {
+		if len(name) > 6 && name[:6] == "skill:" {
+			return true
+		}
+	}
+	return false
+}

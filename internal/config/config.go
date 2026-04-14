@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -80,6 +81,11 @@ func Load() (*Config, error) {
 	_ = v.ReadInConfig()
 
 	hugrURL := strings.TrimRight(v.GetString("HUGR_URL"), "/")
+
+	// Default HUGR_MCP_URL so skills can reference it via ${HUGR_MCP_URL}.
+	if os.Getenv("HUGR_MCP_URL") == "" {
+		os.Setenv("HUGR_MCP_URL", hugrURL+"/mcp")
+	}
 	port := v.GetInt("AGENT_PORT")
 
 	return &Config{

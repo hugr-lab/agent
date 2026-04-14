@@ -44,10 +44,11 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 // HugrModel implements the ADK model.LLM interface using Hugr GraphQL subscriptions.
 // LLM responses stream via WebSocket as Arrow IPC RecordBatches.
 type HugrModel struct {
-	name      string
-	hugrModel string
-	client    *client.Client
-	logger    *slog.Logger
+	name          string
+	hugrModel     string
+	client        *client.Client
+	logger        *slog.Logger
+	toolChoiceFunc func() string // returns "auto" or "required"; nil defaults to "auto"
 }
 
 // Option configures a HugrModel.
@@ -61,6 +62,13 @@ func WithLogger(l *slog.Logger) Option {
 // WithName sets the ADK model name.
 func WithName(name string) Option {
 	return func(m *HugrModel) { m.name = name }
+}
+
+// WithToolChoiceFunc sets a dynamic tool_choice provider.
+// The function is called on each LLM request to determine tool_choice value.
+// Returns "auto" or "required". If nil, defaults to "auto".
+func WithToolChoiceFunc(f func() string) Option {
+	return func(m *HugrModel) { m.toolChoiceFunc = f }
 }
 
 // New creates a new HugrModel.
@@ -121,7 +129,11 @@ func (m *HugrModel) GenerateContent(
 			}
 			if len(tools) > 0 {
 				vars["tools"] = tools
-				vars["tool_choice"] = "auto"
+				toolChoice := "auto"
+				if m.toolChoiceFunc != nil {
+					toolChoice = m.toolChoiceFunc()
+				}
+				vars["tool_choice"] = toolChoice
 			}
 			m.logger.Debug("hugr tools converted", "count", len(tools))
 		}
@@ -209,6 +221,10 @@ func (m *HugrModel) GenerateContent(
 			}
 			yield(nil, fmt.Errorf("hugrmodel: subscription: %w", err))
 			return
+		}
+
+		if finishEvent.Model == "" && fullContent.Len() == 0 && len(allToolCalls) == 0 {
+			m.logger.Warn("hugr completion: empty response — LLM may have rejected the request (check Hugr server logs)")
 		}
 
 		m.logger.Info("hugr completion",

@@ -67,8 +67,10 @@ type skillListTool struct {
 	deps *Deps
 }
 
-func (t *skillListTool) Name() string        { return "skill_list" }
-func (t *skillListTool) Description() string { return "List available skills the agent can load" }
+func (t *skillListTool) Name() string { return "skill_list" }
+func (t *skillListTool) Description() string {
+	return "Returns a JSON array of available skills with their names and descriptions. Call this FIRST to discover what skills can be loaded. No parameters required."
+}
 func (t *skillListTool) IsLongRunning() bool { return false }
 
 func (t *skillListTool) Declaration() *genai.FunctionDeclaration {
@@ -103,7 +105,7 @@ type skillLoadTool struct {
 
 func (t *skillLoadTool) Name() string { return "skill_load" }
 func (t *skillLoadTool) Description() string {
-	return "Load a skill by name to activate its tools and knowledge"
+	return "Activates a skill by name, loading its instructions and data tools. Call skill_list first to get available names. After loading, new domain-specific tools become available."
 }
 func (t *skillLoadTool) IsLongRunning() bool { return false }
 
@@ -116,7 +118,7 @@ func (t *skillLoadTool) Declaration() *genai.FunctionDeclaration {
 			Properties: map[string]*genai.Schema{
 				"name": {
 					Type:        "STRING",
-					Description: "Name of the skill to load (from skill_list results)",
+					Description: "Skill name exactly as returned by skill_list, e.g. \"hugr-data\"",
 				},
 			},
 			Required: []string{"name"},
@@ -190,7 +192,7 @@ type skillRefTool struct {
 
 func (t *skillRefTool) Name() string { return "skill_ref" }
 func (t *skillRefTool) Description() string {
-	return "Load a reference document from the active skill for deeper knowledge"
+	return "Loads a reference document from a skill for detailed knowledge (e.g. query syntax, filter operators). The list of available references is returned by skill_load."
 }
 func (t *skillRefTool) IsLongRunning() bool { return false }
 
@@ -203,11 +205,11 @@ func (t *skillRefTool) Declaration() *genai.FunctionDeclaration {
 			Properties: map[string]*genai.Schema{
 				"skill": {
 					Type:        "STRING",
-					Description: "Name of the skill that owns the reference",
+					Description: "Skill name, e.g. \"hugr-data\"",
 				},
 				"ref": {
 					Type:        "STRING",
-					Description: "Name of the reference document to load",
+					Description: "Reference document name as returned by skill_load, e.g. \"filters\"",
 				},
 			},
 			Required: []string{"skill", "ref"},

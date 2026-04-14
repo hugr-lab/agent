@@ -15,7 +15,7 @@ type contextStatusTool struct {
 
 func (t *contextStatusTool) Name() string { return "context_status" }
 func (t *contextStatusTool) Description() string {
-	return "Report current context token usage breakdown and budget"
+	return "Returns current token usage: system prompt size, last LLM call tokens, and estimation source. Use before loading large references to check budget."
 }
 func (t *contextStatusTool) IsLongRunning() bool { return false }
 
