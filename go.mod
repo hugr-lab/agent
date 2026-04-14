@@ -6,8 +6,8 @@ require (
 	github.com/a2aproject/a2a-go v0.3.13
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/gorilla/mux v1.8.1
-	github.com/hugr-lab/query-engine/client v0.3.26
-	github.com/hugr-lab/query-engine/types v0.3.26
+	github.com/hugr-lab/query-engine/client v0.3.28
+	github.com/hugr-lab/query-engine/types v0.3.28
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
@@ -24,6 +24,7 @@ require (
 	github.com/awalterschulze/gographviz v2.0.3+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/coder/websocket v1.8.14 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
