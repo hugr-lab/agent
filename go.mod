@@ -1,10 +1,11 @@
-module github.com/hugr-lab/agent
+module github.com/hugr-lab/hugen
 
 go 1.26.1
 
 require (
 	github.com/a2aproject/a2a-go v0.3.13
 	github.com/apache/arrow-go/v18 v18.5.2
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gorilla/mux v1.8.1
 	github.com/hugr-lab/query-engine/client v0.3.28
 	github.com/hugr-lab/query-engine/types v0.3.28
@@ -14,6 +15,7 @@ require (
 	golang.org/x/sync v0.20.0
 	google.golang.org/adk v1.1.0
 	google.golang.org/genai v1.53.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -27,7 +29,6 @@ require (
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
@@ -92,7 +93,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260406210006-6f92a3bedf2d // indirect
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	rsc.io/omap v1.2.0 // indirect
 	rsc.io/ordered v1.1.1 // indirect
 )

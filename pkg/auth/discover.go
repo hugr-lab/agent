@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -35,7 +36,7 @@ func DiscoverOIDCFromHugr(ctx context.Context, hugrURL string) (*HugrOIDCConfig,
 	}
 
 	var cfg HugrOIDCConfig
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode /auth/config: %w", err)
 	}
 	if cfg.Issuer == "" || cfg.ClientID == "" {

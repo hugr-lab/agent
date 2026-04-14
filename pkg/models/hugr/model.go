@@ -1,9 +1,8 @@
-package hugrmodel
+package hugr
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -36,6 +35,7 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 				tool_calls
 				prompt_tokens
 				completion_tokens
+				thought_signature
 			}
 		}
 	}
@@ -44,10 +44,13 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 // HugrModel implements the ADK model.LLM interface using Hugr GraphQL subscriptions.
 // LLM responses stream via WebSocket as Arrow IPC RecordBatches.
 type HugrModel struct {
-	name      string
-	hugrModel string
-	client    *client.Client
-	logger    *slog.Logger
+	name           string
+	hugrModel      string
+	client         *client.Client
+	logger         *slog.Logger
+	maxTokens      int            // default max completion tokens (0 = provider default)
+	temperature    *float32       // default temperature (nil = provider default)
+	toolChoiceFunc func() string  // returns "auto" or "required"; nil defaults to "auto"
 }
 
 // Option configures a HugrModel.
@@ -61,6 +64,24 @@ func WithLogger(l *slog.Logger) Option {
 // WithName sets the ADK model name.
 func WithName(name string) Option {
 	return func(m *HugrModel) { m.name = name }
+}
+
+// WithMaxTokens sets the default max completion tokens per LLM call.
+func WithMaxTokens(n int) Option {
+	return func(m *HugrModel) { m.maxTokens = n }
+}
+
+// WithTemperature sets the default temperature for LLM calls.
+// Overrides the server-side default. Can be overridden by ADK request config.
+func WithTemperature(t float32) Option {
+	return func(m *HugrModel) { m.temperature = &t }
+}
+
+// WithToolChoiceFunc sets a dynamic tool_choice provider.
+// The function is called on each LLM request to determine tool_choice value.
+// Returns "auto" or "required". If nil, defaults to "auto".
+func WithToolChoiceFunc(f func() string) Option {
+	return func(m *HugrModel) { m.toolChoiceFunc = f }
 }
 
 // New creates a new HugrModel.
@@ -104,6 +125,14 @@ func (m *HugrModel) GenerateContent(
 			"messages": messages,
 		}
 
+		// Defaults from model config, overridden by ADK request.
+		if m.maxTokens > 0 {
+			vars["max_tokens"] = m.maxTokens
+		}
+		if m.temperature != nil {
+			vars["temperature"] = *m.temperature
+		}
+
 		if req.Config != nil {
 			if req.Config.MaxOutputTokens != 0 {
 				vars["max_tokens"] = req.Config.MaxOutputTokens
@@ -121,7 +150,11 @@ func (m *HugrModel) GenerateContent(
 			}
 			if len(tools) > 0 {
 				vars["tools"] = tools
-				vars["tool_choice"] = "auto"
+				toolChoice := "auto"
+				if m.toolChoiceFunc != nil {
+					toolChoice = m.toolChoiceFunc()
+				}
+				vars["tool_choice"] = toolChoice
 			}
 			m.logger.Debug("hugr tools converted", "count", len(tools))
 		}
@@ -146,68 +179,93 @@ func (m *HugrModel) GenerateContent(
 
 		// Hugr LLM subscriptions return events with an empty path.
 		const completionPath = ""
-
-		err = ReadSubscription(ctx, sub, map[string]BatchHandler{
-			completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
-				schema := batch.Schema()
-				for i := 0; i < int(batch.NumRows()); i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					default:
-					}
-					ev := readStreamEvent(schema, batch, i)
-
-					switch ev.Type {
-					case "content_delta":
-						fullContent.WriteString(ev.Content)
-						if !yield(&model.LLMResponse{
-							Content: &genai.Content{
-								Role:  "model",
-								Parts: []*genai.Part{{Text: ev.Content}},
-							},
-							Partial: true,
-						}, nil) {
-							return ErrStopReading
+		out := make(chan *model.LLMResponse)
+		readCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			defer close(out)
+			err = ReadSubscription(readCtx, sub, map[string]BatchHandler{
+				completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
+					schema := batch.Schema()
+					for i := 0; i < int(batch.NumRows()); i++ {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						default:
 						}
+						ev := readStreamEvent(schema, batch, i)
 
-					case "reasoning":
-						if ev.Content != "" {
-							if !yield(&model.LLMResponse{
-								Content: &genai.Content{
-									Role:  "model",
-									Parts: []*genai.Part{{Text: ev.Content, Thought: true}},
-								},
-								Partial: true,
-							}, nil) {
-								return ErrStopReading
+						switch ev.Type {
+						case "content_delta":
+							fullContent.WriteString(ev.Content)
+							if stream {
+								select {
+								case <-ctx.Done():
+									return ctx.Err()
+								case out <- &model.LLMResponse{
+									Content: &genai.Content{
+										Role:  "model",
+										Parts: []*genai.Part{{Text: ev.Content}},
+									},
+									Partial: true,
+								}:
+								}
 							}
-						}
+						case "reasoning":
+							if ev.Content != "" && stream {
+								select {
+								case <-ctx.Done():
+									return ctx.Err()
+								case out <- &model.LLMResponse{
+									Content: &genai.Content{
+										Role:  "model",
+										Parts: []*genai.Part{{Text: ev.Content, Thought: true}},
+									},
+									Partial: true,
+								}:
+								}
+							}
+						case "tool_use":
+							if ev.ToolCalls != "" {
+								tc, err := parseToolCalls(ev.ToolCalls)
+								if err != nil {
+									return fmt.Errorf("parse tool_use: %w", err)
+								}
+								allToolCalls = append(allToolCalls, tc...)
+							}
 
-					case "tool_use":
-						if ev.ToolCalls != "" {
-							allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
-						}
+						case "finish":
+							finishEvent = ev
+							if ev.ToolCalls != "" {
+								tc, err := parseToolCalls(ev.ToolCalls)
+								if err != nil {
+									return fmt.Errorf("parse finish tool_calls: %w", err)
+								}
+								allToolCalls = append(allToolCalls, tc...)
+							}
 
-					case "finish":
-						finishEvent = ev
-						if ev.ToolCalls != "" {
-							allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
+						case "error":
+							return fmt.Errorf("stream error: %s", ev.Content)
 						}
-
-					case "error":
-						return fmt.Errorf("stream error: %s", ev.Content)
 					}
+					return nil
+				},
+			})
+		}()
+		for item := range out {
+			if item != nil {
+				if !yield(item, nil) {
+					return
 				}
-				return nil
-			},
-		})
-		if err != nil {
-			// ErrStopReading means the consumer stopped — don't yield anymore.
-			if errors.Is(err, ErrStopReading) {
-				return
 			}
+		}
+		if err != nil {
 			yield(nil, fmt.Errorf("hugrmodel: subscription: %w", err))
+			return
+		}
+
+		if finishEvent.Model == "" && fullContent.Len() == 0 && len(allToolCalls) == 0 {
+			yield(nil, fmt.Errorf("hugrmodel: empty response from LLM — provider may have returned an error (rate limit, invalid request). Check Hugr server logs"))
 			return
 		}
 
@@ -228,6 +286,7 @@ func (m *HugrModel) GenerateContent(
 			CompletionTokens: finishEvent.CompletionTokens,
 			TotalTokens:      finishEvent.PromptTokens + finishEvent.CompletionTokens,
 			ToolCalls:        allToolCalls,
+			ThoughtSignature: finishEvent.ThoughtSignature,
 		}
 
 		yield(&model.LLMResponse{
@@ -263,6 +322,8 @@ func readStreamEvent(schema *arrow.Schema, batch arrow.RecordBatch, rowIdx int) 
 			ev.PromptTokens = intVal(val)
 		case "completion_tokens":
 			ev.CompletionTokens = intVal(val)
+		case "thought_signature":
+			ev.ThoughtSignature = stringVal(val)
 		}
 	}
 	return ev
@@ -309,39 +370,41 @@ func intVal(v any) int {
 //   - Anthropic/Gemini streaming: tool calls not yet sent in stream events.
 //
 // This function handles all variants.
-func parseToolCalls(raw string) []types.LLMToolCall {
+func parseToolCalls(raw string) ([]types.LLMToolCall, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return nil, nil
+	}
+
+	truncated := raw
+	if len(truncated) > 200 {
+		truncated = truncated[:200] + "..."
 	}
 
 	switch {
 	case strings.HasPrefix(raw, "["):
-		// Standard format: [{id, name, arguments}, ...]
 		var calls []types.LLMToolCall
 		if err := json.Unmarshal([]byte(raw), &calls); err != nil {
-			return nil
+			return nil, fmt.Errorf("unmarshal tool_calls array: %w (raw: %s)", err, truncated)
 		}
-		return calls
+		return calls, nil
 
 	case strings.HasPrefix(raw, "{"):
-		// Single object — try as LLMToolCall first.
 		var tc types.LLMToolCall
 		if err := json.Unmarshal([]byte(raw), &tc); err != nil {
-			return nil
+			return nil, fmt.Errorf("unmarshal tool_call object: %w (raw: %s)", err, truncated)
 		}
 		if tc.Name != "" {
-			return []types.LLMToolCall{tc}
+			return []types.LLMToolCall{tc}, nil
 		}
 		// Raw arguments without name/id wrapper (OpenAI streaming via Hugr).
-		// Arguments will be matched to the tool by ADK.
 		var args any
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return nil
+			return nil, fmt.Errorf("unmarshal tool_call args: %w (raw: %s)", err, truncated)
 		}
-		return []types.LLMToolCall{{Arguments: args}}
+		return []types.LLMToolCall{{Arguments: args}}, nil
 
 	default:
-		return nil
+		return nil, fmt.Errorf("unexpected tool_calls format (raw: %s)", truncated)
 	}
 }

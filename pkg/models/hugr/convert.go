@@ -1,9 +1,10 @@
 // Package hugrmodel implements ADK model.LLM interface using Hugr GraphQL.
-package hugrmodel
+package hugr
 
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/hugr-lab/query-engine/types"
 
@@ -15,6 +16,9 @@ import (
 func adkToHugrMessages(contents []*genai.Content) ([]string, error) {
 	var messages []string
 	for _, c := range contents {
+		if c == nil {
+			continue
+		}
 		msgs, err := contentToHugrMessages(c)
 		if err != nil {
 			return nil, fmt.Errorf("convert content (role=%s): %w", c.Role, err)
@@ -28,50 +32,85 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 	role := mapRole(c.Role)
 	var result []string
 
+	// Collect all function calls and text parts separately.
+	// OpenAI requires all tool_calls from one turn in a single assistant message.
+	var textParts []string
+	var toolCalls []types.LLMToolCall
+	var toolResponses []types.LLMMessage
+
+	// Gemini 2.5+: capture ThoughtSignature from the first functionCall Part.
+	// ADK stores it on genai.Part; Hugr expects it on LLMMessage level.
+	var thoughtSig string
+
 	for _, p := range c.Parts {
 		switch {
-		case p.Text != "":
-			msg := types.LLMMessage{
-				Role:    role,
-				Content: p.Text,
-			}
-			b, err := json.Marshal(msg)
-			if err != nil {
-				return nil, fmt.Errorf("marshal text message: %w", err)
-			}
-			result = append(result, string(b))
-
 		case p.FunctionCall != nil:
-			msg := types.LLMMessage{
-				Role:    "assistant",
-				Content: "",
-				ToolCalls: []types.LLMToolCall{{
-					ID:        p.FunctionCall.ID,
-					Name:      p.FunctionCall.Name,
-					Arguments: p.FunctionCall.Args,
-				}},
+			args := p.FunctionCall.Args
+			if args == nil {
+				args = map[string]any{}
 			}
-			b, err := json.Marshal(msg)
-			if err != nil {
-				return nil, fmt.Errorf("marshal function call message: %w", err)
+			toolCalls = append(toolCalls, types.LLMToolCall{
+				ID:        p.FunctionCall.ID,
+				Name:      p.FunctionCall.Name,
+				Arguments: args,
+			})
+			if thoughtSig == "" && len(p.ThoughtSignature) > 0 {
+				thoughtSig = string(p.ThoughtSignature)
 			}
-			result = append(result, string(b))
 
 		case p.FunctionResponse != nil:
-			msg := types.LLMMessage{
+			toolResponses = append(toolResponses, types.LLMMessage{
 				Role:       "tool",
 				Content:    formatFunctionResponse(p.FunctionResponse.Response),
 				ToolCallID: p.FunctionResponse.ID,
-			}
-			b, err := json.Marshal(msg)
-			if err != nil {
-				return nil, fmt.Errorf("marshal function response message: %w", err)
-			}
-			result = append(result, string(b))
+			})
+
+		case p.Thought:
+			// Skip thinking content — Hugr LLMMessage has no thought field.
+			// ThoughtSignature on the first functionCall Part provides continuity.
+
+		case p.Text != "":
+			textParts = append(textParts, p.Text)
 		}
 	}
 
-	// If content has multiple text parts, merge them into one message.
+	// Emit text + tool_calls as a single assistant message (OpenAI requires
+	// all tool_calls from one turn in one message).
+	if len(toolCalls) > 0 {
+		text := strings.Join(textParts, "")
+		msg := types.LLMMessage{
+			Role:             "assistant",
+			Content:          text,
+			ToolCalls:        toolCalls,
+			ThoughtSignature: thoughtSig,
+		}
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("marshal assistant message: %w", err)
+		}
+		result = append(result, string(b))
+	} else if len(textParts) > 0 {
+		msg := types.LLMMessage{
+			Role:    role,
+			Content: strings.Join(textParts, ""),
+		}
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("marshal text message: %w", err)
+		}
+		result = append(result, string(b))
+	}
+
+	// Emit each tool response as a separate message.
+	for _, tr := range toolResponses {
+		b, err := json.Marshal(tr)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool response: %w", err)
+		}
+		result = append(result, string(b))
+	}
+
+	// If content had parts but none matched, emit an empty message.
 	if len(result) == 0 && len(c.Parts) > 0 {
 		msg := types.LLMMessage{Role: role, Content: ""}
 		b, _ := json.Marshal(msg)
@@ -123,11 +162,23 @@ func adkToHugrTools(genaiTools []*genai.Tool) ([]string, error) {
 		for _, decl := range t.FunctionDeclarations {
 			// Prefer ParametersJsonSchema (raw JSON Schema from MCP)
 			// over Parameters (*genai.Schema which uses UPPERCASE types).
+			// For genai.Schema, convert to raw map to normalize type names
+			// (OBJECT→object, STRING→string) since Hugr expects OpenAI format.
 			var params any
 			if decl.ParametersJsonSchema != nil {
 				params = decl.ParametersJsonSchema
 			} else if decl.Parameters != nil {
-				params = decl.Parameters
+				params = schemaToMap(decl.Parameters)
+			}
+			// OpenAI/Hugr requires parameters to be a valid JSON Schema object.
+			// Must include "type", "properties", and "required" — some model
+			// Jinja templates (Gemma4) crash on undefined fields.
+			if params == nil {
+				params = map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+					"required":   []string{},
+				}
 			}
 
 			hugrTool := types.LLMTool{
@@ -153,15 +204,20 @@ func hugrResultToADKContent(result types.LLMResult) *genai.Content {
 		parts = append(parts, &genai.Part{Text: result.Content})
 	}
 
-	for _, tc := range result.ToolCalls {
+	for i, tc := range result.ToolCalls {
 		args := normalizeArgs(tc.Arguments)
-		parts = append(parts, &genai.Part{
+		part := &genai.Part{
 			FunctionCall: &genai.FunctionCall{
 				ID:   tc.ID,
 				Name: tc.Name,
 				Args: args,
 			},
-		})
+		}
+		// Gemini 2.5+: ThoughtSignature goes on the first functionCall Part only.
+		if i == 0 && result.ThoughtSignature != "" {
+			part.ThoughtSignature = []byte(result.ThoughtSignature)
+		}
+		parts = append(parts, part)
 	}
 
 	if len(parts) == 0 {
@@ -198,6 +254,37 @@ func normalizeArgs(v any) map[string]any {
 		}
 		return m
 	}
+}
+
+// schemaToMap converts genai.Schema to a JSON Schema map with lowercase types.
+// ADK uses UPPERCASE type names (OBJECT, STRING) but Hugr/OpenAI expects lowercase.
+func schemaToMap(s *genai.Schema) map[string]any {
+	if s == nil {
+		return nil
+	}
+	m := map[string]any{
+		"type": strings.ToLower(string(s.Type)),
+	}
+	if s.Description != "" {
+		m["description"] = s.Description
+	}
+	if len(s.Required) > 0 {
+		m["required"] = s.Required
+	}
+	if len(s.Enum) > 0 {
+		m["enum"] = s.Enum
+	}
+	if s.Properties != nil {
+		props := make(map[string]any, len(s.Properties))
+		for k, v := range s.Properties {
+			props[k] = schemaToMap(v)
+		}
+		m["properties"] = props
+	}
+	if s.Items != nil {
+		m["items"] = schemaToMap(s.Items)
+	}
+	return m
 }
 
 // mapFinishReason converts Hugr finish_reason to ADK FinishReason.

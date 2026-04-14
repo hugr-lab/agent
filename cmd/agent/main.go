@@ -9,24 +9,29 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"github.com/hugr-lab/agent/internal/config"
-	"github.com/hugr-lab/agent/pkg/auth"
-	"github.com/hugr-lab/agent/pkg/hugrmodel"
+	"github.com/hugr-lab/hugen/adapters/file"
+	"github.com/hugr-lab/hugen/internal/config"
+	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models/hugr"
+	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/hugr-lab/query-engine/client"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/web/webui"
 	"google.golang.org/adk/memory"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/server/adkrest"
@@ -105,41 +110,139 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		client.WithTransport(hugrTransport),
 	)
 
-	llm := hugrmodel.New(hugrClient, cfg.Agent.Model,
-		hugrmodel.WithLogger(logger),
-	)
+	// Default HUGR_MCP_URL so skills' mcp.yaml can reference ${HUGR_MCP_URL}.
+	if os.Getenv("HUGR_MCP_URL") == "" {
+		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
+	}
 
+	// Load YAML config (model, max_tokens, routes, skills path).
+	yamlCfg, err := file.NewConfigProvider("config.yaml")
+	if err != nil {
+		logger.Debug("config.yaml not loaded", "err", err)
+	} else {
+		if m := yamlCfg.GetString("llm.model"); m != "" {
+			cfg.Agent.Model = m
+		}
+		if mt := yamlCfg.GetInt("llm.max_tokens"); mt > 0 {
+			cfg.Agent.MaxTokens = mt
+		}
+		if t := yamlCfg.GetFloat64("llm.temperature"); t > 0 {
+			cfg.Agent.Temperature = float32(t)
+		}
+		if sp := yamlCfg.GetString("skills.path"); sp != "" {
+			cfg.Agent.SkillsPath = sp
+		}
+	}
+
+	// Dynamic toolset: system tools always available, MCP tools added at startup.
+	toolset := hugen.NewDynamicToolset()
+
+	// LLM via Hugr.
+	llmOpts := []hugr.Option{
+		hugr.WithLogger(logger),
+		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
+		hugr.WithToolChoiceFunc(func() string {
+			return "auto"
+		}),
+	}
+	if cfg.Agent.Temperature > 0 {
+		llmOpts = append(llmOpts, hugr.WithTemperature(cfg.Agent.Temperature))
+	}
+	llm := hugr.New(hugrClient, cfg.Agent.Model, llmOpts...)
+
+	// Intent-based router. Factory allows config-driven route changes.
+	router := intent.NewRouter(llm)
+	router.WithFactory(func(modelName string) model.LLM {
+		return hugr.New(hugrClient, modelName,
+			hugr.WithLogger(logger),
+			hugr.WithMaxTokens(cfg.Agent.MaxTokens),
+		)
+	}).WithLogger(logger)
+
+	if yamlCfg != nil {
+		router.LoadRoutesFromConfig(yamlCfg)
+		yamlCfg.OnChange(func() {
+			logger.Info("config.yaml changed, reloading routes")
+			router.LoadRoutesFromConfig(yamlCfg)
+		})
+	}
+
+	// Constitution (base system prompt).
 	constitution, err := os.ReadFile(cfg.Agent.Constitution)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
 	}
+	prompt := hugen.NewPromptBuilder(string(constitution))
 
-	mcpTransport := &sdkmcp.StreamableClientTransport{
-		Endpoint:             cfg.Hugr.MCPUrl,
-		DisableStandaloneSSE: true,
-		HTTPClient:           &http.Client{Transport: hugrTransport},
+	// Skill catalog for prompt injection.
+	skillsPath := cfg.Agent.SkillsPath
+	if skillsPath == "" {
+		skillsPath = "./skills"
+	}
+	skillProvider := file.NewSkillProvider(skillsPath)
+	skills, err := skillProvider.ListMeta(context.Background())
+	if err != nil {
+		logger.Warn("failed to list skills", "err", err)
+	} else if len(skills) > 0 {
+		prompt.SetDefaultCatalog(skills)
+		logger.Info("skill catalog loaded", "count", len(skills))
 	}
 
-	mcpTools, err := mcptoolset.New(mcptoolset.Config{
-		Transport: mcpTransport,
+	// Pre-create MCP toolsets at startup for fast skill_load.
+	// They are NOT added to the global toolset — skill_load adds them
+	// per-session so tools only appear after the LLM loads a skill.
+	mcpToolsets := make(map[string]tool.Toolset)
+	mcpEndpoint := os.Getenv("HUGR_MCP_URL")
+	if mcpEndpoint != "" {
+		mcpTransport := &sdkmcp.StreamableClientTransport{
+			Endpoint:             mcpEndpoint,
+			DisableStandaloneSSE: true,
+			HTTPClient:           &http.Client{Transport: hugrTransport},
+		}
+		mcpTools, err := mcptoolset.New(mcptoolset.Config{
+			Transport: mcpTransport,
+		})
+		if err != nil {
+			logger.Error("MCP tools connection failed", "endpoint", mcpEndpoint, "err", err)
+		} else {
+			mcpToolsets[mcpEndpoint] = mcpTools
+			logger.Info("MCP tools pre-connected", "endpoint", mcpEndpoint)
+		}
+	} else {
+		logger.Warn("HUGR_MCP_URL not set — MCP tools unavailable")
+	}
+
+	tokens := hugen.NewTokenEstimator()
+
+	sysDeps := &system.Deps{
+		Skills:      skillProvider,
+		Prompt:      prompt,
+		Toolset:     toolset,
+		Tokens:      tokens,
+		Logger:      logger,
+		MCPToolsets: mcpToolsets,
+	}
+	toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
+
+	debug := os.Getenv("LOG_LEVEL") == "debug"
+
+	a, err := hugen.NewAgent(hugen.AgentConfig{
+		Router:  router,
+		Toolset: toolset,
+		Prompt:  prompt,
+		Tokens:  tokens,
+		Logger:  logger,
+		Debug:   debug,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("create MCP toolset: %w", err)
+		return nil, nil, fmt.Errorf("create agent: %w", err)
 	}
 
-	a, err := llmagent.New(llmagent.Config{
-		Name:        "hugr_agent",
-		Description: "Hugr Data Mesh Agent — explores data sources, builds queries, presents results",
-		Model:       llm,
-		Instruction: string(constitution),
-		Toolsets:    []tool.Toolset{mcpTools},
-	})
-	if err != nil {
-		return nil, nil, err
-	}
+	// Background cleanup of stale session state (1 hour TTL).
+	hugen.StartSessionCleanup(context.Background(), prompt, toolset, 1*time.Hour, logger)
+
 	return a, hugrClient, nil
 }
-
 
 // buildHugrTransport creates the HTTP transport for all Hugr communication.
 //
@@ -302,7 +405,7 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		return fmt.Errorf("create REST server: %w", err)
 	}
 	router.PathPrefix("/api").Handler(
-		corsMiddleware(http.StripPrefix("/api", apiServer)),
+		corsMiddleware(cfg.Agent.BaseURL, http.StripPrefix("/api", apiServer)),
 	)
 
 	ui := webui.NewLauncher()
@@ -327,9 +430,15 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	return serveAndShutdown(ctx, srv, hugrClient, logger)
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+func corsMiddleware(baseURL string, next http.Handler) http.Handler {
+	// Extract origin from baseURL (e.g. "http://localhost:10000" → same).
+	// Allow "*" only for localhost; restrict to baseURL origin otherwise.
+	origin := baseURL
+	if strings.Contains(baseURL, "localhost") || strings.Contains(baseURL, "127.0.0.1") {
+		origin = "*"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
@@ -346,8 +455,9 @@ type headerTransport struct {
 }
 
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
 	for k, v := range t.headers {
-		req.Header.Set(k, v)
+		clone.Header.Set(k, v)
 	}
-	return t.base.RoundTrip(req)
+	return t.base.RoundTrip(clone)
 }

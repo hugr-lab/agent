@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -39,6 +40,7 @@ type OIDCStore struct {
 	refreshToken string
 	expiresAt    time.Time
 	ready        chan struct{} // closed when first login completes
+	readyOnce    sync.Once
 }
 
 // oidcDiscovery is a subset of OpenID Connect Discovery response.
@@ -159,11 +161,7 @@ func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
 		s.mu.Unlock()
 
 		// Signal that first login is complete.
-		select {
-		case <-s.ready:
-		default:
-			close(s.ready)
-		}
+		s.readyOnce.Do(func() { close(s.ready) })
 
 		s.logger.Info("OIDC login successful")
 		w.Header().Set("Content-Type", "text/html")
@@ -228,7 +226,7 @@ func (s *OIDCStore) tokenRequest(ctx context.Context, data url.Values) (*oidcTok
 	defer resp.Body.Close()
 
 	var result oidcTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("oidc token response: %w", err)
 	}
 	if result.Error != "" {
@@ -258,7 +256,7 @@ func discover(ctx context.Context, issuerURL string) (*oidcDiscovery, error) {
 	}
 
 	var disc oidcDiscovery
-	if err := json.NewDecoder(resp.Body).Decode(&disc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&disc); err != nil {
 		return nil, err
 	}
 	if disc.AuthorizationEndpoint == "" || disc.TokenEndpoint == "" {
@@ -287,9 +285,9 @@ func generateState() string {
 func openBrowser(url string) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", url).Start()
+		return exec.Command("open", url).Run()
 	case "linux":
-		return exec.Command("xdg-open", url).Start()
+		return exec.Command("xdg-open", url).Run()
 	default:
 		return nil
 	}

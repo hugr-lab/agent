@@ -1,0 +1,11 @@
+llm:
+  model: gemini-pro-3-1
+  max_tokens: 8096
+  temperature: 0.4
+  routes:
+    default: gemini-pro-3-1
+    # tool_calling: claude-haiku
+    # summarization: claude-haiku
+
+skills:
+  path: ./skills
