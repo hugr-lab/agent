@@ -224,7 +224,8 @@ func (m *HugrModel) GenerateContent(
 		}
 
 		if finishEvent.Model == "" && fullContent.Len() == 0 && len(allToolCalls) == 0 {
-			m.logger.Warn("hugr completion: empty response — LLM may have rejected the request (check Hugr server logs)")
+			yield(nil, fmt.Errorf("hugrmodel: empty response from LLM — provider may have returned an error (rate limit, invalid request). Check Hugr server logs"))
+			return
 		}
 
 		m.logger.Info("hugr completion",
