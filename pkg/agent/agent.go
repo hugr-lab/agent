@@ -35,13 +35,13 @@ type AgentConfig struct {
 // and intent-based LLM routing.
 //
 // The agent uses llmagent.New() with:
-//   - InstructionProvider → PromptBuilder.Build() (dynamic system prompt)
+//   - InstructionProvider → PromptBuilder.BuildForSession() (per-session system prompt)
 //   - Toolsets → [DynamicToolset] (tools change when skills load/unload)
 //   - Model → IntentLLM Router (routes by intent, Phase 2: single model)
 //   - AfterModelCallbacks → TokenEstimator calibration
 //
-// A future phase may replace this with a fully custom agent.New(Config{Run: ...})
-// for finer-grained streaming control.
+// Skill state (instructions, catalog, references) is session-scoped inside
+// PromptBuilder, so parallel sessions never interfere with each other.
 func NewAgent(cfg AgentConfig) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:        "hugr_agent",
@@ -49,8 +49,8 @@ func NewAgent(cfg AgentConfig) (agent.Agent, error) {
 		Model:       cfg.Router,
 		Toolsets:    []tool.Toolset{cfg.Toolset},
 
-		InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
-			return cfg.Prompt.Build(), nil
+		InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+			return cfg.Prompt.BuildForSession(ctx.SessionID()), nil
 		},
 
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
@@ -62,14 +62,14 @@ func NewAgent(cfg AgentConfig) (agent.Agent, error) {
 // calibrateTokens returns a callback that feeds LLM usage metadata
 // into the TokenEstimator after each model response.
 func calibrateTokens(cfg AgentConfig) llmagent.AfterModelCallback {
-	return func(_ agent.CallbackContext, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+	return func(ctx agent.CallbackContext, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
 		if resp == nil || resp.UsageMetadata == nil {
 			return nil, nil
 		}
 
 		promptTokens := int(resp.UsageMetadata.PromptTokenCount)
 		completionTokens := int(resp.UsageMetadata.CandidatesTokenCount)
-		promptChars := cfg.Prompt.CharCount()
+		promptChars := cfg.Prompt.CharCountForSession(ctx.SessionID())
 
 		if promptTokens > 0 {
 			cfg.Tokens.Calibrate(promptChars, promptTokens, completionTokens)

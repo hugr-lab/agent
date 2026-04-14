@@ -14,7 +14,7 @@ type stubToolset struct {
 	tools []tool.Tool
 }
 
-func (s *stubToolset) Name() string                                    { return s.name }
+func (s *stubToolset) Name() string                                        { return s.name }
 func (s *stubToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) { return s.tools, nil }
 
 type stubTool struct {
@@ -75,4 +75,36 @@ func TestDynamicToolset_EmptyTools(t *testing.T) {
 	tools, err := dt.Tools(nil)
 	require.NoError(t, err)
 	assert.Empty(t, tools)
+}
+
+func TestDynamicToolset_SessionScoped(t *testing.T) {
+	dt := NewDynamicToolset()
+
+	// Global tool — visible to all.
+	dt.AddToolset("system", &stubToolset{name: "system", tools: []tool.Tool{&stubTool{name: "skill_list"}}})
+
+	// Session A gets MCP tools.
+	mcpTS := &stubToolset{name: "mcp", tools: []tool.Tool{&stubTool{name: "query"}, &stubTool{name: "schema"}}}
+	dt.AddSessionToolset("session-A", "mcp:hugr-data", mcpTS)
+
+	// Without context (nil) — only global tools.
+	tools, err := dt.Tools(nil)
+	require.NoError(t, err)
+	assert.Len(t, tools, 1)
+	assert.Equal(t, "skill_list", tools[0].Name())
+}
+
+func TestDynamicToolset_SessionCleanup(t *testing.T) {
+	dt := NewDynamicToolset()
+
+	dt.AddToolset("system", &stubToolset{name: "system", tools: []tool.Tool{&stubTool{name: "sys"}}})
+	dt.AddSessionToolset("s1", "mcp:data", &stubToolset{name: "mcp", tools: []tool.Tool{&stubTool{name: "q1"}}})
+	dt.AddSessionToolset("s1", "mcp:search", &stubToolset{name: "mcp2", tools: []tool.Tool{&stubTool{name: "q2"}}})
+
+	dt.CleanupSession("s1")
+
+	// Only global tools remain.
+	tools, err := dt.Tools(nil)
+	require.NoError(t, err)
+	assert.Len(t, tools, 1)
 }

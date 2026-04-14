@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
 )
 
@@ -170,12 +171,14 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	if err != nil {
 		logger.Warn("failed to list skills", "err", err)
 	} else if len(skills) > 0 {
-		prompt.SetCatalog(skills)
+		prompt.SetDefaultCatalog(skills)
 		logger.Info("skill catalog loaded", "count", len(skills))
 	}
 
-	// Pre-load Hugr MCP tools at startup (ADK caches tools per invocation,
-	// so DynamicToolset changes during skill_load don't take effect).
+	// Pre-create MCP toolsets at startup for fast skill_load.
+	// They are NOT added to the global toolset — skill_load adds them
+	// per-session so tools only appear after the LLM loads a skill.
+	mcpToolsets := make(map[string]tool.Toolset)
 	mcpEndpoint := os.Getenv("HUGR_MCP_URL")
 	if mcpEndpoint != "" {
 		mcpTransport := &sdkmcp.StreamableClientTransport{
@@ -189,8 +192,8 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		if err != nil {
 			logger.Error("MCP tools connection failed", "endpoint", mcpEndpoint, "err", err)
 		} else {
-			toolset.AddToolset("mcp:hugr", mcpTools)
-			logger.Info("MCP tools connected", "endpoint", mcpEndpoint)
+			mcpToolsets[mcpEndpoint] = mcpTools
+			logger.Info("MCP tools pre-connected", "endpoint", mcpEndpoint)
 		}
 	} else {
 		logger.Warn("HUGR_MCP_URL not set — MCP tools unavailable")
@@ -199,11 +202,12 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	tokens := hugen.NewTokenEstimator()
 
 	sysDeps := &system.Deps{
-		Skills:  skillProvider,
-		Prompt:  prompt,
-		Toolset: toolset,
-		Tokens:  tokens,
-		Logger:  logger,
+		Skills:      skillProvider,
+		Prompt:      prompt,
+		Toolset:     toolset,
+		Tokens:      tokens,
+		Logger:      logger,
+		MCPToolsets: mcpToolsets,
 	}
 	toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
 

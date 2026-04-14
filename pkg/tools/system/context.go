@@ -7,7 +7,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// contextStatusTool reports current context token usage.
+// contextStatusTool reports current context token usage for the active session.
 type contextStatusTool struct {
 	prompt *hugen.PromptBuilder
 	tokens *hugen.TokenEstimator
@@ -30,8 +30,8 @@ func (t *contextStatusTool) ProcessRequest(_ tool.Context, req *model.LLMRequest
 	return packTool(req, t.Name(), t.Declaration(), t)
 }
 
-func (t *contextStatusTool) Run(_ tool.Context, _ any) (map[string]any, error) {
-	promptText := t.prompt.Build()
+func (t *contextStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
+	promptText := t.prompt.BuildForSession(ctx.SessionID())
 	estimatedPromptTokens := t.tokens.Estimate(promptText)
 	lastPrompt, lastCompletion := t.tokens.LastUsage()
 

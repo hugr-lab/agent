@@ -21,7 +21,7 @@ type Deps struct {
 	Toolset     *hugen.DynamicToolset
 	Tokens      *hugen.TokenEstimator
 	Logger      *slog.Logger
-	activeSkill string // currently loaded skill name (empty = none)
+	MCPToolsets map[string]tool.Toolset // endpoint URL → pre-created MCP toolset
 }
 
 // packTool registers a tool's function declaration into the LLM request.
@@ -87,8 +87,8 @@ func (t *skillListTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 		return nil, fmt.Errorf("skill_list: %w", err)
 	}
 
-	// Also inject catalog into prompt so LLM sees skill descriptions.
-	t.deps.Prompt.SetCatalog(skills)
+	// Inject catalog into this session's prompt so LLM sees skill descriptions.
+	t.deps.Prompt.SetCatalog(ctx.SessionID(), skills)
 
 	data, _ := json.Marshal(skills)
 	return map[string]any{"skills": json.RawMessage(data)}, nil
@@ -142,18 +142,28 @@ func (t *skillLoadTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 		return nil, fmt.Errorf("skill_load: %w", err)
 	}
 
-	// Unload previous skill instructions/references if switching skills.
-	if prev := t.deps.activeSkill; prev != "" && prev != name {
-		t.deps.Prompt.ClearSkill()
-		t.deps.Logger.Info("skill_load: unloaded previous skill", "skill", prev)
-	}
-	t.deps.activeSkill = name
+	sessionID := ctx.SessionID()
 
-	// Inject skill instructions into prompt and clear catalog.
-	// MCP tools are pre-loaded at startup — skill_load only manages
-	// instructions and references, not MCP connections.
-	t.deps.Prompt.SetSkillInstructions(skill.Instructions)
-	t.deps.Prompt.ClearCatalog()
+	// Unload previous skill instructions/references and MCP tools if switching skills.
+	if prev := t.deps.Prompt.ActiveSkill(sessionID); prev != "" && prev != name {
+		t.deps.Prompt.ClearSkill(sessionID)
+		t.deps.Toolset.RemoveSessionToolset(sessionID, "mcp:"+prev)
+		t.deps.Logger.Info("skill_load: unloaded previous skill", "skill", prev, "session", sessionID)
+	}
+
+	// Inject skill instructions into this session's prompt and clear catalog.
+	t.deps.Prompt.SetSkillInstructions(sessionID, name, skill.Instructions)
+	t.deps.Prompt.ClearCatalog(sessionID)
+
+	// Add MCP tools for this skill to the session (pre-created at startup).
+	if skill.MCPEndpoint != "" {
+		if mcpTS, ok := t.deps.MCPToolsets[skill.MCPEndpoint]; ok {
+			t.deps.Toolset.AddSessionToolset(sessionID, "mcp:"+name, mcpTS)
+			t.deps.Logger.Info("skill_load: MCP tools added to session", "skill", name, "session", sessionID)
+		} else {
+			t.deps.Logger.Warn("skill_load: MCP endpoint not pre-configured", "endpoint", skill.MCPEndpoint, "skill", name)
+		}
+	}
 
 	// Build reference list for the response.
 	refs := make([]string, 0, len(skill.References))
@@ -161,7 +171,7 @@ func (t *skillLoadTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 		refs = append(refs, r.Name)
 	}
 
-	t.deps.Logger.Info("skill_load: loaded", "skill", name, "refs", len(refs))
+	t.deps.Logger.Info("skill_load: loaded", "skill", name, "refs", len(refs), "session", sessionID)
 
 	return map[string]any{
 		"loaded":     name,
@@ -222,8 +232,8 @@ func (t *skillRefTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("skill_ref: %w", err)
 	}
 
-	// Append reference to the prompt.
-	t.deps.Prompt.AppendReference(ref, content)
+	// Append reference to this session's prompt.
+	t.deps.Prompt.AppendReference(ctx.SessionID(), ref, content)
 
 	return map[string]any{
 		"loaded":  ref,
