@@ -120,6 +120,9 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		if mt := yamlCfg.GetInt("llm.max_tokens"); mt > 0 {
 			cfg.Agent.MaxTokens = mt
 		}
+		if t := yamlCfg.GetFloat64("llm.temperature"); t > 0 {
+			cfg.Agent.Temperature = float32(t)
+		}
 		if sp := yamlCfg.GetString("skills.path"); sp != "" {
 			cfg.Agent.SkillsPath = sp
 		}
@@ -129,13 +132,17 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	toolset := hugen.NewDynamicToolset()
 
 	// LLM via Hugr.
-	llm := hugr.New(hugrClient, cfg.Agent.Model,
+	llmOpts := []hugr.Option{
 		hugr.WithLogger(logger),
 		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
 		hugr.WithToolChoiceFunc(func() string {
 			return "auto"
 		}),
-	)
+	}
+	if cfg.Agent.Temperature > 0 {
+		llmOpts = append(llmOpts, hugr.WithTemperature(cfg.Agent.Temperature))
+	}
+	llm := hugr.New(hugrClient, cfg.Agent.Model, llmOpts...)
 
 	// Intent-based router. Factory allows config-driven route changes.
 	router := intent.NewRouter(llm)

@@ -39,6 +39,7 @@ type OIDCStore struct {
 	refreshToken string
 	expiresAt    time.Time
 	ready        chan struct{} // closed when first login completes
+	readyOnce    sync.Once
 }
 
 // oidcDiscovery is a subset of OpenID Connect Discovery response.
@@ -159,11 +160,7 @@ func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
 		s.mu.Unlock()
 
 		// Signal that first login is complete.
-		select {
-		case <-s.ready:
-		default:
-			close(s.ready)
-		}
+		s.readyOnce.Do(func() { close(s.ready) })
 
 		s.logger.Info("OIDC login successful")
 		w.Header().Set("Content-Type", "text/html")

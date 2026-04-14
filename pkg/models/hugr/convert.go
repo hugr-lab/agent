@@ -62,6 +62,10 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 				ToolCallID: p.FunctionResponse.ID,
 			})
 
+		case p.Thought:
+			// Skip thinking content — Hugr LLMMessage has no thought field.
+			// ThoughtSignature on the first functionCall Part provides continuity.
+
 		case p.Text != "":
 			textParts = append(textParts, p.Text)
 		}

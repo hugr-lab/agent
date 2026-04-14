@@ -34,9 +34,10 @@ func NewConfigProvider(configPath string) (*ConfigProvider, error) {
 	return &ConfigProvider{v: v}, nil
 }
 
-func (c *ConfigProvider) Get(key string) any          { return c.v.Get(key) }
-func (c *ConfigProvider) GetString(key string) string { return c.v.GetString(key) }
-func (c *ConfigProvider) GetInt(key string) int       { return c.v.GetInt(key) }
+func (c *ConfigProvider) Get(key string) any              { return c.v.Get(key) }
+func (c *ConfigProvider) GetString(key string) string     { return c.v.GetString(key) }
+func (c *ConfigProvider) GetInt(key string) int           { return c.v.GetInt(key) }
+func (c *ConfigProvider) GetFloat64(key string) float64   { return c.v.GetFloat64(key) }
 
 func (c *ConfigProvider) OnChange(callback func()) {
 	c.v.OnConfigChange(func(_ fsnotify.Event) { callback() })

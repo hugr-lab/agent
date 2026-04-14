@@ -59,7 +59,8 @@ type AgentConfig struct {
 	Model        string // Hugr LLM data source name
 	Constitution string // Path to system prompt file
 	SkillsPath   string // Directory containing skill packages
-	MaxTokens    int    // Max completion tokens per LLM call (0 = provider default)
+	MaxTokens    int     // Max completion tokens per LLM call (0 = provider default)
+	Temperature  float32 // Default temperature (0 = provider default)
 	Port         int    // Web server port
 	BaseURL      string // Public base URL (e.g. https://agent.example.com)
 }

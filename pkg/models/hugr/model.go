@@ -3,7 +3,6 @@ package hugr
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -50,6 +49,7 @@ type HugrModel struct {
 	client         *client.Client
 	logger         *slog.Logger
 	maxTokens      int            // default max completion tokens (0 = provider default)
+	temperature    *float32       // default temperature (nil = provider default)
 	toolChoiceFunc func() string  // returns "auto" or "required"; nil defaults to "auto"
 }
 
@@ -69,6 +69,12 @@ func WithName(name string) Option {
 // WithMaxTokens sets the default max completion tokens per LLM call.
 func WithMaxTokens(n int) Option {
 	return func(m *HugrModel) { m.maxTokens = n }
+}
+
+// WithTemperature sets the default temperature for LLM calls.
+// Overrides the server-side default. Can be overridden by ADK request config.
+func WithTemperature(t float32) Option {
+	return func(m *HugrModel) { m.temperature = &t }
 }
 
 // WithToolChoiceFunc sets a dynamic tool_choice provider.
@@ -119,9 +125,12 @@ func (m *HugrModel) GenerateContent(
 			"messages": messages,
 		}
 
-		// Default max_tokens from model config, overridden by ADK request.
+		// Defaults from model config, overridden by ADK request.
 		if m.maxTokens > 0 {
 			vars["max_tokens"] = m.maxTokens
+		}
+		if m.temperature != nil {
+			vars["temperature"] = *m.temperature
 		}
 
 		if req.Config != nil {
@@ -170,67 +179,77 @@ func (m *HugrModel) GenerateContent(
 
 		// Hugr LLM subscriptions return events with an empty path.
 		const completionPath = ""
-
-		err = ReadSubscription(ctx, sub, map[string]BatchHandler{
-			completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
-				schema := batch.Schema()
-				for i := 0; i < int(batch.NumRows()); i++ {
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					default:
-					}
-					ev := readStreamEvent(schema, batch, i)
-
-					switch ev.Type {
-					case "content_delta":
-						fullContent.WriteString(ev.Content)
-						if !yield(&model.LLMResponse{
-							Content: &genai.Content{
-								Role:  "model",
-								Parts: []*genai.Part{{Text: ev.Content}},
-							},
-							Partial: true,
-						}, nil) {
-							return ErrStopReading
+		out := make(chan *model.LLMResponse)
+		readCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			defer close(out)
+			err = ReadSubscription(readCtx, sub, map[string]BatchHandler{
+				completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
+					schema := batch.Schema()
+					for i := 0; i < int(batch.NumRows()); i++ {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						default:
 						}
+						ev := readStreamEvent(schema, batch, i)
 
-					case "reasoning":
-						if ev.Content != "" {
-							if !yield(&model.LLMResponse{
+						switch ev.Type {
+						case "content_delta":
+							fullContent.WriteString(ev.Content)
+							select {
+							case <-ctx.Done():
+								return ctx.Err()
+							case out <- &model.LLMResponse{
 								Content: &genai.Content{
 									Role:  "model",
-									Parts: []*genai.Part{{Text: ev.Content, Thought: true}},
+									Parts: []*genai.Part{{Text: ev.Content}},
 								},
 								Partial: true,
-							}, nil) {
-								return ErrStopReading
+							}:
 							}
-						}
+						case "reasoning":
+							if ev.Content != "" {
+								select {
+								case <-ctx.Done():
+									return ctx.Err()
+								case out <- &model.LLMResponse{
+									Content: &genai.Content{
+										Role:  "model",
+										Parts: []*genai.Part{{Text: ev.Content, Thought: true}},
+									},
+									Partial: true,
+								}:
+								}
+							}
+						case "tool_use":
+							if ev.ToolCalls != "" {
+								allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
+							}
 
-					case "tool_use":
-						if ev.ToolCalls != "" {
-							allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
-						}
+						case "finish":
+							finishEvent = ev
+							if ev.ToolCalls != "" {
+								allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
+							}
 
-					case "finish":
-						finishEvent = ev
-						if ev.ToolCalls != "" {
-							allToolCalls = append(allToolCalls, parseToolCalls(ev.ToolCalls)...)
+						case "error":
+							return fmt.Errorf("stream error: %s", ev.Content)
 						}
-
-					case "error":
-						return fmt.Errorf("stream error: %s", ev.Content)
 					}
+					return nil
+				},
+			})
+		}()
+		for item := range out {
+			if item != nil {
+				if !yield(item, nil) {
+					return
 				}
-				return nil
-			},
-		})
-		if err != nil {
-			// ErrStopReading means the consumer stopped — don't yield anymore.
-			if errors.Is(err, ErrStopReading) {
-				return
 			}
+		}
+		if err != nil {
 			yield(nil, fmt.Errorf("hugrmodel: subscription: %w", err))
 			return
 		}

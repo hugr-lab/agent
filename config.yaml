@@ -1,8 +1,9 @@
 llm:
-  model: gemma4-26b
-  max_tokens: 8192
+  model: gemini-pro-3-1
+  max_tokens: 8096
+  temperature: 0.4
   routes:
-    default: gemma4-26b
+    default: gemini-pro-3-1
     # tool_calling: claude-haiku
     # summarization: claude-haiku
 
