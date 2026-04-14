@@ -1,10 +1,10 @@
-package hugragent
+package agent
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/hugr-lab/agent/interfaces"
+	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/stretchr/testify/assert"
 )
 

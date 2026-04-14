@@ -11,11 +11,11 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
-	testadapters "github.com/hugr-lab/agent/adapters/test"
-	"github.com/hugr-lab/agent/interfaces"
-	"github.com/hugr-lab/agent/pkg/hugragent"
-	"github.com/hugr-lab/agent/pkg/intentllm"
-	"github.com/hugr-lab/agent/pkg/systemtools"
+	testadapters "github.com/hugr-lab/hugen/adapters/test"
+	"github.com/hugr-lab/hugen/interfaces"
+	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/adk/agent/llmagent"
@@ -173,13 +173,13 @@ func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitutio
 func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2aclient.Client {
 	t.Helper()
 
-	router := intentllm.NewRouter(cfg.llm)
-	prompt := hugragent.NewPromptBuilder(cfg.constitution)
-	toolset := hugragent.NewDynamicToolset()
-	tokens := hugragent.NewTokenEstimator()
+	router := intent.NewRouter(cfg.llm)
+	prompt := hugenagent.NewPromptBuilder(cfg.constitution)
+	toolset := hugenagent.NewDynamicToolset()
+	tokens := hugenagent.NewTokenEstimator()
 
 	if cfg.skills != nil {
-		sysDeps := &systemtools.Deps{
+		sysDeps := &system.Deps{
 			Skills:    cfg.skills,
 			Prompt:    prompt,
 			Toolset:   toolset,
@@ -187,10 +187,10 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2acli
 			Transport: http.DefaultTransport,
 			Logger:    slog.Default(),
 		}
-		toolset.AddToolset("system", systemtools.NewSystemToolset(sysDeps))
+		toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
 	}
 
-	a, err := hugragent.NewAgent(hugragent.AgentConfig{
+	a, err := hugenagent.NewAgent(hugenagent.AgentConfig{
 		Router:  router,
 		Toolset: toolset,
 		Prompt:  prompt,
@@ -257,16 +257,16 @@ func TestHugrAgent_SendMessage(t *testing.T) {
 }
 
 func TestHugrAgent_TokenCalibration(t *testing.T) {
-	tokens := hugragent.NewTokenEstimator()
+	tokens := hugenagent.NewTokenEstimator()
 
 	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
 		{Content: "Calibrated response"},
 	})
-	router := intentllm.NewRouter(llm)
-	prompt := hugragent.NewPromptBuilder("constitution text")
-	toolset := hugragent.NewDynamicToolset()
+	router := intent.NewRouter(llm)
+	prompt := hugenagent.NewPromptBuilder("constitution text")
+	toolset := hugenagent.NewDynamicToolset()
 
-	a, err := hugragent.NewAgent(hugragent.AgentConfig{
+	a, err := hugenagent.NewAgent(hugenagent.AgentConfig{
 		Router:  router,
 		Toolset: toolset,
 		Prompt:  prompt,

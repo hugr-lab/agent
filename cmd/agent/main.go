@@ -15,13 +15,13 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"github.com/hugr-lab/agent/adapters/file"
-	"github.com/hugr-lab/agent/internal/config"
-	"github.com/hugr-lab/agent/pkg/auth"
-	"github.com/hugr-lab/agent/pkg/hugragent"
-	"github.com/hugr-lab/agent/pkg/hugrmodel"
-	"github.com/hugr-lab/agent/pkg/intentllm"
-	"github.com/hugr-lab/agent/pkg/systemtools"
+	"github.com/hugr-lab/hugen/adapters/file"
+	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/auth"
+	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/models/hugr"
+	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/hugr-lab/query-engine/client"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -107,14 +107,14 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	)
 
 	// LLM via Hugr.
-	llm := hugrmodel.New(hugrClient, cfg.Agent.Model,
-		hugrmodel.WithLogger(logger),
+	llm := hugr.New(hugrClient, cfg.Agent.Model,
+		hugr.WithLogger(logger),
 	)
 
 	// Intent-based router. Factory allows config-driven route changes.
-	router := intentllm.NewRouter(llm)
+	router := intent.NewRouter(llm)
 	router.WithFactory(func(modelName string) model.LLM {
-		return hugrmodel.New(hugrClient, modelName, hugrmodel.WithLogger(logger))
+		return hugr.New(hugrClient, modelName, hugr.WithLogger(logger))
 	}).WithLogger(logger)
 
 	// Load YAML config for routes and skill path.
@@ -137,7 +137,7 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	if err != nil {
 		return nil, nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
 	}
-	prompt := hugragent.NewPromptBuilder(string(constitution))
+	prompt := hugenagent.NewPromptBuilder(string(constitution))
 
 	// Skill catalog for prompt injection.
 	skillsPath := cfg.Agent.SkillsPath
@@ -154,10 +154,10 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	}
 
 	// Dynamic toolset: system tools always available, MCP tools added via skill-load.
-	toolset := hugragent.NewDynamicToolset()
-	tokens := hugragent.NewTokenEstimator()
+	toolset := hugenagent.NewDynamicToolset()
+	tokens := hugenagent.NewTokenEstimator()
 
-	sysDeps := &systemtools.Deps{
+	sysDeps := &system.Deps{
 		Skills:    skillProvider,
 		Prompt:    prompt,
 		Toolset:   toolset,
@@ -165,11 +165,11 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		Transport: hugrTransport,
 		Logger:    logger,
 	}
-	toolset.AddToolset("system", systemtools.NewSystemToolset(sysDeps))
+	toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
 
 	debug := os.Getenv("LOG_LEVEL") == "debug"
 
-	a, err := hugragent.NewAgent(hugragent.AgentConfig{
+	a, err := hugenagent.NewAgent(hugenagent.AgentConfig{
 		Router:  router,
 		Toolset: toolset,
 		Prompt:  prompt,

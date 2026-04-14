@@ -1,11 +1,11 @@
-package hugragent
+package agent
 
 import (
 	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/hugr-lab/agent/interfaces"
+	"github.com/hugr-lab/hugen/interfaces"
 )
 
 // PromptBuilder assembles the system prompt from constitution, active skill

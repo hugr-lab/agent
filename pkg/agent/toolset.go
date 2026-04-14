@@ -1,5 +1,5 @@
-// Package hugragent implements the custom HugrAgent loop with dynamic tool management.
-package hugragent
+// Package agent implements the custom HugrAgent loop with dynamic tool management.
+package agent
 
 import (
 	"sync"

@@ -1,7 +1,7 @@
-package systemtools
+package system
 
 import (
-	"github.com/hugr-lab/agent/pkg/hugragent"
+	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -9,8 +9,8 @@ import (
 
 // contextStatusTool reports current context token usage.
 type contextStatusTool struct {
-	prompt *hugragent.PromptBuilder
-	tokens *hugragent.TokenEstimator
+	prompt *hugenagent.PromptBuilder
+	tokens *hugenagent.TokenEstimator
 }
 
 func (t *contextStatusTool) Name() string        { return "context_status" }

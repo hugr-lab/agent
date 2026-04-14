@@ -1,6 +1,6 @@
-// Package systemtools provides the agent's built-in system tools:
+// Package system provides the agent's built-in system tools:
 // skill-list, skill-load, skill-ref.
-package systemtools
+package system
 
 import (
 	"encoding/json"
@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/hugr-lab/agent/interfaces"
-	"github.com/hugr-lab/agent/pkg/hugragent"
+	"github.com/hugr-lab/hugen/interfaces"
+	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -20,9 +20,9 @@ import (
 // Deps holds shared dependencies for all system tools.
 type Deps struct {
 	Skills    interfaces.SkillProvider
-	Prompt    *hugragent.PromptBuilder
-	Toolset   *hugragent.DynamicToolset
-	Tokens    *hugragent.TokenEstimator
+	Prompt    *hugenagent.PromptBuilder
+	Toolset   *hugenagent.DynamicToolset
+	Tokens    *hugenagent.TokenEstimator
 	Transport http.RoundTripper // for MCP connections with auth
 	Logger    *slog.Logger
 }

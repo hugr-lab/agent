@@ -1,4 +1,4 @@
-# hugr-agent
+# hugen
 
 AI agent runtime for the [Hugr](https://hugr-lab.github.io) Data Mesh platform.
 
@@ -12,13 +12,13 @@ cp .env.example .env
 # Edit .env with your Hugr server details
 
 # Run A2A server (production default)
-go run ./cmd/hugr-agent
+go run ./cmd/agent
 
 # Run with dev web UI
-go run ./cmd/hugr-agent devui
+go run ./cmd/agent devui
 
 # Run in console mode
-go run ./cmd/hugr-agent console
+go run ./cmd/agent console
 ```
 
 ## Architecture
@@ -93,13 +93,13 @@ Config changes are hot-reloaded automatically.
 ## Project Structure
 
 ```
-cmd/hugr-agent/         Entry point (A2A, devui, console modes)
+cmd/agent/              Entry point (A2A, devui, console modes)
 interfaces/             Environment-agnostic contracts
 pkg/
-  hugragent/            HugrAgent: agent wiring, DynamicToolset, PromptBuilder, TokenEstimator
-  intentllm/            Intent-based LLM routing
-  systemtools/          Built-in tools: skill_list, skill_load, skill_ref, context_status
-  hugrmodel/            Hugr GraphQL LLM adapter (model.LLM)
+  agent/                HugrAgent: agent wiring, DynamicToolset, PromptBuilder, TokenEstimator
+  llms/intent/          Intent-based LLM routing
+  tools/system/         Built-in tools: skill_list, skill_load, skill_ref, context_status
+  models/hugr/          Hugr GraphQL LLM adapter (model.LLM)
   channels/             Streaming channel types for A2A SSE
   auth/                 Token stores (Remote, OIDC, secret key)
 adapters/

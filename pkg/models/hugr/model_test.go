@@ -1,4 +1,4 @@
-package hugrmodel_test
+package hugr_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/agent/pkg/hugrmodel"
+	"github.com/hugr-lab/hugen/pkg/models/hugr"
 	"github.com/hugr-lab/query-engine/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,8 +48,8 @@ func skipWithoutHugr(t *testing.T) {
 func TestHugrModel_SimpleCompletion(t *testing.T) {
 	skipWithoutHugr(t)
 
-	m := hugrmodel.New(testClient, testModel,
-		hugrmodel.WithLogger(slog.Default()),
+	m := hugr.New(testClient, testModel,
+		hugr.WithLogger(slog.Default()),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -117,8 +117,8 @@ func TestHugrModel_SimpleCompletion(t *testing.T) {
 func TestHugrModel_MultiTurnConversation(t *testing.T) {
 	skipWithoutHugr(t)
 
-	m := hugrmodel.New(testClient, testModel,
-		hugrmodel.WithLogger(slog.Default()),
+	m := hugr.New(testClient, testModel,
+		hugr.WithLogger(slog.Default()),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -162,8 +162,8 @@ func TestHugrModel_MultiTurnConversation(t *testing.T) {
 func TestHugrModel_ContextCancellation(t *testing.T) {
 	skipWithoutHugr(t)
 
-	m := hugrmodel.New(testClient, testModel,
-		hugrmodel.WithLogger(slog.Default()),
+	m := hugr.New(testClient, testModel,
+		hugr.WithLogger(slog.Default()),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
@@ -193,9 +193,9 @@ func TestHugrModel_ContextCancellation(t *testing.T) {
 
 func TestHugrModel_Name(t *testing.T) {
 	c := client.NewClient("http://localhost:15000/ipc")
-	m := hugrmodel.New(c, "test-model")
+	m := hugr.New(c, "test-model")
 	assert.Equal(t, "hugr-model", m.Name())
 
-	m2 := hugrmodel.New(c, "test-model", hugrmodel.WithName("custom"))
+	m2 := hugr.New(c, "test-model", hugr.WithName("custom"))
 	assert.Equal(t, "custom", m2.Name())
 }

@@ -1,9 +1,9 @@
-package hugragent
+package agent
 
 import (
 	"log/slog"
 
-	"github.com/hugr-lab/agent/pkg/intentllm"
+	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -13,7 +13,7 @@ import (
 // AgentConfig holds the configuration for building a HugrAgent.
 type AgentConfig struct {
 	// Router is the intent-based LLM router.
-	Router *intentllm.Router
+	Router *intent.Router
 
 	// Toolset is the dynamic toolset that manages all runtime tools.
 	Toolset *DynamicToolset

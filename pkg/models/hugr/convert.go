@@ -1,5 +1,5 @@
 // Package hugrmodel implements ADK model.LLM interface using Hugr GraphQL.
-package hugrmodel
+package hugr
 
 import (
 	"encoding/json"

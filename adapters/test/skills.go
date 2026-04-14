@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hugr-lab/agent/interfaces"
+	"github.com/hugr-lab/hugen/interfaces"
 )
 
 // StaticSkillProvider returns pre-configured skills for testing.

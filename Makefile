@@ -1,18 +1,18 @@
 .PHONY: build run test vet lint check clean
 
-BINARY=bin/hugr-agent
+BINARY=bin/hugen
 
 build:
-	go build -o $(BINARY) ./cmd/hugr-agent
+	go build -o $(BINARY) ./cmd/agent
 
 run:
-	go run ./cmd/hugr-agent
+	go run ./cmd/agent
 
 run-devui:
-	go run ./cmd/hugr-agent devui
+	go run ./cmd/agent devui
 
 run-console:
-	go run ./cmd/hugr-agent console
+	go run ./cmd/agent console
 
 test:
 	go test -race -count=1 ./...

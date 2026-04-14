@@ -1,4 +1,4 @@
-package hugragent
+package agent
 
 import (
 	"testing"

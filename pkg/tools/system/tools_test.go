@@ -1,13 +1,13 @@
-package systemtools
+package system
 
 import (
 	"log/slog"
 	"net/http"
 	"testing"
 
-	testadapters "github.com/hugr-lab/agent/adapters/test"
-	"github.com/hugr-lab/agent/interfaces"
-	"github.com/hugr-lab/agent/pkg/hugragent"
+	testadapters "github.com/hugr-lab/hugen/adapters/test"
+	"github.com/hugr-lab/hugen/interfaces"
+	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,9 +15,9 @@ import (
 func testDeps(skills interfaces.SkillProvider) *Deps {
 	return &Deps{
 		Skills:    skills,
-		Prompt:    hugragent.NewPromptBuilder("Base."),
-		Toolset:   hugragent.NewDynamicToolset(),
-		Tokens:    hugragent.NewTokenEstimator(),
+		Prompt:    hugenagent.NewPromptBuilder("Base."),
+		Toolset:   hugenagent.NewDynamicToolset(),
+		Tokens:    hugenagent.NewTokenEstimator(),
 		Transport: http.DefaultTransport,
 		Logger:    slog.Default(),
 	}

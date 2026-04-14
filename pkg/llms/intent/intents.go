@@ -1,5 +1,5 @@
-// Package intentllm provides intent-based LLM routing.
-package intentllm
+// Package intent provides intent-based LLM routing.
+package intent
 
 // Intent classifies the current LLM task for model routing.
 type Intent string

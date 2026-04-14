@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hugr-lab/agent/interfaces"
+	"github.com/hugr-lab/hugen/interfaces"
 	"gopkg.in/yaml.v3"
 )
 

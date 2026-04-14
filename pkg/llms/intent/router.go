@@ -1,11 +1,11 @@
-package intentllm
+package intent
 
 import (
 	"context"
 	"iter"
 	"log/slog"
 
-	"github.com/hugr-lab/agent/interfaces"
+	"github.com/hugr-lab/hugen/interfaces"
 	"google.golang.org/adk/model"
 )
 
