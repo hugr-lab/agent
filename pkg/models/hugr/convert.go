@@ -4,6 +4,7 @@ package hugr
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/hugr-lab/query-engine/types"
 
@@ -123,11 +124,17 @@ func adkToHugrTools(genaiTools []*genai.Tool) ([]string, error) {
 		for _, decl := range t.FunctionDeclarations {
 			// Prefer ParametersJsonSchema (raw JSON Schema from MCP)
 			// over Parameters (*genai.Schema which uses UPPERCASE types).
+			// For genai.Schema, convert to raw map to normalize type names
+			// (OBJECT→object, STRING→string) since Hugr expects OpenAI format.
 			var params any
 			if decl.ParametersJsonSchema != nil {
 				params = decl.ParametersJsonSchema
 			} else if decl.Parameters != nil {
-				params = decl.Parameters
+				params = schemaToMap(decl.Parameters)
+			}
+			// OpenAI/Hugr requires parameters to be an object, never null.
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
 			}
 
 			hugrTool := types.LLMTool{
@@ -198,6 +205,37 @@ func normalizeArgs(v any) map[string]any {
 		}
 		return m
 	}
+}
+
+// schemaToMap converts genai.Schema to a JSON Schema map with lowercase types.
+// ADK uses UPPERCASE type names (OBJECT, STRING) but Hugr/OpenAI expects lowercase.
+func schemaToMap(s *genai.Schema) map[string]any {
+	if s == nil {
+		return nil
+	}
+	m := map[string]any{
+		"type": strings.ToLower(string(s.Type)),
+	}
+	if s.Description != "" {
+		m["description"] = s.Description
+	}
+	if len(s.Required) > 0 {
+		m["required"] = s.Required
+	}
+	if len(s.Enum) > 0 {
+		m["enum"] = s.Enum
+	}
+	if s.Properties != nil {
+		props := make(map[string]any, len(s.Properties))
+		for k, v := range s.Properties {
+			props[k] = schemaToMap(v)
+		}
+		m["properties"] = props
+	}
+	if s.Items != nil {
+		m["items"] = schemaToMap(s.Items)
+	}
+	return m
 }
 
 // mapFinishReason converts Hugr finish_reason to ADK FinishReason.

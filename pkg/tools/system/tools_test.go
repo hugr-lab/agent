@@ -7,7 +7,7 @@ import (
 
 	testadapters "github.com/hugr-lab/hugen/adapters/test"
 	"github.com/hugr-lab/hugen/interfaces"
-	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
+	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,9 +15,9 @@ import (
 func testDeps(skills interfaces.SkillProvider) *Deps {
 	return &Deps{
 		Skills:    skills,
-		Prompt:    hugenagent.NewPromptBuilder("Base."),
-		Toolset:   hugenagent.NewDynamicToolset(),
-		Tokens:    hugenagent.NewTokenEstimator(),
+		Prompt:    hugen.NewPromptBuilder("Base."),
+		Toolset:   hugen.NewDynamicToolset(),
+		Tokens:    hugen.NewTokenEstimator(),
 		Transport: http.DefaultTransport,
 		Logger:    slog.Default(),
 	}

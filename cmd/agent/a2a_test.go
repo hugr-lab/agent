@@ -13,7 +13,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv"
 	testadapters "github.com/hugr-lab/hugen/adapters/test"
 	"github.com/hugr-lab/hugen/interfaces"
-	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
+	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/stretchr/testify/assert"
@@ -174,9 +174,9 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2acli
 	t.Helper()
 
 	router := intent.NewRouter(cfg.llm)
-	prompt := hugenagent.NewPromptBuilder(cfg.constitution)
-	toolset := hugenagent.NewDynamicToolset()
-	tokens := hugenagent.NewTokenEstimator()
+	prompt := hugen.NewPromptBuilder(cfg.constitution)
+	toolset := hugen.NewDynamicToolset()
+	tokens := hugen.NewTokenEstimator()
 
 	if cfg.skills != nil {
 		sysDeps := &system.Deps{
@@ -190,7 +190,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2acli
 		toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
 	}
 
-	a, err := hugenagent.NewAgent(hugenagent.AgentConfig{
+	a, err := hugen.NewAgent(hugen.AgentConfig{
 		Router:  router,
 		Toolset: toolset,
 		Prompt:  prompt,
@@ -257,16 +257,16 @@ func TestHugrAgent_SendMessage(t *testing.T) {
 }
 
 func TestHugrAgent_TokenCalibration(t *testing.T) {
-	tokens := hugenagent.NewTokenEstimator()
+	tokens := hugen.NewTokenEstimator()
 
 	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
 		{Content: "Calibrated response"},
 	})
 	router := intent.NewRouter(llm)
-	prompt := hugenagent.NewPromptBuilder("constitution text")
-	toolset := hugenagent.NewDynamicToolset()
+	prompt := hugen.NewPromptBuilder("constitution text")
+	toolset := hugen.NewDynamicToolset()
 
-	a, err := hugenagent.NewAgent(hugenagent.AgentConfig{
+	a, err := hugen.NewAgent(hugen.AgentConfig{
 		Router:  router,
 		Toolset: toolset,
 		Prompt:  prompt,

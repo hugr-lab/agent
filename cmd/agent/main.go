@@ -17,19 +17,19 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/hugr-lab/hugen/adapters/file"
 	"github.com/hugr-lab/hugen/internal/config"
+	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
-	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
-	"github.com/hugr-lab/hugen/pkg/models/hugr"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models/hugr"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/hugr-lab/query-engine/client"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/model"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/web/webui"
 	"google.golang.org/adk/memory"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/server/adkrest"
@@ -137,7 +137,7 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	if err != nil {
 		return nil, nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
 	}
-	prompt := hugenagent.NewPromptBuilder(string(constitution))
+	prompt := hugen.NewPromptBuilder(string(constitution))
 
 	// Skill catalog for prompt injection.
 	skillsPath := cfg.Agent.SkillsPath
@@ -154,8 +154,8 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	}
 
 	// Dynamic toolset: system tools always available, MCP tools added via skill-load.
-	toolset := hugenagent.NewDynamicToolset()
-	tokens := hugenagent.NewTokenEstimator()
+	toolset := hugen.NewDynamicToolset()
+	tokens := hugen.NewTokenEstimator()
 
 	sysDeps := &system.Deps{
 		Skills:    skillProvider,
@@ -169,7 +169,7 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 
 	debug := os.Getenv("LOG_LEVEL") == "debug"
 
-	a, err := hugenagent.NewAgent(hugenagent.AgentConfig{
+	a, err := hugen.NewAgent(hugen.AgentConfig{
 		Router:  router,
 		Toolset: toolset,
 		Prompt:  prompt,
@@ -182,7 +182,6 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 	}
 	return a, hugrClient, nil
 }
-
 
 // buildHugrTransport creates the HTTP transport for all Hugr communication.
 //

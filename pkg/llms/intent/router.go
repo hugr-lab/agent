@@ -78,14 +78,14 @@ func (r *Router) LoadRoutesFromConfig(cfg interfaces.ConfigProvider) {
 	}
 }
 
-// model.LLM interface — delegates to the default model.
-// The agent loop calls ModelFor() explicitly to select by intent;
-// these methods exist so Router satisfies model.LLM for ADK wiring.
+// model.LLM interface — delegates via ModelFor(IntentDefault).
+// ADK calls GenerateContent on the Router directly, so it must
+// resolve through the route table (not bypass to defaultModel).
 
 func (r *Router) Name() string {
-	return r.defaultModel.Name()
+	return r.ModelFor(IntentDefault).Name()
 }
 
 func (r *Router) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
-	return r.defaultModel.GenerateContent(ctx, req, stream)
+	return r.ModelFor(IntentDefault).GenerateContent(ctx, req, stream)
 }

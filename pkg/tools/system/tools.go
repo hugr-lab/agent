@@ -9,7 +9,7 @@ import (
 	"net/http"
 
 	"github.com/hugr-lab/hugen/interfaces"
-	hugenagent "github.com/hugr-lab/hugen/pkg/agent"
+	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -20,9 +20,9 @@ import (
 // Deps holds shared dependencies for all system tools.
 type Deps struct {
 	Skills    interfaces.SkillProvider
-	Prompt    *hugenagent.PromptBuilder
-	Toolset   *hugenagent.DynamicToolset
-	Tokens    *hugenagent.TokenEstimator
+	Prompt    *hugen.PromptBuilder
+	Toolset   *hugen.DynamicToolset
+	Tokens    *hugen.TokenEstimator
 	Transport http.RoundTripper // for MCP connections with auth
 	Logger    *slog.Logger
 }
@@ -101,8 +101,10 @@ type skillLoadTool struct {
 	deps *Deps
 }
 
-func (t *skillLoadTool) Name() string        { return "skill_load" }
-func (t *skillLoadTool) Description() string { return "Load a skill by name to activate its tools and knowledge" }
+func (t *skillLoadTool) Name() string { return "skill_load" }
+func (t *skillLoadTool) Description() string {
+	return "Load a skill by name to activate its tools and knowledge"
+}
 func (t *skillLoadTool) IsLongRunning() bool { return false }
 
 func (t *skillLoadTool) Declaration() *genai.FunctionDeclaration {
@@ -186,8 +188,10 @@ type skillRefTool struct {
 	deps *Deps
 }
 
-func (t *skillRefTool) Name() string        { return "skill_ref" }
-func (t *skillRefTool) Description() string { return "Load a reference document from the active skill for deeper knowledge" }
+func (t *skillRefTool) Name() string { return "skill_ref" }
+func (t *skillRefTool) Description() string {
+	return "Load a reference document from the active skill for deeper knowledge"
+}
 func (t *skillRefTool) IsLongRunning() bool { return false }
 
 func (t *skillRefTool) Declaration() *genai.FunctionDeclaration {
