@@ -35,6 +35,10 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 	var toolCalls []types.LLMToolCall
 	var toolResponses []types.LLMMessage
 
+	// Gemini 2.5+: capture ThoughtSignature from the first functionCall Part.
+	// ADK stores it on genai.Part; Hugr expects it on LLMMessage level.
+	var thoughtSig string
+
 	for _, p := range c.Parts {
 		switch {
 		case p.FunctionCall != nil:
@@ -42,16 +46,14 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 			if args == nil {
 				args = map[string]any{}
 			}
-			tc := types.LLMToolCall{
+			toolCalls = append(toolCalls, types.LLMToolCall{
 				ID:        p.FunctionCall.ID,
 				Name:      p.FunctionCall.Name,
 				Arguments: args,
+			})
+			if thoughtSig == "" && len(p.ThoughtSignature) > 0 {
+				thoughtSig = string(p.ThoughtSignature)
 			}
-			// Preserve ThoughtSignature from Part (Gemini 2.5+).
-			if len(p.ThoughtSignature) > 0 {
-				tc.ThoughtSignature = string(p.ThoughtSignature)
-			}
-			toolCalls = append(toolCalls, tc)
 
 		case p.FunctionResponse != nil:
 			toolResponses = append(toolResponses, types.LLMMessage{
@@ -70,9 +72,10 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 	if len(toolCalls) > 0 {
 		text := strings.Join(textParts, "")
 		msg := types.LLMMessage{
-			Role:      "assistant",
-			Content:   text,
-			ToolCalls: toolCalls,
+			Role:             "assistant",
+			Content:          text,
+			ToolCalls:        toolCalls,
+			ThoughtSignature: thoughtSig,
 		}
 		b, err := json.Marshal(msg)
 		if err != nil {
@@ -194,7 +197,7 @@ func hugrResultToADKContent(result types.LLMResult) *genai.Content {
 		parts = append(parts, &genai.Part{Text: result.Content})
 	}
 
-	for _, tc := range result.ToolCalls {
+	for i, tc := range result.ToolCalls {
 		args := normalizeArgs(tc.Arguments)
 		part := &genai.Part{
 			FunctionCall: &genai.FunctionCall{
@@ -203,10 +206,9 @@ func hugrResultToADKContent(result types.LLMResult) *genai.Content {
 				Args: args,
 			},
 		}
-		// Gemini 2.5+ requires ThoughtSignature on Part for function calls.
-		// Query-engine passes it as string; genai.Part expects []byte.
-		if tc.ThoughtSignature != "" {
-			part.ThoughtSignature = []byte(tc.ThoughtSignature)
+		// Gemini 2.5+: ThoughtSignature goes on the first functionCall Part only.
+		if i == 0 && result.ThoughtSignature != "" {
+			part.ThoughtSignature = []byte(result.ThoughtSignature)
 		}
 		parts = append(parts, part)
 	}

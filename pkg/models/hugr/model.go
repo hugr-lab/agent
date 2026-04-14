@@ -36,6 +36,7 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 				tool_calls
 				prompt_tokens
 				completion_tokens
+				thought_signature
 			}
 		}
 	}
@@ -256,6 +257,7 @@ func (m *HugrModel) GenerateContent(
 			CompletionTokens: finishEvent.CompletionTokens,
 			TotalTokens:      finishEvent.PromptTokens + finishEvent.CompletionTokens,
 			ToolCalls:        allToolCalls,
+			ThoughtSignature: finishEvent.ThoughtSignature,
 		}
 
 		yield(&model.LLMResponse{
@@ -291,6 +293,8 @@ func readStreamEvent(schema *arrow.Schema, batch arrow.RecordBatch, rowIdx int) 
 			ev.PromptTokens = intVal(val)
 		case "completion_tokens":
 			ev.CompletionTokens = intVal(val)
+		case "thought_signature":
+			ev.ThoughtSignature = stringVal(val)
 		}
 	}
 	return ev

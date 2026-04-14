@@ -1,0 +1,10 @@
+llm:
+  model: gemma4-31b
+  max_tokens: 8192
+  routes:
+    default: gemma4-31b
+    # tool_calling: claude-haiku
+    # summarization: claude-haiku
+
+skills:
+  path: ./skills
