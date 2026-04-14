@@ -3,6 +3,7 @@ module github.com/hugr-lab/agent
 go 1.26.1
 
 require (
+	github.com/a2aproject/a2a-go v0.3.13
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/gorilla/mux v1.8.1
 	github.com/hugr-lab/query-engine/client v0.3.26
@@ -20,7 +21,6 @@ require (
 	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.31.0 // indirect
-	github.com/a2aproject/a2a-go v0.3.13 // indirect
 	github.com/awalterschulze/gographviz v2.0.3+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
