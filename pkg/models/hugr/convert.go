@@ -42,11 +42,16 @@ func contentToHugrMessages(c *genai.Content) ([]string, error) {
 			if args == nil {
 				args = map[string]any{}
 			}
-			toolCalls = append(toolCalls, types.LLMToolCall{
+			tc := types.LLMToolCall{
 				ID:        p.FunctionCall.ID,
 				Name:      p.FunctionCall.Name,
 				Arguments: args,
-			})
+			}
+			// Preserve ThoughtSignature from Part (Gemini 2.5+).
+			if len(p.ThoughtSignature) > 0 {
+				tc.ThoughtSignature = string(p.ThoughtSignature)
+			}
+			toolCalls = append(toolCalls, tc)
 
 		case p.FunctionResponse != nil:
 			toolResponses = append(toolResponses, types.LLMMessage{
@@ -191,13 +196,19 @@ func hugrResultToADKContent(result types.LLMResult) *genai.Content {
 
 	for _, tc := range result.ToolCalls {
 		args := normalizeArgs(tc.Arguments)
-		parts = append(parts, &genai.Part{
+		part := &genai.Part{
 			FunctionCall: &genai.FunctionCall{
 				ID:   tc.ID,
 				Name: tc.Name,
 				Args: args,
 			},
-		})
+		}
+		// Gemini 2.5+ requires ThoughtSignature on Part for function calls.
+		// Query-engine passes it as string; genai.Part expects []byte.
+		if tc.ThoughtSignature != "" {
+			part.ThoughtSignature = []byte(tc.ThoughtSignature)
+		}
+		parts = append(parts, part)
 	}
 
 	if len(parts) == 0 {
