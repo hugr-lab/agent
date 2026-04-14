@@ -26,6 +26,7 @@ Thumbs.db
 # Artifacts (not tracked)
 .claude/
 .specify/
+specs/
 design/
 source-doc/
 __debug_bin*
