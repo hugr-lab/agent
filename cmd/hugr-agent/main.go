@@ -15,14 +15,17 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
+	"github.com/hugr-lab/agent/adapters/file"
 	"github.com/hugr-lab/agent/internal/config"
 	"github.com/hugr-lab/agent/pkg/auth"
+	"github.com/hugr-lab/agent/pkg/hugragent"
 	"github.com/hugr-lab/agent/pkg/hugrmodel"
+	"github.com/hugr-lab/agent/pkg/intentllm"
+	"github.com/hugr-lab/agent/pkg/systemtools"
 	"github.com/hugr-lab/query-engine/client"
-	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/web/webui"
@@ -31,8 +34,6 @@ import (
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptoolset"
 )
 
 func main() {
@@ -105,37 +106,79 @@ func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.Roun
 		client.WithTransport(hugrTransport),
 	)
 
+	// LLM via Hugr.
 	llm := hugrmodel.New(hugrClient, cfg.Agent.Model,
 		hugrmodel.WithLogger(logger),
 	)
 
+	// Intent-based router. Factory allows config-driven route changes.
+	router := intentllm.NewRouter(llm)
+	router.WithFactory(func(modelName string) model.LLM {
+		return hugrmodel.New(hugrClient, modelName, hugrmodel.WithLogger(logger))
+	}).WithLogger(logger)
+
+	// Load YAML config for routes and skill path.
+	yamlCfg, err := file.NewConfigProvider("config.yaml")
+	if err != nil {
+		logger.Debug("config.yaml not loaded", "err", err)
+	} else {
+		router.LoadRoutesFromConfig(yamlCfg)
+		if sp := yamlCfg.GetString("skills.path"); sp != "" {
+			cfg.Agent.SkillsPath = sp
+		}
+		yamlCfg.OnChange(func() {
+			logger.Info("config.yaml changed, reloading routes")
+			router.LoadRoutesFromConfig(yamlCfg)
+		})
+	}
+
+	// Constitution (base system prompt).
 	constitution, err := os.ReadFile(cfg.Agent.Constitution)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
 	}
+	prompt := hugragent.NewPromptBuilder(string(constitution))
 
-	mcpTransport := &sdkmcp.StreamableClientTransport{
-		Endpoint:             cfg.Hugr.MCPUrl,
-		DisableStandaloneSSE: true,
-		HTTPClient:           &http.Client{Transport: hugrTransport},
+	// Skill catalog for prompt injection.
+	skillsPath := cfg.Agent.SkillsPath
+	if skillsPath == "" {
+		skillsPath = "./skills"
+	}
+	skillProvider := file.NewSkillProvider(skillsPath)
+	skills, err := skillProvider.ListMeta(context.Background())
+	if err != nil {
+		logger.Warn("failed to list skills", "err", err)
+	} else if len(skills) > 0 {
+		prompt.SetCatalog(skills)
+		logger.Info("skill catalog loaded", "count", len(skills))
 	}
 
-	mcpTools, err := mcptoolset.New(mcptoolset.Config{
-		Transport: mcpTransport,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("create MCP toolset: %w", err)
-	}
+	// Dynamic toolset: system tools always available, MCP tools added via skill-load.
+	toolset := hugragent.NewDynamicToolset()
+	tokens := hugragent.NewTokenEstimator()
 
-	a, err := llmagent.New(llmagent.Config{
-		Name:        "hugr_agent",
-		Description: "Hugr Data Mesh Agent — explores data sources, builds queries, presents results",
-		Model:       llm,
-		Instruction: string(constitution),
-		Toolsets:    []tool.Toolset{mcpTools},
+	sysDeps := &systemtools.Deps{
+		Skills:    skillProvider,
+		Prompt:    prompt,
+		Toolset:   toolset,
+		Tokens:    tokens,
+		Transport: hugrTransport,
+		Logger:    logger,
+	}
+	toolset.AddToolset("system", systemtools.NewSystemToolset(sysDeps))
+
+	debug := os.Getenv("LOG_LEVEL") == "debug"
+
+	a, err := hugragent.NewAgent(hugragent.AgentConfig{
+		Router:  router,
+		Toolset: toolset,
+		Prompt:  prompt,
+		Tokens:  tokens,
+		Logger:  logger,
+		Debug:   debug,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("create agent: %w", err)
 	}
 	return a, hugrClient, nil
 }

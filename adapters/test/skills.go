@@ -10,13 +10,25 @@ import (
 // StaticSkillProvider returns pre-configured skills for testing.
 type StaticSkillProvider struct {
 	skills map[string]*interfaces.SkillFull
+	refs   map[string]string // "skill/ref" → content
 }
 
 var _ interfaces.SkillProvider = (*StaticSkillProvider)(nil)
 
 // NewStaticSkillProvider creates a test skill provider from a map of skills.
 func NewStaticSkillProvider(skills map[string]*interfaces.SkillFull) *StaticSkillProvider {
-	return &StaticSkillProvider{skills: skills}
+	if skills == nil {
+		skills = make(map[string]*interfaces.SkillFull)
+	}
+	return &StaticSkillProvider{
+		skills: skills,
+		refs:   make(map[string]string),
+	}
+}
+
+// AddRef adds a reference document for testing.
+func (p *StaticSkillProvider) AddRef(skill, ref, content string) {
+	p.refs[skill+"/"+ref] = content
 }
 
 func (p *StaticSkillProvider) ListMeta(_ context.Context) ([]interfaces.SkillMeta, error) {
@@ -39,5 +51,8 @@ func (p *StaticSkillProvider) LoadFull(_ context.Context, name string) (*interfa
 }
 
 func (p *StaticSkillProvider) LoadRef(_ context.Context, skill, ref string) (string, error) {
-	return fmt.Sprintf("Reference %s for skill %s (test content)", ref, skill), nil
+	if content, ok := p.refs[skill+"/"+ref]; ok {
+		return content, nil
+	}
+	return "", fmt.Errorf("test/skills: ref %q/%q not found", skill, ref)
 }
