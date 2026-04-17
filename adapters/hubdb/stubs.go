@@ -15,23 +15,15 @@ func notImplemented(op string) error {
 	return fmt.Errorf("hubdb: %s not implemented in 004", op)
 }
 
-// ── AgentRegistry (filled in by US2) ────────────────────────
-
-func (h *hubDB) GetAgentType(ctx context.Context, typeID string) (*interfaces.AgentType, error) {
-	return nil, notImplemented("GetAgentType")
-}
+// UpsertAgentType is stubbed — agent_types rows are seeded during the
+// initial migration (adapters/hubdb/migrate). Per-agent customisation
+// lives in agents.config_override, not a runtime upsert.
 func (h *hubDB) UpsertAgentType(ctx context.Context, at interfaces.AgentType) error {
 	return notImplemented("UpsertAgentType")
 }
-func (h *hubDB) GetAgent(ctx context.Context, id string) (*interfaces.Agent, error) {
-	return nil, notImplemented("GetAgent")
-}
-func (h *hubDB) RegisterAgent(ctx context.Context, a interfaces.Agent) error {
-	return notImplemented("RegisterAgent")
-}
-func (h *hubDB) UpdateAgentActivity(ctx context.Context, id string) error {
-	return notImplemented("UpdateAgentActivity")
-}
+
+// ListAgents is stubbed — an agent only reads and updates its own row.
+// Cross-agent listing belongs on the hub side.
 func (h *hubDB) ListAgents(ctx context.Context, typeID string) ([]interfaces.Agent, error) {
 	return nil, notImplemented("ListAgents")
 }

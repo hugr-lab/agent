@@ -31,9 +31,10 @@ func buildLocalEngine(ctx context.Context, cfg *config.Config, logger *slog.Logg
 		},
 	}
 	if err := migrate.Ensure(migrate.Config{
-		Path:       cfg.Memory.Path,
-		VectorSize: cfg.Embedding.Dimension,
-		Seed:       seed,
+		Path:          cfg.Memory.Path,
+		VectorSize:    cfg.Embedding.Dimension,
+		EmbedderModel: cfg.Embedding.Model,
+		Seed:          seed,
 	}); err != nil {
 		return nil, fmt.Errorf("migrate hub.db: %w", err)
 	}

@@ -55,7 +55,13 @@ type Config struct {
 	Path string
 
 	// VectorSize is the embedding dimension. 0 disables vector search.
+	// Frozen at first-run provision — mismatches on later runs are fatal.
 	VectorSize int
+
+	// EmbedderModel is the embedding data source name. Stored alongside
+	// VectorSize at provision time and verified on subsequent runs.
+	// Empty means "vector search disabled".
+	EmbedderModel string
 
 	// IsTimescale toggles TimescaleDB hypertable creation. Postgres only.
 	IsTimescale bool
@@ -148,6 +154,13 @@ func provision(dbType db.ScriptDBType, cfg Config, target string) error {
 		return fmt.Errorf("migrate: write version: %w", err)
 	}
 
+	if _, err := conn.Exec(
+		`INSERT INTO version (name, version) VALUES ('embedding_model', $1), ('embedding_dim', $2)`,
+		cfg.EmbedderModel, strconv.Itoa(cfg.VectorSize),
+	); err != nil {
+		return fmt.Errorf("migrate: write embedding version: %w", err)
+	}
+
 	if cfg.Seed != nil {
 		data, err := seedData(cfg.Seed)
 		if err != nil {
@@ -178,6 +191,10 @@ func upgrade(dbType db.ScriptDBType, cfg Config, target string) error {
 		`SELECT version FROM version WHERE name = 'schema' LIMIT 1`,
 	).Scan(&version); err != nil {
 		return fmt.Errorf("migrate: read version: %w", err)
+	}
+
+	if err := verifyEmbedding(conn, cfg); err != nil {
+		return err
 	}
 
 	if compareVersions(version, target) == 0 {
@@ -216,6 +233,47 @@ func upgrade(dbType db.ScriptDBType, cfg Config, target string) error {
 		`UPDATE version SET version = $1 WHERE name = 'schema'`, target,
 	); err != nil {
 		return fmt.Errorf("migrate: update version: %w", err)
+	}
+	return nil
+}
+
+// verifyEmbedding compares the configured embedding model+dim to what was
+// stored at provision time. A mismatch is fatal: existing vectors in
+// memory_items are not re-computable and the agent must be recreated.
+// Rows may be missing for DBs provisioned before embedding version tracking —
+// in that case we write them from the current config (one-time backfill).
+func verifyEmbedding(conn *sql.DB, cfg Config) error {
+	var storedModel, storedDim sql.NullString
+	_ = conn.QueryRow(
+		`SELECT version FROM version WHERE name = 'embedding_model' LIMIT 1`,
+	).Scan(&storedModel)
+	_ = conn.QueryRow(
+		`SELECT version FROM version WHERE name = 'embedding_dim' LIMIT 1`,
+	).Scan(&storedDim)
+
+	cfgDim := strconv.Itoa(cfg.VectorSize)
+
+	if !storedModel.Valid && !storedDim.Valid {
+		if _, err := conn.Exec(
+			`INSERT INTO version (name, version) VALUES ('embedding_model', $1), ('embedding_dim', $2)`,
+			cfg.EmbedderModel, cfgDim,
+		); err != nil {
+			return fmt.Errorf("migrate: backfill embedding version: %w", err)
+		}
+		return nil
+	}
+
+	if storedModel.String != cfg.EmbedderModel {
+		return fmt.Errorf(
+			"migrate: embedding model mismatch — DB was provisioned with %q, config has %q. Delete %s and re-create the agent to change models",
+			storedModel.String, cfg.EmbedderModel, cfg.Path,
+		)
+	}
+	if storedDim.String != cfgDim {
+		return fmt.Errorf(
+			"migrate: embedding dimension mismatch — DB was provisioned with dim=%s, config has dim=%s. Delete %s and re-create the agent to change dimensions",
+			storedDim.String, cfgDim, cfg.Path,
+		)
 	}
 	return nil
 }

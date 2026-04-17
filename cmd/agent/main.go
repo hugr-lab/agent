@@ -405,7 +405,44 @@ func buildRuntime(ctx context.Context, cfg *config.Config, logger *slog.Logger, 
 		return nil, fmt.Errorf("build hubdb: %w", err)
 	}
 	rt.hubDB = hub
+
+	if cfg.HugrLocal.Enabled {
+		if err := registerAgentInstance(ctx, cfg, hub, logger); err != nil {
+			rt.close(logger)
+			return nil, err
+		}
+	}
 	return rt, nil
+}
+
+// registerAgentInstance verifies the agent_type row exists (seeded at
+// migration) and upserts the agents row with the current config_override.
+// Runs only in local mode — in hub mode the hub owns registration.
+func registerAgentInstance(ctx context.Context, cfg *config.Config, hub interfaces.HubDB, logger *slog.Logger) error {
+	at, err := hub.GetAgentType(ctx, cfg.Identity.Type)
+	if err != nil {
+		return fmt.Errorf("get agent_type %q: %w", cfg.Identity.Type, err)
+	}
+	if at == nil {
+		return fmt.Errorf("agent type %q not found in hub.db — re-create memory.db", cfg.Identity.Type)
+	}
+
+	override := map[string]any{
+		"llm":       cfg.LLM,
+		"embedding": cfg.Embedding,
+		"memory":    cfg.Memory,
+	}
+	if err := hub.RegisterAgent(ctx, interfaces.Agent{
+		ID:             cfg.Identity.ID,
+		AgentTypeID:    cfg.Identity.Type,
+		ShortID:        cfg.Identity.ShortID,
+		Name:           cfg.Identity.Name,
+		ConfigOverride: override,
+	}); err != nil {
+		return fmt.Errorf("register agent %q: %w", cfg.Identity.ID, err)
+	}
+	logger.Info("agent registered", "id", cfg.Identity.ID, "type", cfg.Identity.Type)
+	return nil
 }
 
 // serveAndShutdown starts the HTTP server and handles graceful shutdown.

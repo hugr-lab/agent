@@ -109,7 +109,7 @@ func (s *Source) Attach(ctx context.Context, pool *db.Pool) error {
 func (s *Source) Catalog(ctx context.Context) (cs.Catalog, error) {
 	opts := compiler.Options{
 		Name:         s.Name(),
-		Prefix:       s.Name(),
+		Prefix:       graphQLPrefix(s.Name()),
 		AsModule:     s.AsModule(),
 		ReadOnly:     s.IsReadonly(),
 		EngineType:   string(s.engine.Type()),
@@ -140,4 +140,12 @@ type SDLParams struct {
 	EmbeddingsEnabled bool
 	EmbedderModel     string
 	IsTimescale       bool
+}
+
+// graphQLPrefix maps a dotted catalog name (e.g. "hub.db") to a valid
+// GraphQL identifier by replacing "." with "_". Dots are illegal in
+// GraphQL type names and break variable declarations like
+// `$data: hub.db_agents_mut_input_data!`.
+func graphQLPrefix(name string) string {
+	return strings.ReplaceAll(name, ".", "_")
 }
