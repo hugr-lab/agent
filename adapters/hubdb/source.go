@@ -123,7 +123,7 @@ func (s *Source) Catalog(ctx context.Context) (cs.Catalog, error) {
 
 	rendered, err := db.ParseSQLScriptTemplate(dbType, schemaGraphQLTmpl, SDLParams{
 		VectorSize:        s.cfg.VectorSize,
-		EmbeddingsEnabled: s.cfg.VectorSize > 0,
+		EmbeddingsEnabled: s.cfg.VectorSize > 0 && s.cfg.EmbedderModel != "",
 		EmbedderModel:     s.cfg.EmbedderModel,
 		IsTimescale:       s.cfg.IsTimescale,
 	})
