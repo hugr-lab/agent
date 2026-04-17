@@ -62,40 +62,40 @@ skills:
   path: ./skills
 
 # ── LLM/Embedding data sources (mode=local only) ───────────
-# Path format: full provider URL + query params. ${ENV_VAR} expanded at attach.
+# Path format matches hugr's core.data_sources format:
+# URL + query params; ${ENV_VAR} is expanded at registration.
 # Types: llm-openai | llm-anthropic | llm-gemini | embedding
+#
+# Tip: mirror exactly what's registered in your Hugr instance
+# (`{ core { data_sources { name type path } } }`) so the agent speaks the
+# same source names in local mode and hub mode.
 models:
-  # Gemini (base URL only — provider appends /models/{model}:generateContent)
+  # Google Gemini
   - name: gemini-pro-3-1
     type: llm-gemini
-    path: "https://generativelanguage.googleapis.com/v1beta?model=gemini-2.5-pro&api_key=${GEMINI_API_KEY}&max_tokens=8192&thinking_budget=4096&timeout=120s"
+    path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
 
-  # Gemini Flash (cheaper, for summarization/review)
-  - name: gemini-flash
-    type: llm-gemini
-    path: "https://generativelanguage.googleapis.com/v1beta?model=gemini-2.5-flash&api_key=${GEMINI_API_KEY}&max_tokens=4096&timeout=60s"
-
-  # OpenAI (full endpoint, POST as-is)
-  # - name: gpt-4
-  #   type: llm-openai
-  #   path: "https://api.openai.com/v1/chat/completions?model=gpt-4&api_key=${OPENAI_API_KEY}&timeout=60s"
-
-  # Anthropic (full endpoint, POST as-is)
+  # Anthropic Claude
   # - name: claude-sonnet
   #   type: llm-anthropic
-  #   path: "https://api.anthropic.com/v1/messages?model=claude-sonnet-4&api_key=${ANTHROPIC_API_KEY}&thinking_budget=4096&timeout=120s"
+  #   path: 'https://api.anthropic.com/v1/messages?model=claude-sonnet-4-20250514&api_key="${ANTHROPIC_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=60s'
+
+  # OpenAI / OpenAI-compatible
+  # - name: chatgpt-5-4-mini
+  #   type: llm-openai
+  #   path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4-mini-2026-03-17"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
 
   # Local LM Studio / vLLM / Ollama (OpenAI-compatible)
-  # - name: local-gemma
+  # - name: gemma4-26b
   #   type: llm-openai
-  #   path: "http://localhost:1234/v1/chat/completions?model=gemma-4-26b&max_tokens=8192&timeout=60s"
+  #   path: 'http://host.docker.internal:1234/v1/chat/completions?model="google/gemma-4-26b-a4b"&max_tokens=140296&thinking_budget=2048&timeout=10m'
 
-  # Embedding (OpenAI)
-  - name: text-embedding-3-small
-    type: embedding
-    path: "https://api.openai.com/v1/embeddings?model=text-embedding-3-small&api_key=${OPENAI_API_KEY}&timeout=10s"
-
-  # Embedding (local Ollama)
-  # - name: local-embed
+  # Embedding (local LM Studio — OpenAI-compatible embeddings endpoint)
+  # - name: gemma-embedding
   #   type: embedding
-  #   path: "http://localhost:11434/v1/embeddings?model=nomic-embed-text&timeout=10s"
+  #   path: 'http://host.docker.internal:1234/v1/embeddings?model="embeddinggemma-300m"&timeout=30s'
+
+  # Embedding (remote OpenAI)
+  # - name: text-embedding-3-small
+  #   type: embedding
+  #   path: 'https://api.openai.com/v1/embeddings?model=text-embedding-3-small&api_key="${OPENAI_API_KEY}"&timeout=10s'

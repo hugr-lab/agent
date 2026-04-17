@@ -390,6 +390,10 @@ func buildRuntime(ctx context.Context, cfg *config.Config, logger *slog.Logger, 
 		}
 		rt.engine = engine
 		querier = engine
+		if err := setupLocalSources(ctx, engine, cfg, logger); err != nil {
+			rt.close(logger)
+			return nil, fmt.Errorf("setup local sources: %w", err)
+		}
 	} else {
 		url := cfg.Memory.HugrURL
 		if url == "" {
