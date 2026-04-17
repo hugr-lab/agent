@@ -1,10 +1,11 @@
 # agent Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-04-14
+Auto-generated from all feature plans. Last updated: 2026-04-17
 
 ## Active Technologies
 - Go 1.26.1 + ADK Go v1.1.0 (`agent.New`, `runner.Runner`, `adka2a.Executor`, `mcptoolset`, `tool.Toolset`), a2a-go v0.3.13, MCP Go SDK v1.4.1, hugr query-engine/client v0.3.28, viper v1.21 (002-runtime-bootstrap)
 - File-based (skills on disk, YAML config, .env secrets) (002-runtime-bootstrap)
+- DuckDB (embedded, file-based) via query-engine. CoreDB `data/engine.db` + memory `data/memory.db`. (004-hubdb-foundation)
 
 - Go 1.26.1 + ADK Go (`google.golang.org/adk`), Hugr Go client (`github.com/hugr-lab/query-engine/client`), Viper (`github.com/spf13/viper`) (001-agent-prototype)
 
@@ -25,6 +26,7 @@ tests/
 Go 1.26.1: Follow standard conventions
 
 ## Recent Changes
+- 004-hubdb-foundation: Added Go 1.26.1
 - 002-runtime-bootstrap: Added Go 1.26.1 + ADK Go v1.1.0 (`agent.New`, `runner.Runner`, `adka2a.Executor`, `mcptoolset`, `tool.Toolset`), a2a-go v0.3.13, MCP Go SDK v1.4.1, hugr query-engine/client v0.3.28, viper v1.21
 
 - 001-agent-prototype: Added Go 1.26.1 + ADK Go (`google.golang.org/adk`), Hugr Go client (`github.com/hugr-lab/query-engine/client`), Viper (`github.com/spf13/viper`)
