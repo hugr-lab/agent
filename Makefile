@@ -1,27 +1,34 @@
-.PHONY: build run test vet lint check clean
+.PHONY: build run run-devui run-console test vet lint check clean
 
-BINARY=bin/hugen
+BINARY := bin/hugen
+TAGS   := duckdb_arrow
+
+# Debug-friendly CGO flags (DuckDB symbols visible in delve / stack traces).
+CGO_DEBUG_FLAGS := -O1 -g
 
 build:
-	go build -o $(BINARY) ./cmd/agent
+	go build -tags=$(TAGS) -o $(BINARY) ./cmd/agent
+
+build-debug:
+	CGO_CFLAGS="$(CGO_DEBUG_FLAGS)" go build -tags=$(TAGS) -gcflags="all=-N -l" -o $(BINARY) ./cmd/agent
 
 run:
-	go run ./cmd/agent
+	go run -tags=$(TAGS) ./cmd/agent
 
 run-devui:
-	go run ./cmd/agent devui
+	go run -tags=$(TAGS) ./cmd/agent devui
 
 run-console:
-	go run ./cmd/agent console
+	go run -tags=$(TAGS) ./cmd/agent console
 
 test:
-	go test -race -count=1 ./...
+	CGO_CFLAGS="$(CGO_DEBUG_FLAGS)" go test -tags=$(TAGS) -race -count=1 ./...
 
 vet:
-	go vet ./...
+	go vet -tags=$(TAGS) ./...
 
 lint:
-	golangci-lint run ./...
+	golangci-lint run --build-tags=$(TAGS) ./...
 
 check: vet test
 

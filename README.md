@@ -4,6 +4,11 @@ AI agent runtime for the [Hugr](https://hugr-lab.github.io) Data Mesh platform.
 
 Built on [Google ADK Go](https://github.com/google/adk-go), uses Hugr as the LLM backend and data exploration layer via GraphQL and MCP.
 
+## Operating Modes
+
+- **Local / standalone** (`hugr_local.enabled: true`) — the agent boots an embedded Hugr engine in-process and attaches `data/memory.db` as the `hub.db` runtime source. LLM and embedding providers can be registered inside this local engine (`llm.mode: local`, `embedding.mode: local`) so the agent runs without any external Hugr instance.
+- **Hub** (`hugr_local.enabled: false`) — the agent connects to a remote Hugr at `cfg.Hugr.URL` (or `memory.hugr_url` for a dedicated memory hub) and uses its catalog for both memory and model queries.
+
 ## Quick Start
 
 ```bash
@@ -77,25 +82,45 @@ make run-console  # Run in console mode
 
 ### YAML Configuration (config.yaml)
 
-```yaml
-llm:
-  routes:
-    default: gemma4-26b
-    # tool_calling: gemma-local
-    # summarization: gemma-tiny
+See `config.example.yaml` for the full annotated schema. Key sections:
 
-skills:
-  path: ./skills
-```
+- `agent` — identity (id, short_id, name, type)
+- `hugr_local` — embedded engine toggle and DuckDB settings
+- `memory` — `local|remote` mode + path for `data/memory.db`, volatility durations, scheduler cadence
+- `llm` — routing (`default`, `tool_calling`, `summarization`, …) and mode
+- `embedding` — model name + dimension (**frozen** at first run — see below)
+- `models` — LLM/embedding provider URLs; format mirrors hugr's `core.data_sources` so the same source name works in local and hub modes
 
-Config changes are hot-reloaded automatically.
+`llm.routes` and `skills.path` are hot-reloaded on edit.
+
+### Data files (`data/`)
+
+When `hugr_local.enabled: true`:
+
+- `data/engine.db` — CoreDB file (hugr engine catalog, persisted schemas)
+- `data/memory.db` — attached as `hub.db`, holds agent_types / agents / memory_items / sessions / …
+
+Both are plain DuckDB files (gitignored). Deleting them restarts the agent from a clean slate. The files are flushed during graceful shutdown.
+
+### HubDB
+
+`interfaces.HubDB` is the unified Go API for the agent's data plane; the same implementation works over the embedded engine and over a remote Hugr client. In 004 scope:
+
+- `AgentRegistry` — `GetAgentType`, `GetAgent`, `RegisterAgent`, `UpdateAgentActivity` (cross-agent `ListAgents` / `UpsertAgentType` are hub-only and stubbed)
+- `Embeddings` — `Embed`, `EmbedBatch`, `Dimension`, `Available` via `core.models.embedding`; returns `hubdb.ErrEmbeddingDisabled` when no model is configured so callers can fall back to FTS
+- `Memory`, `Learning`, `Sessions` — stubbed; filled in by spec 003b
+
+### Embedding dimension is frozen
+
+The embedding model and dimension are stored in the memory DB on first provision and verified on every subsequent run. Changing the model or dimension in config is fatal (would corrupt stored vectors) — the agent logs a clear error asking you to delete `data/memory.db` and re-create the agent.
 
 ## Project Structure
 
 ```
-cmd/agent/              Entry point (A2A, devui, console modes)
-interfaces/             Environment-agnostic contracts
+cmd/agent/              Entry point (A2A, devui, console modes) + engine/hubdb/sources wiring
+interfaces/             Environment-agnostic contracts (HubDB, AgentRegistry, Memory, Learning, Sessions, Embeddings)
 pkg/
+  id/                   Synthetic sortable ID generator (agt_, mem_, sess_, hyp_, …)
   agent/                HugrAgent: agent wiring, DynamicToolset, PromptBuilder, TokenEstimator
   llms/intent/          Intent-based LLM routing
   tools/system/         Built-in tools: skill_list, skill_load, skill_ref, context_status
@@ -104,7 +129,11 @@ pkg/
   auth/                 Token stores (Remote, OIDC, secret key)
 adapters/
   file/                 File-based SkillProvider and ConfigProvider
+  hubdb/                HubDB over types.Querier; Source ("hub.db") + AgentRegistry + Embeddings
+  hubdb/migrate/        DuckDB/Postgres provisioner for memory.db (schema + seed + embedding-version guard)
   test/                 Test adapters (ScriptedLLM, StaticSkillProvider)
+internal/
+  config/               YAML + .env loader
 skills/                 Skill packages (SKILL.md + references/ + mcp.yaml)
 constitution/           Base system prompt
 ```
