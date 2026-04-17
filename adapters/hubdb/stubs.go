@@ -165,13 +165,3 @@ func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]inter
 	return nil, notImplemented("ListParticipants")
 }
 
-// ── Embeddings (filled in by US4) ───────────────────────────
-
-func (h *hubDB) Embed(ctx context.Context, text string) ([]float32, error) {
-	return nil, notImplemented("Embed")
-}
-func (h *hubDB) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	return nil, notImplemented("EmbedBatch")
-}
-func (h *hubDB) Dimension() int  { return h.dimension }
-func (h *hubDB) Available() bool { return false }

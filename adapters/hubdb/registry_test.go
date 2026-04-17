@@ -17,7 +17,11 @@ import (
 func newTestHubDB(t *testing.T, agentID, shortID string) interfaces.HubDB {
 	t.Helper()
 	service, _ := testEngine(t)
-	h, err := hubdb.New(service, agentID, shortID, 0, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
+	h, err := hubdb.New(service, hubdb.Options{
+		AgentID:    agentID,
+		AgentShort: shortID,
+		Logger:     slog.New(slog.NewTextHandler(discardWriter{}, nil)),
+	})
 	require.NoError(t, err)
 	return h
 }

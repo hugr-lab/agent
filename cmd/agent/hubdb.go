@@ -17,5 +17,11 @@ func buildHubDB(cfg *config.Config, querier types.Querier, logger *slog.Logger) 
 	if cfg.Identity.ID == "" {
 		return nil, fmt.Errorf("config: agent.id is required")
 	}
-	return hubdb.New(querier, cfg.Identity.ID, cfg.Identity.ShortID, cfg.Embedding.Dimension, logger)
+	return hubdb.New(querier, hubdb.Options{
+		AgentID:        cfg.Identity.ID,
+		AgentShort:     cfg.Identity.ShortID,
+		Dimension:      cfg.Embedding.Dimension,
+		EmbeddingModel: cfg.Embedding.Model,
+		Logger:         logger,
+	})
 }
