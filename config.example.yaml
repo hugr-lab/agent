@@ -1,10 +1,101 @@
-llm:
-  model: claude-sonnet
-  max_tokens: 4096
-  routes:
-    default: claude-sonnet
-    # tool_calling: claude-haiku
-    # summarization: claude-haiku
+# hugr-agent configuration example.
+# Copy to config.yaml and adjust to your environment.
+# Secrets live in .env (referenced via ${VAR} below).
 
+# ── Agent identity ──────────────────────────────────────────
+agent:
+  id: agt_ag01           # full agent ID (used in logs, events, IDs)
+  short_id: ag01         # 4-char alias embedded in synthetic entity IDs
+  name: hugr-data-agent
+  type: hugr-data        # agent_type id — template of config/skills/constitution
+
+# ── Embedded hugr engine ────────────────────────────────────
+# Disable entirely (`enabled: false`) to run in hub mode where memory and
+# LLM/embedding queries go through a remote Hugr instance.
+hugr_local:
+  enabled: true
+  db:
+    path: data/engine.db
+    settings:
+      max_memory: 4          # GB
+      worker_threads: 2
+      home_directory: data
+      timezone: UTC
+
+# ── Memory storage ──────────────────────────────────────────
+memory:
+  mode: local                # local (via hugr_local) | remote (via hugr_url)
+  path: data/memory.db       # DuckDB file attached as "hub.db"
+  hugr_url: ""                # required when mode=remote, e.g. http://hugr-hub:15000
+  volatility_duration:
+    stable: 8760h             # 365d
+    slow: 2160h               # 90d
+    moderate: 720h            # 30d
+    fast: 168h                # 7d
+    volatile: 24h             # 1d
+  compaction_threshold: 0.7
+  scheduler:
+    interval: 5m
+    review_delay: 30s
+  consolidation:
+    hypothesis_expiry: 720h
+
+# ── LLM routing ─────────────────────────────────────────────
+llm:
+  mode: remote               # local = via hugr_local, remote = via HUGR_URL
+  model: gemini-pro-3-1
+  max_tokens: 8192
+  temperature: 0.4
+  routes:
+    default: gemini-pro-3-1
+    # tool_calling: claude-haiku
+    # summarization: gemini-flash
+
+# ── Embedding ───────────────────────────────────────────────
+embedding:
+  mode: remote               # local | remote
+  model: ""                   # empty = disabled, FTS fallback only
+  dimension: 384
+
+# ── Skills ─────────────────────────────────────────────────
 skills:
   path: ./skills
+
+# ── LLM/Embedding data sources (mode=local only) ───────────
+# Path format: full provider URL + query params. ${ENV_VAR} expanded at attach.
+# Types: llm-openai | llm-anthropic | llm-gemini | embedding
+models:
+  # Gemini (base URL only — provider appends /models/{model}:generateContent)
+  - name: gemini-pro-3-1
+    type: llm-gemini
+    path: "https://generativelanguage.googleapis.com/v1beta?model=gemini-2.5-pro&api_key=${GEMINI_API_KEY}&max_tokens=8192&thinking_budget=4096&timeout=120s"
+
+  # Gemini Flash (cheaper, for summarization/review)
+  - name: gemini-flash
+    type: llm-gemini
+    path: "https://generativelanguage.googleapis.com/v1beta?model=gemini-2.5-flash&api_key=${GEMINI_API_KEY}&max_tokens=4096&timeout=60s"
+
+  # OpenAI (full endpoint, POST as-is)
+  # - name: gpt-4
+  #   type: llm-openai
+  #   path: "https://api.openai.com/v1/chat/completions?model=gpt-4&api_key=${OPENAI_API_KEY}&timeout=60s"
+
+  # Anthropic (full endpoint, POST as-is)
+  # - name: claude-sonnet
+  #   type: llm-anthropic
+  #   path: "https://api.anthropic.com/v1/messages?model=claude-sonnet-4&api_key=${ANTHROPIC_API_KEY}&thinking_budget=4096&timeout=120s"
+
+  # Local LM Studio / vLLM / Ollama (OpenAI-compatible)
+  # - name: local-gemma
+  #   type: llm-openai
+  #   path: "http://localhost:1234/v1/chat/completions?model=gemma-4-26b&max_tokens=8192&timeout=60s"
+
+  # Embedding (OpenAI)
+  - name: text-embedding-3-small
+    type: embedding
+    path: "https://api.openai.com/v1/embeddings?model=text-embedding-3-small&api_key=${OPENAI_API_KEY}&timeout=10s"
+
+  # Embedding (local Ollama)
+  # - name: local-embed
+  #   type: embedding
+  #   path: "http://localhost:11434/v1/embeddings?model=nomic-embed-text&timeout=10s"

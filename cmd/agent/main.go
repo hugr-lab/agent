@@ -44,7 +44,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.Load()
+	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}

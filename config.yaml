@@ -1,4 +1,44 @@
+# ── Agent identity ──────────────────────────────────────────
+agent:
+  id: agt_ag01
+  short_id: ag01
+  name: hugr-data-agent
+  type: hugr-data
+
+# ── Embedded hugr engine ────────────────────────────────────
+# Attaches the memory DB as a RuntimeSource module "hub.db".
+# Disable for hub mode (memory via remote Hugr).
+hugr_local:
+  enabled: true
+  db:
+    path: data/engine.db
+    settings:
+      max_memory: 4
+      worker_threads: 2
+      home_directory: data
+      timezone: UTC
+
+# ── Memory storage ──────────────────────────────────────────
+memory:
+  mode: local            # local | remote
+  path: data/memory.db
+  hugr_url: ""            # used only when mode=remote
+  volatility_duration:
+    stable: 8760h
+    slow: 2160h
+    moderate: 720h
+    fast: 168h
+    volatile: 24h
+  compaction_threshold: 0.7
+  scheduler:
+    interval: 5m
+    review_delay: 30s
+  consolidation:
+    hypothesis_expiry: 720h
+
+# ── LLM routing ─────────────────────────────────────────────
 llm:
+  mode: remote           # local | remote
   model: gemini-pro-3-1
   max_tokens: 8096
   temperature: 0.4
@@ -7,5 +47,18 @@ llm:
     # tool_calling: claude-haiku
     # summarization: claude-haiku
 
+# ── Embedding ───────────────────────────────────────────────
+embedding:
+  mode: remote           # local | remote
+  model: ""               # empty = disabled, FTS fallback
+  dimension: 384
+
+# ── Skills (file-based) ─────────────────────────────────────
 skills:
   path: ./skills
+
+# ── LLM/Embedding data sources ──────────────────────────────
+# Registered in the local engine when llm.mode=local (or embedding.mode=local).
+# Path = full URL + query params. ${ENV_VAR} expanded at attach time.
+# Type: llm-openai | llm-anthropic | llm-gemini | embedding
+models: []
