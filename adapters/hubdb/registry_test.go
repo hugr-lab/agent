@@ -115,4 +115,3 @@ func TestUpdateAgentActivity(t *testing.T) {
 	assert.False(t, after.LastActive.Before(before.LastActive),
 		"last_active should move forward or stay equal: before=%v after=%v", before.LastActive, after.LastActive)
 }
-

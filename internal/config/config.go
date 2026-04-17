@@ -75,13 +75,13 @@ type AgentIdentity struct {
 // ── Embedded hugr engine ────────────────────────────────────
 
 type HugrLocalConfig struct {
-	Enabled bool           `mapstructure:"enabled"`
-	DB      HugrLocalDB    `mapstructure:"db"`
+	Enabled bool        `mapstructure:"enabled"`
+	DB      HugrLocalDB `mapstructure:"db"`
 }
 
 type HugrLocalDB struct {
-	Path     string          `mapstructure:"path"`
-	Settings HugrLocalDBSet  `mapstructure:"settings"`
+	Path     string         `mapstructure:"path"`
+	Settings HugrLocalDBSet `mapstructure:"settings"`
 }
 
 type HugrLocalDBSet struct {
@@ -94,18 +94,18 @@ type HugrLocalDBSet struct {
 // ── Memory storage ──────────────────────────────────────────
 
 type MemoryConfig struct {
-	Mode                string                  `mapstructure:"mode"`
-	Path                string                  `mapstructure:"path"`
-	HugrURL             string                  `mapstructure:"hugr_url"`
+	Mode                string                   `mapstructure:"mode"`
+	Path                string                   `mapstructure:"path"`
+	HugrURL             string                   `mapstructure:"hugr_url"`
 	VolatilityDuration  map[string]time.Duration `mapstructure:"volatility_duration"`
-	CompactionThreshold float64                 `mapstructure:"compaction_threshold"`
-	Scheduler           MemoryScheduler         `mapstructure:"scheduler"`
-	Consolidation       MemoryConsolidation     `mapstructure:"consolidation"`
+	CompactionThreshold float64                  `mapstructure:"compaction_threshold"`
+	Scheduler           MemoryScheduler          `mapstructure:"scheduler"`
+	Consolidation       MemoryConsolidation      `mapstructure:"consolidation"`
 }
 
 type MemoryScheduler struct {
-	Interval     time.Duration `mapstructure:"interval"`
-	ReviewDelay  time.Duration `mapstructure:"review_delay"`
+	Interval    time.Duration `mapstructure:"interval"`
+	ReviewDelay time.Duration `mapstructure:"review_delay"`
 }
 
 type MemoryConsolidation struct {

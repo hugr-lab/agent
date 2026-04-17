@@ -173,4 +173,3 @@ func (h *hubDB) UpdateAgentActivity(ctx context.Context, id string) error {
 		},
 	)
 }
-

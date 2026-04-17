@@ -34,7 +34,7 @@ func registerModelSources(ctx context.Context, engine *hugr.Service, models []co
 	return nil
 }
 
-func isLLMType(t string) bool      { return strings.HasPrefix(t, "llm-") }
+func isLLMType(t string) bool       { return strings.HasPrefix(t, "llm-") }
 func isEmbeddingType(t string) bool { return t == "embedding" }
 
 // verifyEmbedding runs a probe embedding call against the configured model
@@ -100,4 +100,3 @@ func setupLocalSources(ctx context.Context, engine *hugr.Service, cfg *config.Co
 	logger.Info("embedding verified", "model", cfg.Embedding.Model, "dimension", dim)
 	return nil
 }
-

@@ -48,8 +48,10 @@ func (h *hubDB) Reinforce(ctx context.Context, id string, scoreBonus float64, ex
 func (h *hubDB) Supersede(ctx context.Context, oldID string, newItem interfaces.MemoryItem, tags []string, links []interfaces.MemoryLink) (string, error) {
 	return "", notImplemented("Supersede")
 }
-func (h *hubDB) Delete(ctx context.Context, id string) error        { return notImplemented("Delete") }
-func (h *hubDB) DeleteExpired(ctx context.Context) (int, error)     { return 0, notImplemented("DeleteExpired") }
+func (h *hubDB) Delete(ctx context.Context, id string) error { return notImplemented("Delete") }
+func (h *hubDB) DeleteExpired(ctx context.Context) (int, error) {
+	return 0, notImplemented("DeleteExpired")
+}
 func (h *hubDB) AddTags(ctx context.Context, id string, tags []string) error {
 	return notImplemented("AddTags")
 }
@@ -164,4 +166,3 @@ func (h *hubDB) RemoveParticipant(ctx context.Context, sessionID, userID string)
 func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]interfaces.SessionParticipant, error) {
 	return nil, notImplemented("ListParticipants")
 }
-
