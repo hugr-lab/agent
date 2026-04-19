@@ -1,58 +1,74 @@
+// Package agent builds the HugrAgent on top of ADK's llmagent, wiring
+// our SessionManager for session lifecycle + tool injection and keeping
+// ADK's Flow-level tool cache out of the picture (Toolsets: nil, all
+// tool resolution happens in a BeforeModelCallback).
 package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
 )
 
-// AgentConfig holds the configuration for building a HugrAgent.
-type AgentConfig struct {
+// Config bundles agent dependencies.
+type Config struct {
 	// Router is the intent-based LLM router.
 	Router *intent.Router
 
-	// Toolset is the dynamic toolset that manages all runtime tools.
-	Toolset *DynamicToolset
+	// Sessions provides per-invocation Snapshot (prompt + tools) and
+	// session lifecycle. Required.
+	Sessions interfaces.SessionManager
 
-	// Prompt builds the system prompt from constitution + skills.
-	Prompt *PromptBuilder
-
-	// Tokens estimates and calibrates context token usage.
+	// Tokens is the calibrateable estimator used by the AfterModelCallback
+	// to track context usage per session. Optional.
 	Tokens *TokenEstimator
 
-	// Logger for agent operations.
+	// Logger is optional; defaults to slog.Default.
 	Logger *slog.Logger
-
-	// Debug enables verbose channel events with full tool args/results.
-	Debug bool
 }
 
-// NewAgent creates a Hugr agent backed by llmagent with dynamic prompt, tools,
-// and intent-based LLM routing.
-//
-// The agent uses llmagent.New() with:
-//   - InstructionProvider → PromptBuilder.BuildForSession() (per-session system prompt)
-//   - Toolsets → [DynamicToolset] (tools change when skills load/unload)
-//   - Model → IntentLLM Router (routes by intent, Phase 2: single model)
-//   - AfterModelCallbacks → TokenEstimator calibration
-//
-// Skill state (instructions, catalog, references) is session-scoped inside
-// PromptBuilder, so parallel sessions never interfere with each other.
-func NewAgent(cfg AgentConfig) (agent.Agent, error) {
+// NewAgent builds the HugrAgent:
+//   - InstructionProvider → Session.Snapshot().Prompt
+//   - BeforeModelCallbacks → tools.Inject(Sessions) (rewrites req tools)
+//   - AfterModelCallbacks → calibrateTokens(Tokens) (updates token stats)
+//   - Toolsets: nil — the Inject callback is the single source of truth
+//     for both req.Config.Tools and req.Tools.
+func NewAgent(cfg Config) (agent.Agent, error) {
+	if cfg.Sessions == nil {
+		return nil, fmt.Errorf("agent: Sessions required")
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+
 	return llmagent.New(llmagent.Config{
 		Name:        "hugr_agent",
 		Description: "Hugr Data Mesh Agent — explores data sources, builds queries, presents results",
 		Model:       cfg.Router,
-		Toolsets:    []tool.Toolset{cfg.Toolset},
+		Toolsets:    nil,
 
 		InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
-			return cfg.Prompt.BuildForSession(ctx.SessionID()), nil
+			sid := ctx.SessionID()
+			if sid == "" {
+				return "", nil
+			}
+			sess, err := cfg.Sessions.Session(sid)
+			if err != nil {
+				return "", fmt.Errorf("agent: instruction provider: %w", err)
+			}
+			return sess.Snapshot().Prompt, nil
+		},
+
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			tools.Inject(cfg.Sessions),
 		},
 
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
@@ -61,17 +77,24 @@ func NewAgent(cfg AgentConfig) (agent.Agent, error) {
 	})
 }
 
-// calibrateTokens returns a callback that feeds LLM usage metadata
-// into the TokenEstimator after each model response.
-func calibrateTokens(cfg AgentConfig) llmagent.AfterModelCallback {
+// calibrateTokens returns an AfterModelCallback that feeds LLM usage
+// metadata into the TokenEstimator.
+func calibrateTokens(cfg Config) llmagent.AfterModelCallback {
 	return func(ctx agent.CallbackContext, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
-		if resp == nil || resp.UsageMetadata == nil {
+		if resp == nil || resp.UsageMetadata == nil || cfg.Tokens == nil {
 			return nil, nil
 		}
-
+		sid := ctx.SessionID()
+		if sid == "" {
+			return nil, nil
+		}
+		sess, err := cfg.Sessions.Session(sid)
+		if err != nil {
+			return nil, nil
+		}
 		promptTokens := int(resp.UsageMetadata.PromptTokenCount)
 		completionTokens := int(resp.UsageMetadata.CandidatesTokenCount)
-		promptChars := cfg.Prompt.CharCountForSession(ctx.SessionID())
+		promptChars := len(sess.Snapshot().Prompt)
 
 		if promptTokens > 0 {
 			cfg.Tokens.Calibrate(promptChars, promptTokens, completionTokens)
@@ -84,16 +107,19 @@ func calibrateTokens(cfg AgentConfig) llmagent.AfterModelCallback {
 				)
 			}
 		}
-
-		// Return nil to not alter the response.
 		return nil, nil
 	}
 }
 
-// StartSessionCleanup starts a background goroutine that periodically removes
-// stale session state from PromptBuilder and DynamicToolset.
-// Call cancel on the returned context to stop the goroutine.
-func StartSessionCleanup(ctx context.Context, prompt *PromptBuilder, toolset *DynamicToolset, maxAge time.Duration, logger *slog.Logger) {
+// StartSessionCleanup launches a goroutine that periodically purges
+// sessions inactive for more than maxAge. Cancel ctx to stop it.
+func StartSessionCleanup(ctx context.Context, sm interfaces.SessionManager, maxAge time.Duration, logger *slog.Logger) {
+	if sm == nil || maxAge <= 0 {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	go func() {
 		ticker := time.NewTicker(maxAge / 2)
 		defer ticker.Stop()
@@ -102,10 +128,8 @@ func StartSessionCleanup(ctx context.Context, prompt *PromptBuilder, toolset *Dy
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p := prompt.CleanupStaleSessions(maxAge)
-				t := toolset.CleanupStaleSessions(maxAge)
-				if p+t > 0 && logger != nil {
-					logger.Info("session cleanup", "prompt_sessions", p, "toolset_sessions", t)
+				if n := sm.Cleanup(maxAge); n > 0 {
+					logger.Info("session cleanup", "removed", n)
 				}
 			}
 		}

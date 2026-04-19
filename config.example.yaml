@@ -1,10 +1,109 @@
-llm:
-  model: claude-sonnet
-  max_tokens: 4096
-  routes:
-    default: claude-sonnet
-    # tool_calling: claude-haiku
-    # summarization: claude-haiku
+# hugr-agent configuration example.
+# Copy to config.yaml and adjust to your environment.
+# Secrets live in .env (referenced via ${VAR} below).
 
+# ── Agent identity ──────────────────────────────────────────
+agent:
+  id: agt_ag01           # full agent ID (used in logs, events, IDs)
+  short_id: ag01         # 4-char alias embedded in synthetic entity IDs
+  name: hugr-data-agent
+  type: hugr-data        # agent_type id — template of config/skills/constitution
+
+# ── Embedded hugr engine ────────────────────────────────────
+# Disable entirely (`enabled: false`) to run in hub mode where memory and
+# LLM/embedding queries go through a remote Hugr instance.
+hugr_local:
+  enabled: true
+  db:
+    path: data/engine.db
+    settings:
+      max_memory: 4          # GB
+      worker_threads: 2
+      home_directory: data
+      timezone: UTC
+
+# ── Memory storage ──────────────────────────────────────────
+memory:
+  mode: local                # local (via hugr_local) | remote (via hugr_url)
+  path: data/memory.db       # DuckDB file attached as "hub.db"
+  hugr_url: ""                # required when mode=remote, e.g. http://hugr-hub:15000
+  volatility_duration:
+    stable: 8760h             # 365d
+    slow: 2160h               # 90d
+    moderate: 720h            # 30d
+    fast: 168h                # 7d
+    volatile: 24h             # 1d
+  compaction_threshold: 0.7
+  scheduler:
+    interval: 5m
+    review_delay: 30s
+  consolidation:
+    hypothesis_expiry: 720h
+
+# ── LLM routing ─────────────────────────────────────────────
+# mode=local registers each `models:` entry (type llm-*) in the embedded
+# engine. Swap AGENT_MODEL in .env (or llm.model here) to pick a provider.
+llm:
+  mode: local                # local (via embedded engine) | remote (via HUGR_URL)
+  model: gemma4-26b
+  max_tokens: 8192
+  temperature: 0.4
+  routes:
+    default: gemma4-26b
+    # tool_calling: gpt-oss-20b
+    # summarization: gemma-small
+
+# ── Embedding ───────────────────────────────────────────────
+# model must match a `models:` entry of type embedding. dimension is
+# frozen at first run of data/memory.db — changing it later is fatal
+# (delete data/memory.db to re-create the agent).
+embedding:
+  mode: local                # local | remote | "" (FTS only)
+  model: gemma-embedding     # empty = disabled, FTS fallback only
+  dimension: 768
+
+# ── Skills ─────────────────────────────────────────────────
 skills:
   path: ./skills
+
+# ── LLM/Embedding data sources (mode=local only) ───────────
+# Path format matches hugr's core.data_sources format:
+# URL + query params; ${ENV_VAR} is expanded at registration.
+# Types: llm-openai | llm-anthropic | llm-gemini | embedding
+#
+# Tip: mirror exactly what's registered in your Hugr instance
+# (`{ core { data_sources { name type path } } }`) so the agent speaks the
+# same source names in local mode and hub mode.
+models:
+  # Local LM Studio / vLLM / Ollama (OpenAI-compatible)
+  - name: gemma4-26b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8192&thinking_budget=2048&timeout=10m'
+  - name: gemma4-31b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-31b"&max_tokens=8192&thinking_budget=2048&timeout=10m'
+  - name: gpt-oss-20b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="openai/gpt-oss-20b"&max_tokens=8192&thinking_budget=2048&timeout=10m'
+  - name: gemma-small
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model=gemma-4-e2b-it&timeout=120s'
+
+  # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
+  - name: gemma-embedding
+    type: embedding
+    path: '${EMBED_LOCAL_URL}?model="embeddinggemma-300m"&timeout=30s'
+
+  # Cloud providers — uncomment after filling ${*_API_KEY} in .env
+  # - name: gemini-pro-3-1
+  #   type: llm-gemini
+  #   path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+  # - name: claude-sonnet
+  #   type: llm-anthropic
+  #   path: 'https://api.anthropic.com/v1/messages?model=claude-sonnet-4-20250514&api_key="${ANTHROPIC_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=60s'
+  # - name: chatgpt-5-4-mini
+  #   type: llm-openai
+  #   path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4-mini-2026-03-17"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+  # - name: text-embedding-3-small
+  #   type: embedding
+  #   path: 'https://api.openai.com/v1/embeddings?model=text-embedding-3-small&api_key="${OPENAI_API_KEY}"&timeout=10s'

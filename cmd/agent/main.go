@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,35 +17,24 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"github.com/hugr-lab/hugen/adapters/file"
 	"github.com/hugr-lab/hugen/internal/config"
-	hugen "github.com/hugr-lab/hugen/pkg/agent"
-	"github.com/hugr-lab/hugen/pkg/auth"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/models/hugr"
-	"github.com/hugr-lab/hugen/pkg/tools/system"
-	"github.com/hugr-lab/query-engine/client"
-	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/web/webui"
 	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/server/adkrest"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptoolset"
+	adksession "google.golang.org/adk/session"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.Load()
+	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -70,24 +60,35 @@ func main() {
 	switch mode {
 	case "console":
 		consoleMux := http.NewServeMux()
-		hugrTransport := buildHugrTransport(cfg, logger, consoleMux)
+		authStores, err := buildAuthStores(ctx, cfg, logger, consoleMux)
+		if err != nil {
+			log.Fatalf("auth: %v", err)
+		}
+		hugrTransport := resolveHugrTransport(cfg, authStores, logger)
 
+		addr := fmt.Sprintf(":%d", cfg.Agent.Port)
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatalf("listen %s: %v", addr, err)
+		}
 		go func() {
-			addr := fmt.Sprintf(":%d", cfg.Agent.Port)
-			if err := http.ListenAndServe(addr, consoleMux); err != nil {
+			if err := http.Serve(listener, consoleMux); err != nil {
 				logger.Error("callback server error", "err", err)
 			}
 		}()
-
-		a, hugrClient, err := buildAgent(cfg, logger, hugrTransport)
-		if err != nil {
-			log.Fatalf("Failed to build agent: %v", err)
+		for _, p := range authStores.PromptLogin {
+			go p()
 		}
-		defer hugrClient.CloseSubscriptions()
+
+		rt, err := buildRuntime(ctx, cfg, logger, authStores, hugrTransport)
+		if err != nil {
+			log.Fatalf("Failed to build runtime: %v", err)
+		}
+		defer rt.close(logger)
 		l := full.NewLauncher()
 		if err := l.Execute(ctx, &launcher.Config{
-			AgentLoader:    agent.NewSingleLoader(a),
-			SessionService: session.InMemoryService(),
+			AgentLoader:    agent.NewSingleLoader(rt.agent),
+			SessionService: rt.sessions,
 		}, os.Args[2:]); err != nil {
 			log.Fatalf("Launcher error: %v\n\n%s", err, l.CommandLineSyntax())
 		}
@@ -104,210 +105,8 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-func buildAgent(cfg *config.Config, logger *slog.Logger, hugrTransport http.RoundTripper) (agent.Agent, *client.Client, error) {
-	hugrClient := client.NewClient(
-		cfg.Hugr.URL+"/ipc",
-		client.WithTransport(hugrTransport),
-	)
-
-	// Default HUGR_MCP_URL so skills' mcp.yaml can reference ${HUGR_MCP_URL}.
-	if os.Getenv("HUGR_MCP_URL") == "" {
-		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
-	}
-
-	// Load YAML config (model, max_tokens, routes, skills path).
-	yamlCfg, err := file.NewConfigProvider("config.yaml")
-	if err != nil {
-		logger.Debug("config.yaml not loaded", "err", err)
-	} else {
-		if m := yamlCfg.GetString("llm.model"); m != "" {
-			cfg.Agent.Model = m
-		}
-		if mt := yamlCfg.GetInt("llm.max_tokens"); mt > 0 {
-			cfg.Agent.MaxTokens = mt
-		}
-		if t := yamlCfg.GetFloat64("llm.temperature"); t > 0 {
-			cfg.Agent.Temperature = float32(t)
-		}
-		if sp := yamlCfg.GetString("skills.path"); sp != "" {
-			cfg.Agent.SkillsPath = sp
-		}
-	}
-
-	// Dynamic toolset: system tools always available, MCP tools added at startup.
-	toolset := hugen.NewDynamicToolset()
-
-	// LLM via Hugr.
-	llmOpts := []hugr.Option{
-		hugr.WithLogger(logger),
-		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
-		hugr.WithToolChoiceFunc(func() string {
-			return "auto"
-		}),
-	}
-	if cfg.Agent.Temperature > 0 {
-		llmOpts = append(llmOpts, hugr.WithTemperature(cfg.Agent.Temperature))
-	}
-	llm := hugr.New(hugrClient, cfg.Agent.Model, llmOpts...)
-
-	// Intent-based router. Factory allows config-driven route changes.
-	router := intent.NewRouter(llm)
-	router.WithFactory(func(modelName string) model.LLM {
-		return hugr.New(hugrClient, modelName,
-			hugr.WithLogger(logger),
-			hugr.WithMaxTokens(cfg.Agent.MaxTokens),
-		)
-	}).WithLogger(logger)
-
-	if yamlCfg != nil {
-		router.LoadRoutesFromConfig(yamlCfg)
-		yamlCfg.OnChange(func() {
-			logger.Info("config.yaml changed, reloading routes")
-			router.LoadRoutesFromConfig(yamlCfg)
-		})
-	}
-
-	// Constitution (base system prompt).
-	constitution, err := os.ReadFile(cfg.Agent.Constitution)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
-	}
-	prompt := hugen.NewPromptBuilder(string(constitution))
-
-	// Skill catalog for prompt injection.
-	skillsPath := cfg.Agent.SkillsPath
-	if skillsPath == "" {
-		skillsPath = "./skills"
-	}
-	skillProvider := file.NewSkillProvider(skillsPath)
-	skills, err := skillProvider.ListMeta(context.Background())
-	if err != nil {
-		logger.Warn("failed to list skills", "err", err)
-	} else if len(skills) > 0 {
-		prompt.SetDefaultCatalog(skills)
-		logger.Info("skill catalog loaded", "count", len(skills))
-	}
-
-	// Pre-create MCP toolsets at startup for fast skill_load.
-	// They are NOT added to the global toolset — skill_load adds them
-	// per-session so tools only appear after the LLM loads a skill.
-	mcpToolsets := make(map[string]tool.Toolset)
-	mcpEndpoint := os.Getenv("HUGR_MCP_URL")
-	if mcpEndpoint != "" {
-		mcpTransport := &sdkmcp.StreamableClientTransport{
-			Endpoint:             mcpEndpoint,
-			DisableStandaloneSSE: true,
-			HTTPClient:           &http.Client{Transport: hugrTransport},
-		}
-		mcpTools, err := mcptoolset.New(mcptoolset.Config{
-			Transport: mcpTransport,
-		})
-		if err != nil {
-			logger.Error("MCP tools connection failed", "endpoint", mcpEndpoint, "err", err)
-		} else {
-			mcpToolsets[mcpEndpoint] = mcpTools
-			logger.Info("MCP tools pre-connected", "endpoint", mcpEndpoint)
-		}
-	} else {
-		logger.Warn("HUGR_MCP_URL not set — MCP tools unavailable")
-	}
-
-	tokens := hugen.NewTokenEstimator()
-
-	sysDeps := &system.Deps{
-		Skills:      skillProvider,
-		Prompt:      prompt,
-		Toolset:     toolset,
-		Tokens:      tokens,
-		Logger:      logger,
-		MCPToolsets: mcpToolsets,
-	}
-	toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
-
-	debug := os.Getenv("LOG_LEVEL") == "debug"
-
-	a, err := hugen.NewAgent(hugen.AgentConfig{
-		Router:  router,
-		Toolset: toolset,
-		Prompt:  prompt,
-		Tokens:  tokens,
-		Logger:  logger,
-		Debug:   debug,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("create agent: %w", err)
-	}
-
-	// Background cleanup of stale session state (1 hour TTL).
-	hugen.StartSessionCleanup(context.Background(), prompt, toolset, 1*time.Hour, logger)
-
-	return a, hugrClient, nil
-}
-
-// buildHugrTransport creates the HTTP transport for all Hugr communication.
-//
-// Priority:
-//  1. HUGR_ACCESS_TOKEN + HUGR_TOKEN_URL → RemoteStore (production)
-//  2. HUGR_OIDC_ISSUER + HUGR_OIDC_CLIENT_ID → OIDCStore (dev, browser flow)
-//  3. HUGR_SECRET_KEY → static header (dev legacy)
-//
-// When using OIDC, pass the server mux to register /auth/* callback routes.
-func buildHugrTransport(cfg *config.Config, logger *slog.Logger, mux *http.ServeMux) http.RoundTripper {
-	// 1. Production: token exchange service.
-	if cfg.Hugr.UseTokenAuth() {
-		store := auth.NewRemoteStore(cfg.Hugr.AccessToken, cfg.Hugr.TokenURL)
-		logger.Info("auth: using remote token exchange", "url", cfg.Hugr.TokenURL)
-		return auth.Transport(store, http.DefaultTransport)
-	}
-
-	// 2. Dev override: static secret key.
-	if cfg.Hugr.SecretKey != "" {
-		logger.Info("auth: using secret key (dev)")
-		return &headerTransport{
-			base:    http.DefaultTransport,
-			headers: map[string]string{"x-hugr-secret-key": cfg.Hugr.SecretKey},
-		}
-	}
-
-	// 3. OIDC browser flow: explicit config or auto-discover from Hugr.
-	oidcIssuer := cfg.Hugr.OIDCIssuer
-	oidcClientID := cfg.Hugr.OIDCClientID
-
-	if !cfg.Hugr.UseOIDC() && cfg.Hugr.CanDiscoverOIDC() {
-		if discovered, err := auth.DiscoverOIDCFromHugr(context.Background(), cfg.Hugr.URL); err != nil {
-			logger.Debug("OIDC auto-discovery failed", "err", err)
-		} else if discovered != nil {
-			oidcIssuer = discovered.Issuer
-			oidcClientID = discovered.ClientID
-			logger.Info("auth: discovered OIDC from Hugr", "issuer", oidcIssuer)
-		}
-	}
-
-	if oidcIssuer != "" && oidcClientID != "" {
-		store, err := auth.NewOIDCStore(context.Background(), auth.OIDCConfig{
-			IssuerURL:   oidcIssuer,
-			ClientID:    oidcClientID,
-			RedirectURL: cfg.Agent.BaseURL + "/auth/callback",
-			Logger:      logger,
-		})
-		if err != nil {
-			logger.Error("OIDC setup failed", "err", err)
-		} else {
-			if mux != nil {
-				store.RegisterCallbackRoute(mux)
-			}
-			store.PromptLogin()
-			logger.Info("auth: using OIDC browser flow", "issuer", oidcIssuer)
-			return auth.Transport(store, http.DefaultTransport)
-		}
-	}
-
-	logger.Warn("auth: no credentials configured — requests to Hugr will be unauthenticated")
-	return http.DefaultTransport
-}
-
 // a2aHandlers returns the agent card handler and JSON-RPC invoke handler.
-func a2aHandlers(a agent.Agent, sessionSvc session.Service, artifactSvc artifact.Service, baseURL string) (cardHandler, invokeHandler http.Handler) {
+func a2aHandlers(a agent.Agent, sessionSvc adksession.Service, artifactSvc artifact.Service, baseURL string) (cardHandler, invokeHandler http.Handler) {
 	agentCard := &a2a.AgentCard{
 		Name:               a.Name(),
 		Description:        a.Description(),
@@ -329,72 +128,90 @@ func a2aHandlers(a agent.Agent, sessionSvc session.Service, artifactSvc artifact
 	return a2asrv.NewStaticAgentCardHandler(agentCard), a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
 }
 
+
 // serveAndShutdown starts the HTTP server and handles graceful shutdown.
-func serveAndShutdown(ctx context.Context, srv *http.Server, hugrClient *client.Client, logger *slog.Logger) error {
+// postListen functions run once after the listener is bound (used to
+// prompt OIDC login only after /auth/<name>/callback is actually
+// reachable) — one entry per configured OIDC auth.
+func serveAndShutdown(ctx context.Context, srv *http.Server, rt *agentRuntime, postListen []func(), logger *slog.Logger) error {
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		logger.Info("shutting down: draining requests")
 		srv.Shutdown(shutdownCtx)
-		logger.Info("shutting down: closing subscriptions")
-		hugrClient.CloseSubscriptions()
+		rt.close(logger)
 	}()
-	return srv.ListenAndServe()
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+	for _, p := range postListen {
+		go p()
+	}
+	return srv.Serve(listener)
 }
 
 // runA2A starts the A2A server (default mode).
 func runA2A(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	sessionSvc := session.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
 	smux := http.NewServeMux()
-	hugrTransport := buildHugrTransport(cfg, logger, smux)
-
-	a, hugrClient, err := buildAgent(cfg, logger, hugrTransport)
+	authStores, err := buildAuthStores(ctx, cfg, logger, smux)
 	if err != nil {
-		return fmt.Errorf("build agent: %w", err)
+		return fmt.Errorf("auth: %w", err)
+	}
+	hugrTransport := resolveHugrTransport(cfg, authStores, logger)
+
+	rt, err := buildRuntime(ctx, cfg, logger, authStores, hugrTransport)
+	if err != nil {
+		return err
 	}
 
-	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, cfg.Agent.BaseURL)
+	cardH, invokeH := a2aHandlers(rt.agent, rt.sessions, artifactSvc, cfg.Agent.BaseURL)
 	smux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	smux.Handle("/invoke", invokeH)
+	registerAdminRoutes(smux, rt.tools, rt.skills)
 
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Agent.Port), Handler: smux}
 	logger.Info("A2A server listening",
 		"addr", srv.Addr,
 		"invoke", cfg.Agent.BaseURL+"/invoke",
 	)
-	return serveAndShutdown(ctx, srv, hugrClient, logger)
+	return serveAndShutdown(ctx, srv, rt, authStores.PromptLogin, logger)
 }
 
 // runWithDevUI starts A2A + ADK REST API + dev UI.
 func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
-	sessionSvc := session.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
 	router := mux.NewRouter()
 
 	// OIDC callback routes on a separate ServeMux (gorilla/mux can't use http.ServeMux patterns).
 	authMux := http.NewServeMux()
-	hugrTransport := buildHugrTransport(cfg, logger, authMux)
+	authStores, err := buildAuthStores(ctx, cfg, logger, authMux)
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	hugrTransport := resolveHugrTransport(cfg, authStores, logger)
 	router.PathPrefix("/auth/").Handler(authMux)
 
-	a, hugrClient, err := buildAgent(cfg, logger, hugrTransport)
+	rt, err := buildRuntime(ctx, cfg, logger, authStores, hugrTransport)
 	if err != nil {
-		return fmt.Errorf("build agent: %w", err)
+		return err
 	}
 
 	// A2A.
-	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, cfg.Agent.BaseURL)
+	cardH, invokeH := a2aHandlers(rt.agent, rt.sessions, artifactSvc, cfg.Agent.BaseURL)
 	router.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	router.Handle("/invoke", invokeH)
+	registerAdminRoutes(muxShim{router}, rt.tools, rt.skills)
 
 	// ADK REST API + dev UI.
-	agentLoader := agent.NewSingleLoader(a)
+	agentLoader := agent.NewSingleLoader(rt.agent)
 	memorySvc := memory.InMemoryService()
 	apiServer, err := adkrest.NewServer(adkrest.ServerConfig{
-		SessionService:  sessionSvc,
+		SessionService:  rt.sessions,
 		ArtifactService: artifactSvc,
 		MemoryService:   memorySvc,
 		AgentLoader:     agentLoader,
@@ -414,7 +231,7 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		return fmt.Errorf("parse webui flags: %w", err)
 	}
 	if err := ui.SetupSubrouters(router, &launcher.Config{
-		SessionService:  sessionSvc,
+		SessionService:  rt.sessions,
 		ArtifactService: artifactSvc,
 		AgentLoader:     agentLoader,
 	}); err != nil {
@@ -427,7 +244,7 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		"invoke", cfg.Agent.BaseURL+"/invoke",
 		"ui", cfg.Agent.BaseURL+"/",
 	)
-	return serveAndShutdown(ctx, srv, hugrClient, logger)
+	return serveAndShutdown(ctx, srv, rt, authStores.PromptLogin, logger)
 }
 
 func corsMiddleware(baseURL string, next http.Handler) http.Handler {
@@ -449,15 +266,3 @@ func corsMiddleware(baseURL string, next http.Handler) http.Handler {
 	})
 }
 
-type headerTransport struct {
-	base    http.RoundTripper
-	headers map[string]string
-}
-
-func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	for k, v := range t.headers {
-		clone.Header.Set(k, v)
-	}
-	return t.base.RoundTrip(clone)
-}

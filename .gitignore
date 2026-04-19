@@ -31,3 +31,7 @@ design/
 source-doc/
 __debug_bin*
 /hugen
+/agent
+
+# Runtime data (local DuckDB + WAL)
+.data/
