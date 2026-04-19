@@ -58,8 +58,8 @@ func buildMCP(cfg config.ProviderConfig, deps Deps) (tools.Provider, error) {
 }
 
 // transportFor resolves the HTTP round-tripper an MCP builder should
-// use: token-injected for hugr/oidc auth, header-stamped for secret-key
-// auth, or the base transport when auth is empty.
+// use: token-injected for the named auth store, or the base transport
+// when auth is empty.
 func transportFor(authName string, deps Deps) (http.RoundTripper, error) {
 	base := deps.BaseTransport
 	if base == nil {
@@ -68,14 +68,9 @@ func transportFor(authName string, deps Deps) (http.RoundTripper, error) {
 	if authName == "" {
 		return base, nil
 	}
-	if store, ok := deps.AuthStores[authName]; ok && store != nil {
-		return auth.Transport(store, base), nil
+	store, ok := deps.AuthStores[authName]
+	if !ok || store == nil {
+		return nil, fmt.Errorf("auth %q not found in store registry", authName)
 	}
-	if key, ok := deps.SecretKeys[authName]; ok {
-		if deps.HeaderAuth == nil {
-			return nil, fmt.Errorf("auth %q is secret-key but no HeaderAuth factory configured", authName)
-		}
-		return deps.HeaderAuth(key, base), nil
-	}
-	return nil, fmt.Errorf("auth %q not found in store registry", authName)
+	return auth.Transport(store, base), nil
 }

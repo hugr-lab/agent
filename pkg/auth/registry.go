@@ -14,33 +14,25 @@ import (
 // pkg/auth stays free of project-specific imports.
 type AuthSpec struct {
 	Name         string
-	Type         string // hugr | oidc | secret
+	Type         string // hugr | oidc
 	Issuer       string
 	ClientID     string
 	CallbackPath string
 	BaseURL      string // e.g. http://localhost:10000 — used to build RedirectURL when OIDC path taken
 	AccessToken  string
 	TokenURL     string
-	SecretKey    string
 	// DiscoverURL is the hugr URL used for type=hugr when no
 	// access_token/token_url is set: BuildStores calls
 	// {DiscoverURL}/auth/config to fetch issuer + client_id.
 	DiscoverURL string
 }
 
-// HeaderTransportFactory returns an http.RoundTripper that wraps base
-// with project-specific headers (e.g. x-hugr-secret-key). Injected by
-// the caller so pkg/auth doesn't know about vendor-specific headers.
-type HeaderTransportFactory func(secretKey string, base http.RoundTripper) http.RoundTripper
-
-// Stores is the result of BuildStores — a name→TokenStore map (nil
-// value means "no token needed, use a header-only or default transport")
-// plus any post-listener hooks (OIDC PromptLogin) to invoke after the
+// Stores is the result of BuildStores — a name→TokenStore map plus
+// any post-listener hooks (OIDC PromptLogin) to invoke after the
 // HTTP listener is bound.
 type Stores struct {
-	Tokens      map[string]TokenStore // nil value permitted for secret-key auth
-	SecretKeys  map[string]string     // name → raw secret (for HeaderTransportFactory)
-	PromptLogin []func()              // run after listener bound
+	Tokens      map[string]TokenStore
+	PromptLogin []func()
 }
 
 // BuildStores walks specs and creates a TokenStore for each. OIDC
@@ -56,8 +48,7 @@ func BuildStores(ctx context.Context, specs []AuthSpec, mux *http.ServeMux, logg
 		logger = slog.Default()
 	}
 	out := &Stores{
-		Tokens:     make(map[string]TokenStore, len(specs)),
-		SecretKeys: make(map[string]string),
+		Tokens: make(map[string]TokenStore, len(specs)),
 	}
 	seenPaths := map[string]string{}
 
@@ -73,18 +64,8 @@ func BuildStores(ctx context.Context, specs []AuthSpec, mux *http.ServeMux, logg
 				return nil, err
 			}
 
-		case "secret":
-			if s.SecretKey == "" {
-				return nil, fmt.Errorf("auth %q: type=secret needs secret_key", s.Name)
-			}
-			// TokenStore stays nil — callers use SecretKeys[name] with a
-			// HeaderTransportFactory to build the transport.
-			out.Tokens[s.Name] = nil
-			out.SecretKeys[s.Name] = s.SecretKey
-			logger.Info("auth store built", "name", s.Name, "type", "secret")
-
 		default:
-			return nil, fmt.Errorf("auth %q: unsupported type %q (want hugr|oidc|secret)", s.Name, s.Type)
+			return nil, fmt.Errorf("auth %q: unsupported type %q (want hugr|oidc)", s.Name, s.Type)
 		}
 	}
 	return out, nil

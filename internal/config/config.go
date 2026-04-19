@@ -31,13 +31,12 @@ type Config struct {
 // in the same process.
 type AuthConfig struct {
 	Name         string `mapstructure:"name"`
-	Type         string `mapstructure:"type"` // oidc | token | secret
+	Type         string `mapstructure:"type"` // hugr | oidc
 	Issuer       string `mapstructure:"issuer"`
 	ClientID     string `mapstructure:"client_id"`
 	CallbackPath string `mapstructure:"callback_path"`
 	AccessToken  string `mapstructure:"access_token"`
 	TokenURL     string `mapstructure:"token_url"`
-	SecretKey    string `mapstructure:"secret_key"`
 }
 
 // ProviderConfig declares a tools.Provider instance built at startup.
@@ -262,7 +261,6 @@ func expandAuthEnv(list []AuthConfig) {
 		a.ClientID = os.ExpandEnv(a.ClientID)
 		a.AccessToken = os.ExpandEnv(a.AccessToken)
 		a.TokenURL = os.ExpandEnv(a.TokenURL)
-		a.SecretKey = os.ExpandEnv(a.SecretKey)
 		a.CallbackPath = os.ExpandEnv(a.CallbackPath)
 	}
 }
@@ -312,10 +310,8 @@ func validateAuth(list []AuthConfig) error {
 				return fmt.Errorf("config: auth %q callback_path %q collides with auth %q", a.Name, path, owner)
 			}
 			seenPaths[path] = a.Name
-		case "secret":
-			// no route to register
 		default:
-			return fmt.Errorf("config: auth %q has unsupported type %q (want hugr|oidc|secret)", a.Name, a.Type)
+			return fmt.Errorf("config: auth %q has unsupported type %q (want hugr|oidc)", a.Name, a.Type)
 		}
 	}
 	return nil

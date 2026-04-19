@@ -31,11 +31,7 @@ type Builder func(cfg config.ProviderConfig, deps Deps) (tools.Provider, error)
 // what they need and ignore the rest.
 type Deps struct {
 	// AuthStores is the name→TokenStore map from auth.BuildStores.
-	// Entries may be nil (secret-key auth uses SecretKeys + a header
-	// transport factory instead).
-	AuthStores  map[string]auth.TokenStore
-	SecretKeys  map[string]string
-	HeaderAuth  auth.HeaderTransportFactory
+	AuthStores    map[string]auth.TokenStore
 	BaseTransport http.RoundTripper
 
 	// For system-type builders:

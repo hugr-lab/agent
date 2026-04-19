@@ -213,16 +213,6 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 	}, nil
 }
 
-// hugrHeaderFactory stamps x-hugr-secret-key for secret-key auth.
-// Passed to auth.BuildStores/providers.Deps so pkg/auth stays free of
-// hugr-specific headers.
-func hugrHeaderFactory(secret string, base http.RoundTripper) http.RoundTripper {
-	return &headerTransport{
-		base:    base,
-		headers: map[string]string{"x-hugr-secret-key": secret},
-	}
-}
-
 // buildAuthStores converts cfg.Auth into auth.Stores, registering each
 // OIDC callback on mux. Returns the stores + the slice of PromptLogin
 // triggers to fire after the HTTP listener is bound.
@@ -238,7 +228,6 @@ func buildAuthStores(ctx context.Context, cfg *config.Config, logger *slog.Logge
 			BaseURL:      cfg.Agent.BaseURL,
 			AccessToken:  a.AccessToken,
 			TokenURL:     a.TokenURL,
-			SecretKey:    a.SecretKey,
 			DiscoverURL:  cfg.Hugr.URL,
 		})
 	}
@@ -254,14 +243,12 @@ func resolveHugrTransport(cfg *config.Config, stores *auth.Stores, logger *slog.
 		logger.Warn("hugr: no auth configured — requests to hugr will be unauthenticated")
 		return http.DefaultTransport
 	}
-	if store, ok := stores.Tokens[cfg.Hugr.Auth]; ok && store != nil {
-		return auth.Transport(store, http.DefaultTransport)
+	store, ok := stores.Tokens[cfg.Hugr.Auth]
+	if !ok || store == nil {
+		logger.Warn("hugr: auth not found in auth store pool — unauthenticated", "name", cfg.Hugr.Auth)
+		return http.DefaultTransport
 	}
-	if key, ok := stores.SecretKeys[cfg.Hugr.Auth]; ok {
-		return hugrHeaderFactory(key, http.DefaultTransport)
-	}
-	logger.Warn("hugr: auth %q not found in auth store pool — unauthenticated", "name", cfg.Hugr.Auth)
-	return http.DefaultTransport
+	return auth.Transport(store, http.DefaultTransport)
 }
 
 // a2aHandlers returns the agent card handler and JSON-RPC invoke handler.
@@ -389,8 +376,6 @@ func buildRuntime(
 				config.ProviderConfig{Name: name, Type: "mcp", Endpoint: endpoint, Auth: authName},
 				providers.Deps{
 					AuthStores:    authStores.Tokens,
-					SecretKeys:    authStores.SecretKeys,
-					HeaderAuth:    hugrHeaderFactory,
 					BaseTransport: http.DefaultTransport,
 					Skills:        components.skills,
 					Hub:           hub,
@@ -406,8 +391,6 @@ func buildRuntime(
 	// system builder needs it. Each Build registers into tools.Manager.
 	if err := providers.BuildAll(cfg.Providers, components.tools, providers.Deps{
 		AuthStores:    authStores.Tokens,
-		SecretKeys:    authStores.SecretKeys,
-		HeaderAuth:    hugrHeaderFactory,
 		BaseTransport: http.DefaultTransport,
 		Sessions:      sessionMgr,
 		Skills:        components.skills,
@@ -607,15 +590,3 @@ func corsMiddleware(baseURL string, next http.Handler) http.Handler {
 	})
 }
 
-type headerTransport struct {
-	base    http.RoundTripper
-	headers map[string]string
-}
-
-func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	for k, v := range t.headers {
-		clone.Header.Set(k, v)
-	}
-	return t.base.RoundTrip(clone)
-}
