@@ -213,10 +213,10 @@ type MemoryLogEntry struct {
 
 // Sessions manages conversation sessions, events, notes, and participants.
 type Sessions interface {
-	CreateSession(ctx context.Context, s Session) (string, error)
-	GetSession(ctx context.Context, id string) (*Session, error)
-	ListActiveSessions(ctx context.Context) ([]Session, error)
-	ListChildSessions(ctx context.Context, parentSessionID string) ([]Session, error)
+	CreateSession(ctx context.Context, s SessionRecord) (string, error)
+	GetSession(ctx context.Context, id string) (*SessionRecord, error)
+	ListActiveSessions(ctx context.Context) ([]SessionRecord, error)
+	ListChildSessions(ctx context.Context, parentSessionID string) ([]SessionRecord, error)
 	UpdateSessionStatus(ctx context.Context, id, status string) error
 
 	AppendEvent(ctx context.Context, event SessionEvent) (string, error)
@@ -234,7 +234,9 @@ type Sessions interface {
 	ListParticipants(ctx context.Context, sessionID string) ([]SessionParticipant, error)
 }
 
-type Session struct {
+// SessionRecord is the persisted session row (hub.db sessions table).
+// The runtime Session interface lives in interfaces/session.go.
+type SessionRecord struct {
 	ID              string         `json:"id"`
 	AgentID         string         `json:"agent_id"`
 	OwnerID         string         `json:"owner_id"`

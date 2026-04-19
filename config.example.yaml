@@ -41,21 +41,26 @@ memory:
     hypothesis_expiry: 720h
 
 # ── LLM routing ─────────────────────────────────────────────
+# mode=local registers each `models:` entry (type llm-*) in the embedded
+# engine. Swap AGENT_MODEL in .env (or llm.model here) to pick a provider.
 llm:
-  mode: remote               # local = via hugr_local, remote = via HUGR_URL
-  model: gemini-pro-3-1
+  mode: local                # local (via embedded engine) | remote (via HUGR_URL)
+  model: gemma4-26b
   max_tokens: 8192
   temperature: 0.4
   routes:
-    default: gemini-pro-3-1
-    # tool_calling: claude-haiku
-    # summarization: gemini-flash
+    default: gemma4-26b
+    # tool_calling: gpt-oss-20b
+    # summarization: gemma-small
 
 # ── Embedding ───────────────────────────────────────────────
+# model must match a `models:` entry of type embedding. dimension is
+# frozen at first run of data/memory.db — changing it later is fatal
+# (delete data/memory.db to re-create the agent).
 embedding:
-  mode: remote               # local | remote
-  model: ""                   # empty = disabled, FTS fallback only
-  dimension: 384
+  mode: local                # local | remote | "" (FTS only)
+  model: gemma-embedding     # empty = disabled, FTS fallback only
+  dimension: 768
 
 # ── Skills ─────────────────────────────────────────────────
 skills:
@@ -70,32 +75,35 @@ skills:
 # (`{ core { data_sources { name type path } } }`) so the agent speaks the
 # same source names in local mode and hub mode.
 models:
-  # Google Gemini
-  - name: gemini-pro-3-1
-    type: llm-gemini
-    path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+  # Local LM Studio / vLLM / Ollama (OpenAI-compatible)
+  - name: gemma4-26b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8192&thinking_budget=2048&timeout=10m'
+  - name: gemma4-31b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-31b"&max_tokens=8192&thinking_budget=2048&timeout=10m'
+  - name: gpt-oss-20b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="openai/gpt-oss-20b"&max_tokens=8192&thinking_budget=2048&timeout=10m'
+  - name: gemma-small
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model=gemma-4-e2b-it&timeout=120s'
 
-  # Anthropic Claude
+  # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
+  - name: gemma-embedding
+    type: embedding
+    path: '${EMBED_LOCAL_URL}?model="embeddinggemma-300m"&timeout=30s'
+
+  # Cloud providers — uncomment after filling ${*_API_KEY} in .env
+  # - name: gemini-pro-3-1
+  #   type: llm-gemini
+  #   path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
   # - name: claude-sonnet
   #   type: llm-anthropic
   #   path: 'https://api.anthropic.com/v1/messages?model=claude-sonnet-4-20250514&api_key="${ANTHROPIC_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=60s'
-
-  # OpenAI / OpenAI-compatible
   # - name: chatgpt-5-4-mini
   #   type: llm-openai
   #   path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4-mini-2026-03-17"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
-
-  # Local LM Studio / vLLM / Ollama (OpenAI-compatible)
-  # - name: gemma4-26b
-  #   type: llm-openai
-  #   path: 'http://host.docker.internal:1234/v1/chat/completions?model="google/gemma-4-26b-a4b"&max_tokens=140296&thinking_budget=2048&timeout=10m'
-
-  # Embedding (local LM Studio — OpenAI-compatible embeddings endpoint)
-  # - name: gemma-embedding
-  #   type: embedding
-  #   path: 'http://host.docker.internal:1234/v1/embeddings?model="embeddinggemma-300m"&timeout=30s'
-
-  # Embedding (remote OpenAI)
   # - name: text-embedding-3-small
   #   type: embedding
   #   path: 'https://api.openai.com/v1/embeddings?model=text-embedding-3-small&api_key="${OPENAI_API_KEY}"&timeout=10s'

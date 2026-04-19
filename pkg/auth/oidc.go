@@ -23,7 +23,30 @@ type OIDCConfig struct {
 	IssuerURL   string // e.g. http://localhost:8080/realms/hugr
 	ClientID    string // Keycloak public client ID
 	RedirectURL string // e.g. http://localhost:10000/auth/callback
-	Logger      *slog.Logger
+	// CallbackPath is the path portion that RegisterCallbackRoute
+	// mounts on the provided mux. Must match the path segment of
+	// RedirectURL. Empty defaults to "/auth/callback".
+	CallbackPath string
+	// LoginPath is the path that starts the flow (redirect to IdP).
+	// Empty defaults to "/auth/login".
+	LoginPath string
+	Logger    *slog.Logger
+}
+
+// callbackPath returns the effective callback path, applying defaults.
+func (c OIDCConfig) callbackPath() string {
+	if c.CallbackPath == "" {
+		return "/auth/callback"
+	}
+	return c.CallbackPath
+}
+
+// loginPath returns the effective login path, applying defaults.
+func (c OIDCConfig) loginPath() string {
+	if c.LoginPath == "" {
+		return "/auth/login"
+	}
+	return c.LoginPath
 }
 
 // OIDCStore implements TokenStore using Authorization Code + PKCE flow.
@@ -109,7 +132,7 @@ func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
 		expectedState string
 	)
 
-	mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(s.cfg.loginPath(), func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		codeVerifier = generateCodeVerifier()
 		expectedState = generateState()
@@ -130,7 +153,7 @@ func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
 		http.Redirect(w, r, s.authURL+"?"+params.Encode(), http.StatusFound)
 	})
 
-	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(s.cfg.callbackPath(), func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		cv := codeVerifier
 		es := expectedState
@@ -171,8 +194,8 @@ func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
 
 // PromptLogin prints the login URL and optionally opens the browser.
 func (s *OIDCStore) PromptLogin() {
-	loginURL := strings.TrimSuffix(s.cfg.RedirectURL, "/auth/callback") + "/auth/login"
-	s.logger.Info("OIDC login required — open in browser", "url", loginURL)
+	loginURL := strings.TrimSuffix(s.cfg.RedirectURL, s.cfg.callbackPath()) + s.cfg.loginPath()
+	s.logger.Info("OIDC login required — open in browser", "url", loginURL, "client", s.cfg.ClientID)
 	fmt.Printf("\n  Login: %s\n\n", loginURL)
 	_ = openBrowser(loginURL)
 }

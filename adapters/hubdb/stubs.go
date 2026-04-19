@@ -116,28 +116,14 @@ func (h *hubDB) GetLog(ctx context.Context, memoryItemID string, limit int) ([]i
 	return nil, notImplemented("GetLog")
 }
 
-// ── Sessions (filled in by 003b) ────────────────────────────
+// ── Sessions (real impls live in sessions.go; remaining read helpers and
+//    participants/notes are 003b) ─────────────────────────────
 
-func (h *hubDB) CreateSession(ctx context.Context, s interfaces.Session) (string, error) {
-	return "", notImplemented("CreateSession")
-}
-func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.Session, error) {
+func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.SessionRecord, error) {
 	return nil, notImplemented("GetSession")
 }
-func (h *hubDB) ListActiveSessions(ctx context.Context) ([]interfaces.Session, error) {
-	return nil, notImplemented("ListActiveSessions")
-}
-func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]interfaces.Session, error) {
+func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]interfaces.SessionRecord, error) {
 	return nil, notImplemented("ListChildSessions")
-}
-func (h *hubDB) UpdateSessionStatus(ctx context.Context, id, status string) error {
-	return notImplemented("UpdateSessionStatus")
-}
-func (h *hubDB) AppendEvent(ctx context.Context, event interfaces.SessionEvent) (string, error) {
-	return "", notImplemented("AppendEvent")
-}
-func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]interfaces.SessionEvent, error) {
-	return nil, notImplemented("GetEvents")
 }
 func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]interfaces.SessionEventFull, error) {
 	return nil, notImplemented("GetEventsFull")

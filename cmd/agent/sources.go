@@ -22,9 +22,12 @@ func registerModelSources(ctx context.Context, engine *hugr.Service, models []co
 			continue
 		}
 		ds := types.DataSource{
-			Name: m.Name,
-			Type: types.DataSourceType(m.Type),
-			Path: os.ExpandEnv(m.Path),
+			Name:     m.Name,
+			Type:     types.DataSourceType(m.Type),
+			Prefix:   m.Name,
+			AsModule: false,
+			Path:     os.ExpandEnv(m.Path),
+			Sources:  []types.CatalogSource{},
 		}
 		if err := engine.RegisterDataSource(ctx, ds); err != nil {
 			return fmt.Errorf("register %s (%s): %w", m.Name, m.Type, err)

@@ -10,6 +10,76 @@ description: >
   "query the data", "analyze the dataset", "build a dashboard", "explore the schema",
   modules, catalogs, data objects, spatial joins, dynamic joins.
   Even "show me the data" or "what data do we have" should trigger this if Hugr MCP is available.
+autoload: false
+providers:
+  - provider: hugr-main
+references:
+  - name: start
+    description: >
+      Entry-point orientation. Read this first on any task — defines how to explore Hugr's
+      modular schema, when to use MCP discovery-* / schema-* / data-* tools, and how to pick
+      the right tool for the user's question.
+  - name: overview
+    description: >
+      Conceptual overview of Hugr — modules, data objects, the GraphQL shape, and how
+      federation works. Read when the user asks "what is this", "what data do we have",
+      or you need to explain Hugr concepts in your reply.
+  - name: instructions
+    description: >
+      Operating instructions — stepwise-introspection workflow, description-first field
+      resolution, field-naming conventions. Read before any schema exploration.
+  - name: query
+    description: >
+      Guide for building a single GraphQL query — query shape, selection sets, variables,
+      parameters, query naming. Read before constructing any MCP data-* tool call.
+  - name: filter-guide
+    description: >
+      REQUIRED before any query with a `filter:` clause. Covers scalar operators
+      (_eq, _neq, _gt, _gte, _lt, _lte, _in, _like, _ilike, _is_null), logical
+      operators (_and, _or, _not), relation filters, array/JSONB operators, and
+      common gotchas. Skipping this ref is the single biggest source of failed queries.
+  - name: query-patterns
+    description: >
+      Common query patterns — basic selects, relation traversal, spatial joins,
+      dynamic joins, pagination, ordering. Read when building anything beyond a
+      trivial single-table select.
+  - name: queries-deep-dive
+    description: >
+      Advanced query features — custom JQ transforms, H3 geospatial helpers,
+      parameterized views, multi-alias queries, result reshaping. Read for any
+      non-standard request (transforms, geodata, complex shaping).
+  - name: aggregations
+    description: >
+      REQUIRED for any aggregation task (counts, sums, averages, group-by).
+      Covers single-row `_aggregation` fields and `_bucket_aggregation` for
+      group-by queries. Read before answering "how many", "total", "per
+      category", "breakdown by", or any statistical question.
+  - name: advanced-features
+    description: >
+      Advanced capabilities — vector similarity search, embeddings, spatial
+      operators, timeseries functions, custom UDFs. Read only when the user's
+      request explicitly calls for these features.
+  - name: analyze
+    description: >
+      Task playbook for "analyze the dataset" / "find patterns" / "explore" —
+      prescribes the stepwise approach: discovery → aggregations → drill-down.
+      Read at the start of any analysis-style request.
+  - name: dashboard
+    description: >
+      Task playbook for building a dashboard — KPIs, charts, breakdowns,
+      trends. Read when the user asks for a dashboard, report, or visual
+      summary of a dataset.
+next_step: |
+  Identify references that match the user's task and call skill_ref for each
+  one BEFORE calling any data-* tool. Minimum set:
+    - "start" + "instructions" — always, to orient on the schema-exploration workflow.
+    - "filter-guide" — if the request involves any filter, field-value match, or time range.
+    - "aggregations" — if the request involves counts, sums, averages, breakdowns, or "per X".
+    - "query" + "query-patterns" — before your first data-* tool call on a new task.
+    - "analyze" or "dashboard" — when the user's intent matches one of these playbooks.
+  If a data-* tool returns an error about unknown fields, filter syntax, or
+  operator names — that's a signal you skipped the relevant ref. Load it now
+  and retry the tool call.
 ---
 
 # Hugr Data Mesh Agent

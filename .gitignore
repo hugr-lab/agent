@@ -33,4 +33,4 @@ __debug_bin*
 /hugen
 
 # Runtime data (local DuckDB + WAL)
-data/
+.data/

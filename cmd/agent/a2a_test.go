@@ -6,24 +6,40 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	testadapters "github.com/hugr-lab/hugen/adapters/test"
-	"github.com/hugr-lab/hugen/interfaces"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/skills"
+	"github.com/hugr-lab/hugen/pkg/tools"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	adksession "google.golang.org/adk/session"
+	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+// stubProviderCmd is a local tools.Provider for the a2a test's system
+// suite — can't import pkg/session's stubProvider across the test
+// boundary, so duplicate the tiny shape here.
+type stubProviderCmd struct {
+	name  string
+	tools []adktool.Tool
+}
+
+func (p *stubProviderCmd) Name() string           { return p.name }
+func (p *stubProviderCmd) Tools() []adktool.Tool  { return p.tools }
 
 // mockLLM returns a fixed text response.
 type mockLLM struct{ response string }
@@ -58,7 +74,7 @@ func startTestA2AServer(t *testing.T, llmResponse string) *a2aclient.Client {
 	require.NoError(t, err)
 
 	baseURL := "http://" + listener.Addr().String()
-	sessionSvc := session.InMemoryService()
+	sessionSvc := adksession.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
 	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, baseURL)
@@ -99,7 +115,6 @@ func TestA2A_SendMessage(t *testing.T) {
 func TestA2A_GetTask(t *testing.T) {
 	client := startTestA2AServer(t, "response")
 
-	// Create a task first.
 	result, err := client.SendMessage(context.Background(), &a2acore.MessageSendParams{
 		Message: &a2acore.Message{
 			ID:    "msg-1",
@@ -110,7 +125,6 @@ func TestA2A_GetTask(t *testing.T) {
 	require.NoError(t, err)
 	task := result.(*a2acore.Task)
 
-	// Get the same task.
 	got, err := client.GetTask(context.Background(), &a2acore.TaskQueryParams{ID: task.ID})
 	require.NoError(t, err)
 	assert.Equal(t, task.ID, got.ID)
@@ -139,13 +153,12 @@ func TestA2A_AgentCard(t *testing.T) {
 	defer listener.Close()
 
 	baseURL := "http://" + listener.Addr().String()
-	cardH, invokeH := a2aHandlers(a, session.InMemoryService(), artifact.InMemoryService(), baseURL)
+	cardH, invokeH := a2aHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
 	go http.Serve(listener, mux)
 
-	// Fetch agent card via HTTP.
 	resp, err := http.Get(baseURL + a2asrv.WellKnownAgentCardPath)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -153,48 +166,75 @@ func TestA2A_AgentCard(t *testing.T) {
 	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
 }
 
-// testHugrAgentConfig holds configuration for startTestHugrAgent.
+// writeTestSkills creates an on-disk skills directory for the file manager.
+func writeTestSkills(t *testing.T, specs map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, md := range specs {
+		sd := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(sd, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(sd, "SKILL.md"), []byte(md), 0o644))
+	}
+	return dir
+}
+
+// testHugrAgentConfig configures startTestHugrAgent.
 type testHugrAgentConfig struct {
 	llm          *testadapters.ScriptedLLM
 	constitution string
-	skills       interfaces.SkillProvider
+	skillsDir    string // optional; if set, used for skills.NewFileManager
+	tokens       *hugen.TokenEstimator
 }
 
-// startTestHugrAgent creates a test A2A server backed by HugrAgent
-// with a ScriptedLLM and returns an a2aclient.Client.
+// startTestHugrAgent builds the full HugrAgent stack (skills + tools +
+// session + agent) for tests and returns an a2aclient.Client.
 func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitution string) *a2aclient.Client {
 	t.Helper()
-	return startTestHugrAgentWithConfig(t, testHugrAgentConfig{
+	client, _ := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
 		llm:          llm,
 		constitution: constitution,
 	})
+	return client
 }
 
-func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2aclient.Client {
+func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *hugen.TokenEstimator) {
 	t.Helper()
+	logger := slog.Default()
 
-	router := intent.NewRouter(cfg.llm)
-	prompt := hugen.NewPromptBuilder(cfg.constitution)
-	toolset := hugen.NewDynamicToolset()
-	tokens := hugen.NewTokenEstimator()
+	skillsDir := cfg.skillsDir
+	if skillsDir == "" {
+		skillsDir = t.TempDir()
+	}
+	skillsMgr, err := skills.NewFileManager(skillsDir)
+	require.NoError(t, err)
 
-	if cfg.skills != nil {
-		sysDeps := &system.Deps{
-			Skills:  cfg.skills,
-			Prompt:  prompt,
-			Toolset: toolset,
-			Tokens:  tokens,
-			Logger:  slog.Default(),
-		}
-		toolset.AddToolset("system", system.NewSystemToolset(sysDeps))
+	toolsMgr := tools.New(logger)
+
+	sessionMgr := session.New(session.Config{
+		Skills:       skillsMgr,
+		Tools:        toolsMgr,
+		Constitution: cfg.constitution,
+		Logger:       logger,
+	})
+
+	// Register _skills provider with the real system suite — matches
+	// production wiring where providers.BuildAll does this from config.
+	toolsMgr.AddProvider(&stubProviderCmd{
+		name:  "_skills",
+		tools: system.NewSkillsSuite(sessionMgr),
+	})
+
+	tokens := cfg.tokens
+	if tokens == nil {
+		tokens = hugen.NewTokenEstimator()
 	}
 
-	a, err := hugen.NewAgent(hugen.AgentConfig{
-		Router:  router,
-		Toolset: toolset,
-		Prompt:  prompt,
-		Tokens:  tokens,
-		Logger:  slog.Default(),
+	router := intent.NewRouter(cfg.llm)
+	a, err := hugen.NewAgent(hugen.Config{
+		Router:   router,
+		Sessions: sessionMgr,
+		Tokens:   tokens,
+		Logger:   logger,
 	})
 	require.NoError(t, err)
 
@@ -202,10 +242,9 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2acli
 	require.NoError(t, err)
 
 	baseURL := "http://" + listener.Addr().String()
-	sessionSvc := session.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, baseURL)
+	cardH, invokeH := a2aHandlers(a, sessionMgr, artifactSvc, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -217,7 +256,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) *a2acli
 		{URL: baseURL + "/invoke", Transport: a2acore.TransportProtocolJSONRPC},
 	})
 	require.NoError(t, err)
-	return client
+	return client, tokens
 }
 
 func TestHugrAgent_SendMessage(t *testing.T) {
@@ -238,12 +277,9 @@ func TestHugrAgent_SendMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	task, ok := result.(*a2acore.Task)
-	require.True(t, ok, "expected Task result, got %T", result)
+	require.True(t, ok)
 	assert.Equal(t, a2acore.TaskStateCompleted, task.Status.State)
-	assert.NotEmpty(t, task.ID)
 
-	// Verify artifacts contain the response.
-	require.NotEmpty(t, task.Artifacts)
 	found := false
 	for _, art := range task.Artifacts {
 		for _, p := range art.Parts {
@@ -256,105 +292,68 @@ func TestHugrAgent_SendMessage(t *testing.T) {
 }
 
 func TestHugrAgent_TokenCalibration(t *testing.T) {
-	tokens := hugen.NewTokenEstimator()
-
 	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
 		{Content: "Calibrated response"},
 	})
-	router := intent.NewRouter(llm)
-	prompt := hugen.NewPromptBuilder("constitution text")
-	toolset := hugen.NewDynamicToolset()
-
-	a, err := hugen.NewAgent(hugen.AgentConfig{
-		Router:  router,
-		Toolset: toolset,
-		Prompt:  prompt,
-		Tokens:  tokens,
-		Logger:  slog.Default(),
+	client, tokens := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
+		llm:          llm,
+		constitution: "constitution text",
 	})
-	require.NoError(t, err)
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer listener.Close()
-
-	baseURL := "http://" + listener.Addr().String()
-	cardH, invokeH := a2aHandlers(a, session.InMemoryService(), artifact.InMemoryService(), baseURL)
-	mux := http.NewServeMux()
-	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
-	mux.Handle("/invoke", invokeH)
-	go http.Serve(listener, mux)
-
-	client, err := a2aclient.NewFromEndpoints(context.Background(), []a2acore.AgentInterface{
-		{URL: baseURL + "/invoke", Transport: a2acore.TransportProtocolJSONRPC},
-	})
-	require.NoError(t, err)
-
-	_, err = client.SendMessage(context.Background(), &a2acore.MessageSendParams{
+	_, err := client.SendMessage(context.Background(), &a2acore.MessageSendParams{
 		Message: &a2acore.Message{
-			ID:   "msg-1",
-			Role: a2acore.MessageRoleUser,
-			Parts: []a2acore.Part{
-				a2acore.TextPart{Text: "calibrate"},
-			},
+			ID:    "msg-1",
+			Role:  a2acore.MessageRoleUser,
+			Parts: []a2acore.Part{a2acore.TextPart{Text: "calibrate"}},
 		},
 	})
 	require.NoError(t, err)
 
-	// After the LLM call, token estimator should have been calibrated.
 	assert.Equal(t, "measured", tokens.Source())
 	pt, ct := tokens.LastUsage()
-	assert.Equal(t, 100, pt, "prompt tokens from ScriptedLLM usage metadata")
-	assert.Equal(t, 50, ct, "completion tokens from ScriptedLLM usage metadata")
+	assert.Equal(t, 100, pt)
+	assert.Equal(t, 50, ct)
 }
 
 func TestHugrAgent_SkillLifecycle(t *testing.T) {
-	// Scripted LLM: turn 1 calls skill_list, turn 2 calls skill_load, turn 3 responds.
+	// Scripted LLM: turn 1 → skill_list, turn 2 → skill_load, turn 3 → final.
 	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
-		// Turn 1: LLM calls skill_list.
-		{ToolCalls: []testadapters.ScriptedToolCall{
-			{Name: "skill_list", Args: map[string]any{}},
-		}},
-		// Turn 2: LLM calls skill_load with the skill name.
-		{ToolCalls: []testadapters.ScriptedToolCall{
-			{Name: "skill_load", Args: map[string]any{"name": "test-data"}},
-		}},
-		// Turn 3: LLM responds with final text.
+		{ToolCalls: []testadapters.ScriptedToolCall{{Name: "skill_list", Args: map[string]any{}}}},
+		{ToolCalls: []testadapters.ScriptedToolCall{{Name: "skill_load", Args: map[string]any{"name": "test-data"}}}},
 		{Content: "I loaded the test-data skill and I'm ready to help."},
 	})
 
-	skills := testadapters.NewStaticSkillProvider(map[string]*interfaces.SkillFull{
-		"test-data": {
-			Name:         "test-data",
-			Instructions: "# Test Data\nYou can query test data.",
-			References: []interfaces.SkillRefMeta{
-				{Name: "patterns", Description: "Query patterns"},
-			},
-		},
+	skillsDir := writeTestSkills(t, map[string]string{
+		"test-data": `---
+name: test-data
+description: Test data skill
+---
+
+# Test Data
+
+You can query test data.
+`,
 	})
 
-	client := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
+	client, _ := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
 		llm:          llm,
 		constitution: "You are a test agent.",
-		skills:       skills,
+		skillsDir:    skillsDir,
 	})
 
 	result, err := client.SendMessage(context.Background(), &a2acore.MessageSendParams{
 		Message: &a2acore.Message{
-			ID:   "msg-1",
-			Role: a2acore.MessageRoleUser,
-			Parts: []a2acore.Part{
-				a2acore.TextPart{Text: "show me the data"},
-			},
+			ID:    "msg-1",
+			Role:  a2acore.MessageRoleUser,
+			Parts: []a2acore.Part{a2acore.TextPart{Text: "show me the data"}},
 		},
 	})
 	require.NoError(t, err)
 
 	task, ok := result.(*a2acore.Task)
-	require.True(t, ok, "expected Task result, got %T", result)
+	require.True(t, ok)
 	assert.Equal(t, a2acore.TaskStateCompleted, task.Status.State)
 
-	// Verify the final response is present.
 	found := false
 	for _, art := range task.Artifacts {
 		for _, p := range art.Parts {

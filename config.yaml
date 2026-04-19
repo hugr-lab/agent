@@ -5,13 +5,56 @@ agent:
   name: hugr-data-agent
   type: hugr-data
 
+# ── Hugr connection (URL comes from .env:HUGR_URL) ──────────
+# auth: references an entry in `auth:` — used for the LLM client,
+# engine, embedding, and the hugr MCP provider. Empty = unauthenticated.
+hugr:
+  auth: hugr-auth
+
+# ── Auth pool ───────────────────────────────────────────────
+# type: hugr is the smart path for anything talking to hugr:
+#   1. token_url + access_token set → RemoteStore (production; hub
+#      already authenticated the user, no browser flow).
+#   2. otherwise → OIDC discovery via {HUGR_URL}/auth/config + browser
+#      login once per process.
+# type: oidc is the escape hatch for third-party IdPs (explicit
+#   issuer + client_id, no discovery).
+# type: secret is a dev-only static header.
+auth:
+  - name: hugr-auth
+    type: hugr
+    token_url: ${HUGR_TOKEN_URL}        # optional — leave empty for dev
+    access_token: ${HUGR_ACCESS_TOKEN}  # optional — leave empty for dev
+    callback_path: /auth/callback       # used only if the OIDC fallback kicks in
+
+# ── MCP defaults ────────────────────────────────────────────
+mcp:
+  ttl: 60s
+  fetch_timeout: 30s
+
+# ── Tool providers ──────────────────────────────────────────
+# System providers expose agent built-in suites (skills lifecycle,
+# memory, …). MCP providers connect to external MCP servers; skills
+# reference them by name.
+providers:
+  - name: _skills
+    type: system
+    suite: skills
+  - name: _memory
+    type: system
+    suite: memory
+  - name: hugr-main
+    type: mcp
+    endpoint: ${HUGR_MCP_URL}
+    auth: hugr-auth
+
 # ── Embedded hugr engine ────────────────────────────────────
 # Attaches the memory DB as a RuntimeSource module "hub.db".
 # Disable for hub mode (memory via remote Hugr).
 hugr_local:
   enabled: true
   db:
-    path: data/engine.db
+    path: .data/engine.db
     settings:
       max_memory: 4
       worker_threads: 2
@@ -21,7 +64,7 @@ hugr_local:
 # ── Memory storage ──────────────────────────────────────────
 memory:
   mode: local            # local | remote
-  path: data/memory.db
+  path: .data/memory.db
   hugr_url: ""            # used only when mode=remote
   volatility_duration:
     stable: 8760h
@@ -37,28 +80,63 @@ memory:
     hypothesis_expiry: 720h
 
 # ── LLM routing ─────────────────────────────────────────────
+# mode=local registers each `models:` entry (type llm-*) in the embedded
+# engine. Switch AGENT_MODEL in .env (or override llm.model here) to
+# route to a different provider without restarting LM Studio.
 llm:
-  mode: remote           # local | remote
+  mode: local
   model: gemini-pro-3-1
   max_tokens: 8096
   temperature: 0.4
   routes:
     default: gemini-pro-3-1
-    # tool_calling: claude-haiku
-    # summarization: claude-haiku
+    # tool_calling: gpt-oss-20b
+    # summarization: gemma-small
 
 # ── Embedding ───────────────────────────────────────────────
+# model must match a `models:` entry of type embedding.
+# dimension is frozen at first run of data/memory.db — changing it
+# later is fatal (delete data/memory.db to re-create the agent).
 embedding:
-  mode: remote           # local | remote
-  model: ""               # empty = disabled, FTS fallback
-  dimension: 384
+  mode: local
+  model: gemma-embedding
+  dimension: 768
 
 # ── Skills (file-based) ─────────────────────────────────────
 skills:
   path: ./skills
 
 # ── LLM/Embedding data sources ──────────────────────────────
-# Registered in the local engine when llm.mode=local (or embedding.mode=local).
-# Path = full URL + query params. ${ENV_VAR} expanded at attach time.
+# Registered in the local engine at startup. Path = full provider URL
+# + query params. ${ENV_VAR} is expanded from .env / shell env.
 # Type: llm-openai | llm-anthropic | llm-gemini | embedding
-models: []
+models:
+  # LM Studio / OpenAI-compatible local LLMs
+  - name: gemma4-26b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+  - name: gemma4-31b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-31b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+  - name: gpt-oss-20b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="openai/gpt-oss-20b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+  - name: gemma-small
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model=gemma-4-e2b-it&timeout=120s'
+
+  # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
+  - name: gemma-embedding
+    type: embedding
+    path: '${EMBED_LOCAL_URL}?model="embeddinggemma-300m"&timeout=30s'
+
+  # Cloud LLMs (fill ${*_API_KEY} in .env before using)
+  - name: gemini-pro-3-1
+    type: llm-gemini
+    path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+  # - name: claude-sonnet
+  #   type: llm-anthropic
+  #   path: 'https://api.anthropic.com/v1/messages?model=claude-sonnet-4-20250514&api_key="${ANTHROPIC_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=60s'
+  # - name: chatgpt-5-4-mini
+  #   type: llm-openai
+  #   path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4-mini-2026-03-17"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
