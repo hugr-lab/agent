@@ -8,25 +8,12 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/hugen/pkg/tools/toolstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
-
-type stubTool struct{ name string }
-
-func (s stubTool) Name() string        { return s.name }
-func (s stubTool) Description() string { return s.name }
-func (s stubTool) IsLongRunning() bool { return false }
-
-type stubProvider struct {
-	name  string
-	tools []tool.Tool
-}
-
-func (p stubProvider) Name() string       { return p.name }
-func (p stubProvider) Tools() []tool.Tool { return p.tools }
 
 func makeSkillsDir(t *testing.T) string {
 	t.Helper()
@@ -71,14 +58,8 @@ func newTestHarness(t *testing.T) *testHarness {
 	require.NoError(t, err)
 
 	tm := tools.New(nil)
-	tm.AddProvider(stubProvider{
-		name:  "hugr-main",
-		tools: []tool.Tool{stubTool{name: "demo_query"}, stubTool{name: "demo_list"}},
-	})
-	tm.AddProvider(stubProvider{
-		name:  "_skills",
-		tools: []tool.Tool{stubTool{name: "skill_list"}, stubTool{name: "skill_load"}},
-	})
+	tm.AddProvider(toolstest.Provider{N: "hugr-main", T: toolstest.Tools("demo_query", "demo_list")})
+	tm.AddProvider(toolstest.Provider{N: "_skills", T: toolstest.Tools("skill_list", "skill_load")})
 
 	m := New(Config{
 		Skills:       sk,

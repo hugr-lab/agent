@@ -21,6 +21,11 @@ type AuthSpec struct {
 	BaseURL      string // e.g. http://localhost:10000 — used to build RedirectURL when OIDC path taken
 	AccessToken  string
 	TokenURL     string
+	// LoginPath overrides the default derivation ("{callback_path
+	// with /callback suffix replaced by /login}" or "/auth/login" for
+	// the default path). Needed only for non-standard callback paths
+	// that don't end in "/callback".
+	LoginPath string
 	// DiscoverURL is the hugr URL used for type=hugr when no
 	// access_token/token_url is set: BuildStores calls
 	// {DiscoverURL}/auth/config to fetch issuer + client_id.
@@ -120,6 +125,22 @@ func buildOIDCAuth(ctx context.Context, s AuthSpec, out *Stores, mux *http.Serve
 	return finalizeOIDC(ctx, s, s.Issuer, s.ClientID, out, mux, seenPaths, logger, "oidc")
 }
 
+// derivedLoginPath picks the HTTP path that starts the OIDC flow.
+// Explicit override wins. Otherwise we require the callback path to
+// end in "/callback" and swap that suffix for "/login". This guards
+// against silently producing garbage login URLs for custom paths.
+func derivedLoginPath(callbackPath, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if strings.HasSuffix(callbackPath, "/callback") {
+		return strings.TrimSuffix(callbackPath, "/callback") + "/login"
+	}
+	// Fallback: append /login segment to the parent directory. Safe
+	// but visible — operator should set LoginPath explicitly.
+	return strings.TrimRight(callbackPath, "/") + "-login"
+}
+
 // finalizeOIDC builds the OIDCStore, registers the callback route on
 // mux (enforcing path uniqueness), stores the result, and queues the
 // PromptLogin trigger.
@@ -139,7 +160,7 @@ func finalizeOIDC(ctx context.Context, s AuthSpec, issuer, clientID string, out 
 		ClientID:     clientID,
 		RedirectURL:  redirect,
 		CallbackPath: path,
-		LoginPath:    strings.Replace(path, "callback", "login", 1),
+		LoginPath:    derivedLoginPath(path, s.LoginPath),
 		Logger:       logger.With("auth", s.Name),
 	}
 	store, err := NewOIDCStore(ctx, cfg)

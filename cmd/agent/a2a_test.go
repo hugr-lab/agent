@@ -20,26 +20,15 @@ import (
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
+	"github.com/hugr-lab/hugen/pkg/tools/toolstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
-	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
-
-// stubProviderCmd is a local tools.Provider for the a2a test's system
-// suite — can't import pkg/session's stubProvider across the test
-// boundary, so duplicate the tiny shape here.
-type stubProviderCmd struct {
-	name  string
-	tools []adktool.Tool
-}
-
-func (p *stubProviderCmd) Name() string           { return p.name }
-func (p *stubProviderCmd) Tools() []adktool.Tool  { return p.tools }
 
 // mockLLM returns a fixed text response.
 type mockLLM struct{ response string }
@@ -219,9 +208,9 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	// Register _skills provider with the real system suite — matches
 	// production wiring where providers.BuildAll does this from config.
-	toolsMgr.AddProvider(&stubProviderCmd{
-		name:  "_skills",
-		tools: system.NewSkillsSuite(sessionMgr),
+	toolsMgr.AddProvider(toolstest.Provider{
+		N: "_skills",
+		T: system.NewSkillsSuite(sessionMgr),
 	})
 
 	tokens := cfg.tokens

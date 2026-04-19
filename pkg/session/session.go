@@ -106,25 +106,48 @@ func (s *Session) SetCatalog(list []interfaces.SkillMeta) error {
 // (`skill/<name>/<idx>`) so repeated LoadSkill calls are idempotent.
 // Tool names are always resolved fresh at Snapshot time — not stashed
 // in state.
+//
+// Atomicity: we bind every provider FIRST. If any binding fails we
+// abort before touching state or hub, so a partial load doesn't leave
+// a stale skill_loaded event on disk pointing at a skill with no tools.
 func (s *Session) LoadSkill(ctx context.Context, name string) error {
 	sk, err := s.skills.Load(ctx, name)
 	if err != nil {
 		return err
 	}
-	added := s.state.AddSkill(sk.Name)
-	s.touch()
 
-	// Register bindings even on repeat load in case a previous Load
-	// failed partway — tools.Manager.Provider is the idempotency guard.
+	// Bind bindings first (phase 1). Roll back any that were created
+	// in this call if a later one fails.
+	created := make([]int, 0, len(sk.Providers))
 	for i, spec := range sk.Providers {
+		existed := false
+		if _, err := s.tools.Provider(bindingName(sk.Name, i)); err == nil {
+			existed = true
+		}
 		if err := s.bindSkillProvider(sk.Name, i, spec); err != nil {
-			s.logger.Warn("session: bind provider", "skill", sk.Name, "idx", i, "err", err)
+			// Roll back: drop only the providers we added in this call,
+			// not ones already present from a prior successful load.
+			for _, j := range created {
+				_ = s.tools.RemoveProvider(bindingName(sk.Name, j))
+				if sk.Providers[j].Provider == "" {
+					_ = s.tools.RemoveProvider(inlineName(sk.Name, j))
+				}
+			}
+			return fmt.Errorf("load skill %q: provider %d: %w", sk.Name, i, err)
+		}
+		if !existed {
+			created = append(created, i)
 		}
 	}
 
-	if !added {
+	// Phase 2: commit to state + hub. AddSkill is idempotent — if the
+	// skill was already active (restore + autoload combo), skip the
+	// event write to avoid double-logging on every restart.
+	if !s.state.AddSkill(sk.Name) {
+		s.touch()
 		return nil
 	}
+	s.touch()
 
 	if s.hub != nil {
 		providerNames := make([]string, 0, len(sk.Providers))
@@ -161,20 +184,8 @@ func (s *Session) UnloadSkill(ctx context.Context, name string) error {
 		return nil
 	}
 	s.state.RemoveRefsForSkill(name)
+	s.dropBindings(ctx, name)
 	s.touch()
-
-	// Drop filter views and any inline raw providers. We need the
-	// original skill to know how many providers it had — reload is
-	// cheap (disk read).
-	if sk, err := s.skills.Load(ctx, name); err == nil {
-		for i, spec := range sk.Providers {
-			_ = s.tools.RemoveProvider(bindingName(name, i))
-			if spec.Provider == "" {
-				// inline raw provider: synthesised alongside binding
-				_ = s.tools.RemoveProvider(inlineName(name, i))
-			}
-		}
-	}
 
 	if s.hub != nil {
 		meta, _ := json.Marshal(interfaces.SkillUnloadedMeta{Skill: name})
@@ -392,6 +403,37 @@ func (s *Session) touch() {
 	s.mu.Lock()
 	s.updatedAt = time.Now()
 	s.mu.Unlock()
+}
+
+// dropBindings removes the FilteredProvider views + any inline raw
+// providers that were registered for a skill, without touching
+// pre-configured providers (hugr-main, _skills, etc). Safe to call on
+// a skill whose on-disk definition has since changed shape — we reload
+// the skill to inspect its provider list.
+func (s *Session) dropBindings(ctx context.Context, name string) {
+	sk, err := s.skills.Load(ctx, name)
+	if err != nil {
+		return
+	}
+	for i, spec := range sk.Providers {
+		_ = s.tools.RemoveProvider(bindingName(name, i))
+		if spec.Provider == "" {
+			// inline raw provider synthesised in bindSkillProvider
+			_ = s.tools.RemoveProvider(inlineName(name, i))
+		}
+	}
+}
+
+// dropAllBindings clears every skill's bindings at once — used by
+// Manager.Delete so closing a session leaves no orphaned FilteredProvider
+// views in tools.Manager.
+func (s *Session) dropAllBindings(ctx context.Context) {
+	s.state.mu.RLock()
+	active := append([]string(nil), s.state.Skills...)
+	s.state.mu.RUnlock()
+	for _, name := range active {
+		s.dropBindings(ctx, name)
+	}
 }
 
 // restoreSkill re-applies a persisted skill_loaded event during

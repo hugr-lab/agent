@@ -271,8 +271,13 @@ func (m *Manager) Delete(ctx context.Context, req *adksession.DeleteRequest) err
 		return errors.New("session: Delete: session_id required")
 	}
 	m.mu.Lock()
+	sess, ok := m.sessions[req.SessionID]
 	delete(m.sessions, req.SessionID)
 	m.mu.Unlock()
+
+	if ok && sess != nil {
+		sess.dropAllBindings(ctx)
+	}
 
 	if m.hub != nil {
 		if err := m.hub.UpdateSessionStatus(ctx, req.SessionID, "closed"); err != nil {

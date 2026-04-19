@@ -35,6 +35,7 @@ type AuthConfig struct {
 	Issuer       string `mapstructure:"issuer"`
 	ClientID     string `mapstructure:"client_id"`
 	CallbackPath string `mapstructure:"callback_path"`
+	LoginPath    string `mapstructure:"login_path"`
 	AccessToken  string `mapstructure:"access_token"`
 	TokenURL     string `mapstructure:"token_url"`
 }
@@ -262,6 +263,7 @@ func expandAuthEnv(list []AuthConfig) {
 		a.AccessToken = os.ExpandEnv(a.AccessToken)
 		a.TokenURL = os.ExpandEnv(a.TokenURL)
 		a.CallbackPath = os.ExpandEnv(a.CallbackPath)
+		a.LoginPath = os.ExpandEnv(a.LoginPath)
 	}
 }
 

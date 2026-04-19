@@ -32,13 +32,6 @@ func NewSkillsSuite(sm interfaces.SessionManager) []tool.Tool {
 	}
 }
 
-// NewSuite is a back-compat alias for NewSkillsSuite. Prefer
-// NewSkillsSuite in new code.
-//
-// Deprecated: will be removed once all callers migrate to NewSkillsSuite.
-func NewSuite(sm interfaces.SessionManager) []tool.Tool {
-	return NewSkillsSuite(sm)
-}
 
 // sessionFor returns the session that owns this tool invocation, or an
 // error if the context has no session id / the session vanished.
