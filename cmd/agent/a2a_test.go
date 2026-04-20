@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv"
 	testadapters "github.com/hugr-lab/hugen/adapters/test"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/learning"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skills"
@@ -172,7 +173,7 @@ type testHugrAgentConfig struct {
 	llm          *testadapters.ScriptedLLM
 	constitution string
 	skillsDir    string // optional; if set, used for skills.NewFileManager
-	tokens       *hugen.TokenEstimator
+	tokens       *learning.TokenEstimator
 }
 
 // startTestHugrAgent builds the full HugrAgent stack (skills + tools +
@@ -186,7 +187,7 @@ func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitutio
 	return client
 }
 
-func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *hugen.TokenEstimator) {
+func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *learning.TokenEstimator) {
 	t.Helper()
 	logger := slog.Default()
 
@@ -215,7 +216,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	tokens := cfg.tokens
 	if tokens == nil {
-		tokens = hugen.NewTokenEstimator()
+		tokens = learning.NewTokenEstimator()
 	}
 
 	router := intent.NewRouter(cfg.llm)

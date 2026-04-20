@@ -1,9 +1,12 @@
-package agent
+package learning
 
 import "sync"
 
 // TokenEstimator tracks context token usage with a heuristic estimate
-// that calibrates itself from real LLM usage metadata via EMA.
+// that calibrates itself from real LLM usage metadata via EMA. Lives
+// here rather than in pkg/agent because the compactor (BeforeModelCallback)
+// and the memory-hint injector (InstructionProvider decorator) both
+// need to read the same calibrated estimate.
 type TokenEstimator struct {
 	mu    sync.RWMutex
 	ratio float64 // chars-to-tokens ratio (calibrated via EMA)

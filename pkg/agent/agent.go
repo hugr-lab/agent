@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/learning"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/agent"
@@ -29,7 +30,7 @@ type Config struct {
 
 	// Tokens is the calibrateable estimator used by the AfterModelCallback
 	// to track context usage per session. Optional.
-	Tokens *TokenEstimator
+	Tokens *learning.TokenEstimator
 
 	// Logger is optional; defaults to slog.Default.
 	Logger *slog.Logger

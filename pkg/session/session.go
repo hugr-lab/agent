@@ -234,14 +234,25 @@ func (s *Session) Snapshot() interfaces.Snapshot {
 	}
 }
 
-// IngestADKEvent bumps updatedAt — 003b will classify and persist.
+// IngestADKEvent bumps updatedAt and, if the manager has a classifier
+// attached, pushes the event onto the classifier channel for
+// asynchronous persistence to hub.db.session_events. Non-blocking —
+// a full classifier queue drops the event (WARN) so the LLM turn is
+// never stalled on DB I/O (spec 005 FR-001, SC-009).
 func (s *Session) IngestADKEvent(_ context.Context, ev *adksession.Event) {
 	if ev == nil {
 		return
 	}
 	s.mu.Lock()
-	s.updatedAt = ev.Timestamp
+	if !ev.Timestamp.IsZero() {
+		s.updatedAt = ev.Timestamp
+	} else {
+		s.updatedAt = time.Now()
+	}
 	s.mu.Unlock()
+	if s.manager != nil {
+		s.manager.publishEvent(s.id, ev)
+	}
 }
 
 // ------------------------------------------------------------

@@ -13,10 +13,13 @@ import (
 	"github.com/hugr-lab/hugen/internal/config"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/learning"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"github.com/hugr-lab/hugen/pkg/models/hugr"
 	"github.com/hugr-lab/hugen/pkg/providers"
+	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/classifier"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	qe "github.com/hugr-lab/query-engine"
@@ -37,9 +40,33 @@ type agentRuntime struct {
 	sessions   interfaces.SessionManager
 	tools      *tools.Manager
 	skills     skills.Manager
+
+	classifier    *classifier.Classifier
+	scheduler     *scheduler.Scheduler
+	bgCtx         context.Context
+	bgCancel      context.CancelFunc
 }
 
 func (r *agentRuntime) close(logger *slog.Logger) {
+	// Stop background workers first — scheduler may need hub, and
+	// classifier drains its channel by calling hub.AppendEvent.
+	if r.bgCancel != nil {
+		r.bgCancel()
+	}
+	if r.scheduler != nil {
+		select {
+		case <-r.scheduler.Done():
+		case <-time.After(5 * time.Second):
+			logger.Warn("shutting down: scheduler did not stop within 5s")
+		}
+	}
+	if r.classifier != nil {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := r.classifier.Drain(drainCtx, 5*time.Second); err != nil {
+			logger.Warn("shutting down: classifier drain", "err", err)
+		}
+		cancel()
+	}
 	if r.hubDB != nil {
 		if err := r.hubDB.Close(); err != nil {
 			logger.Error("shutting down: hubDB close", "err", err)
@@ -65,7 +92,7 @@ type buildComponents struct {
 	skills       skills.Manager
 	tools        *tools.Manager
 	constitution string
-	tokens       *hugen.TokenEstimator
+	tokens       *learning.TokenEstimator
 }
 
 func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger, hugrTransport http.RoundTripper) (*buildComponents, error) {
@@ -147,7 +174,7 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		skills:       skillsMgr,
 		tools:        toolsMgr,
 		constitution: string(constitution),
-		tokens:       hugen.NewTokenEstimator(),
+		tokens:       learning.NewTokenEstimator(),
 	}, nil
 }
 
@@ -247,16 +274,48 @@ func buildRuntime(
 		}
 	}
 
-	// SessionManager first (without a concrete Skills-suite provider in
-	// tools yet — but InlineBuilder for skill endpoints works already).
-	// We build the provider registry *after* SessionManager exists
-	// because the system suite needs SessionManager as a dep.
+	// Classifier + scheduler + reviewer wired before SessionManager
+	// so the manager can publish events + queue reviews from the
+	// very first Create. All background goroutines start after we're
+	// confident buildRuntime won't fail.
+	cls := classifier.New(hub, logger, classifier.DefaultBuffer)
+
+	reviewer, err := learning.NewReviewer(learning.ReviewerOptions{
+		Hub:        hub,
+		Router:     components.router,
+		Logger:     logger,
+		Volatility: cfg.Memory.VolatilityDuration,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build reviewer: %w", err)
+	}
+
+	sched, err := scheduler.New(scheduler.Config{
+		Interval:        cfg.Memory.Scheduler.Interval,
+		ReviewDelay:     cfg.Memory.Scheduler.ReviewDelay,
+		ConsolidationAt: cfg.Memory.Scheduler.ConsolidationAt,
+		Reviewer:        reviewer,
+		Hub:             hub,
+		Logger:          logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build scheduler: %w", err)
+	}
+	rt.classifier = cls
+	rt.scheduler = sched
+
+	// SessionManager wires classifier + scheduler in so IngestADKEvent
+	// publishes transcript rows and Delete queues post-session review.
 	sessionMgr := session.New(session.Config{
 		Skills:       components.skills,
 		Tools:        components.tools,
 		Hub:          hub,
 		Constitution: components.constitution,
 		Logger:       logger,
+		Classifier:   cls,
+		Scheduler:    sched,
 		InlineBuilder: func(name, endpoint, authName string, lg *slog.Logger) (tools.Provider, error) {
 			return providers.Build(
 				config.ProviderConfig{Name: name, Type: "mcp", Endpoint: endpoint, Auth: authName},
@@ -305,6 +364,11 @@ func buildRuntime(
 	}
 
 	hugen.StartSessionCleanup(context.Background(), sessionMgr, 1*time.Hour, logger)
+
+	// Start background workers. bgCtx is cancelled by rt.close.
+	rt.bgCtx, rt.bgCancel = context.WithCancel(context.Background())
+	go cls.Run(rt.bgCtx)
+	sched.Start(rt.bgCtx)
 
 	return rt, nil
 }

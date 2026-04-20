@@ -139,8 +139,9 @@ type MemoryConfig struct {
 }
 
 type MemoryScheduler struct {
-	Interval    time.Duration `mapstructure:"interval"`
-	ReviewDelay time.Duration `mapstructure:"review_delay"`
+	Interval        time.Duration `mapstructure:"interval"`
+	ReviewDelay     time.Duration `mapstructure:"review_delay"`
+	ConsolidationAt string        `mapstructure:"consolidation_at"`
 }
 
 type MemoryConsolidation struct {

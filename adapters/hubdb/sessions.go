@@ -242,6 +242,197 @@ func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]interfaces.S
 	return out, nil
 }
 
+// GetSession fetches a single session row. Returns (nil, nil) when
+// the session is not found.
+func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.SessionRecord, error) {
+	type row struct {
+		ID              string         `json:"id"`
+		AgentID         string         `json:"agent_id"`
+		OwnerID         string         `json:"owner_id"`
+		ParentSessionID string         `json:"parent_session_id"`
+		ForkAfterSeq    *int           `json:"fork_after_seq"`
+		Status          string         `json:"status"`
+		Mission         string         `json:"mission"`
+		Metadata        map[string]any `json:"metadata"`
+		CreatedAt       dbTime         `json:"created_at"`
+		UpdatedAt       dbTime         `json:"updated_at"`
+	}
+	rows, err := runQuery[[]row](ctx, h.querier,
+		`query ($agent: String!, $id: String!) {
+			hub { db { agent {
+				sessions(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
+					id agent_id owner_id parent_session_id fork_after_seq status mission metadata created_at updated_at
+				}
+			}}}
+		}`,
+		map[string]any{"agent": h.agentID, "id": id},
+		"hub.db.agent.sessions",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	r := rows[0]
+	return &interfaces.SessionRecord{
+		ID:              r.ID,
+		AgentID:         r.AgentID,
+		OwnerID:         r.OwnerID,
+		ParentSessionID: r.ParentSessionID,
+		ForkAfterSeq:    r.ForkAfterSeq,
+		Status:          r.Status,
+		Mission:         r.Mission,
+		Metadata:        r.Metadata,
+		CreatedAt:       r.CreatedAt.Time,
+		UpdatedAt:       r.UpdatedAt.Time,
+	}, nil
+}
+
+// ListChildSessions returns every session whose parent_session_id
+// matches parentSessionID. Empty slice when none exist.
+func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]interfaces.SessionRecord, error) {
+	type row struct {
+		ID              string         `json:"id"`
+		AgentID         string         `json:"agent_id"`
+		OwnerID         string         `json:"owner_id"`
+		ParentSessionID string         `json:"parent_session_id"`
+		ForkAfterSeq    *int           `json:"fork_after_seq"`
+		Status          string         `json:"status"`
+		Mission         string         `json:"mission"`
+		Metadata        map[string]any `json:"metadata"`
+		CreatedAt       dbTime         `json:"created_at"`
+		UpdatedAt       dbTime         `json:"updated_at"`
+	}
+	rows, err := runQuery[[]row](ctx, h.querier,
+		`query ($agent: String!, $parent: String!) {
+			hub { db { agent {
+				sessions(filter: {agent_id: {eq: $agent}, parent_session_id: {eq: $parent}}) {
+					id agent_id owner_id parent_session_id fork_after_seq status mission metadata created_at updated_at
+				}
+			}}}
+		}`,
+		map[string]any{"agent": h.agentID, "parent": parentSessionID},
+		"hub.db.agent.sessions",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]interfaces.SessionRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, interfaces.SessionRecord{
+			ID:              r.ID,
+			AgentID:         r.AgentID,
+			OwnerID:         r.OwnerID,
+			ParentSessionID: r.ParentSessionID,
+			ForkAfterSeq:    r.ForkAfterSeq,
+			Status:          r.Status,
+			Mission:         r.Mission,
+			Metadata:        r.Metadata,
+			CreatedAt:       r.CreatedAt.Time,
+			UpdatedAt:       r.UpdatedAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// GetEventsFull returns the full event history for a session through
+// the session_events_full view, which recursively includes inherited
+// events from the parent chain for forked sessions. Sub-agents (no
+// fork_after_seq) see only their own events.
+func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]interfaces.SessionEventFull, error) {
+	type row struct {
+		ID         string          `json:"id"`
+		SessionID  string          `json:"session_id"`
+		AgentID    string          `json:"agent_id"`
+		Seq        int             `json:"seq"`
+		EventType  string          `json:"event_type"`
+		Author     string          `json:"author"`
+		Content    string          `json:"content"`
+		ToolName   string          `json:"tool_name"`
+		ToolArgs   json.RawMessage `json:"tool_args"`
+		ToolResult string          `json:"tool_result"`
+		Metadata   map[string]any  `json:"metadata"`
+		CreatedAt  dbTime          `json:"created_at"`
+		ChainDepth int             `json:"chain_depth"`
+	}
+	rows, err := runQuery[[]row](ctx, h.querier,
+		`query ($input: session_events_full_input!) {
+			hub { db { agent {
+				session_events_full(session_events_full_input: $input) {
+					id session_id agent_id seq event_type author content
+					tool_name tool_args tool_result metadata created_at chain_depth
+				}
+			}}}
+		}`,
+		map[string]any{"input": map[string]any{"session_id": sessionID}},
+		"hub.db.agent.session_events_full",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]interfaces.SessionEventFull, 0, len(rows))
+	for _, r := range rows {
+		var toolArgs map[string]any
+		if len(r.ToolArgs) > 0 {
+			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
+		}
+		out = append(out, interfaces.SessionEventFull{
+			SessionEvent: interfaces.SessionEvent{
+				ID:         r.ID,
+				SessionID:  r.SessionID,
+				AgentID:    r.AgentID,
+				Seq:        r.Seq,
+				EventType:  r.EventType,
+				Author:     r.Author,
+				Content:    r.Content,
+				ToolName:   r.ToolName,
+				ToolArgs:   toolArgs,
+				ToolResult: r.ToolResult,
+				Metadata:   r.Metadata,
+				CreatedAt:  r.CreatedAt.Time,
+			},
+			ChainDepth: r.ChainDepth,
+		})
+	}
+	return out, nil
+}
+
+// CountToolCalls counts the tool_call rows in a session's transcript.
+func (h *hubDB) CountToolCalls(ctx context.Context, sessionID string) (int, error) {
+	type row struct {
+		Seq int `json:"seq"`
+	}
+	// query-engine may not expose aggregate(count) across all deployments;
+	// fetch IDs with limit and count client-side. Cheap at session scale
+	// (<1k rows per session).
+	rows, err := runQuery[[]row](ctx, h.querier,
+		`query ($sid: String!) {
+			hub { db { agent {
+				session_events(filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}) { seq }
+			}}}
+		}`,
+		map[string]any{"sid": sessionID},
+		"hub.db.agent.session_events",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return len(rows), nil
+}
+
 // ------------------------------------------------------------
 // internal
 // ------------------------------------------------------------

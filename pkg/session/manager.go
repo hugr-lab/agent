@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/session/classifier"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	adksession "google.golang.org/adk/session"
@@ -40,8 +41,27 @@ type Config struct {
 	// that only use named providers work without it.
 	InlineBuilder InlineProviderFactory
 
+	// Classifier persists conversation events (user_message / llm_response
+	// / tool_call / tool_result) asynchronously via hub.AppendEvent.
+	// When nil, IngestADKEvent is a no-op on the persistence side. The
+	// classifier goroutine is expected to be running when set; it is not
+	// started by the manager.
+	Classifier *classifier.Classifier
+
+	// Scheduler queues post-session reviews on Delete. When nil, reviews
+	// are never queued — useful for tests that drive the reviewer directly.
+	Scheduler ReviewQueuer
+
 	// Logger may be nil; defaults to slog.Default.
 	Logger *slog.Logger
+}
+
+// ReviewQueuer abstracts pkg/scheduler.Scheduler so the session
+// package does not import the scheduler (which would create a cycle
+// once scheduler depends on learning → session state). One method:
+// QueueReview(sessionID string).
+type ReviewQueuer interface {
+	QueueReview(sessionID string)
 }
 
 // InlineProviderFactory builds an anonymous MCP provider for a skill's
@@ -64,6 +84,8 @@ type Manager struct {
 	constitution  string
 	logger        *slog.Logger
 	inlineBuilder InlineProviderFactory
+	classifier    *classifier.Classifier
+	scheduler     ReviewQueuer
 }
 
 var (
@@ -84,7 +106,19 @@ func New(cfg Config) *Manager {
 		constitution:  cfg.Constitution,
 		logger:        cfg.Logger,
 		inlineBuilder: cfg.InlineBuilder,
+		classifier:    cfg.Classifier,
+		scheduler:     cfg.Scheduler,
 	}
+}
+
+// publishEvent routes an ADK event to the classifier when one is
+// attached. Called from Session.IngestADKEvent on every turn — must
+// never block on I/O.
+func (m *Manager) publishEvent(sessionID string, ev *adksession.Event) {
+	if m.classifier == nil || ev == nil {
+		return
+	}
+	m.classifier.Publish(classifier.Envelope{SessionID: sessionID, Event: ev})
 }
 
 // ------------------------------------------------------------
@@ -280,9 +314,12 @@ func (m *Manager) Delete(ctx context.Context, req *adksession.DeleteRequest) err
 	}
 
 	if m.hub != nil {
-		if err := m.hub.UpdateSessionStatus(ctx, req.SessionID, "closed"); err != nil {
+		if err := m.hub.UpdateSessionStatus(ctx, req.SessionID, "completed"); err != nil {
 			m.logger.Warn("session: hub.UpdateSessionStatus", "id", req.SessionID, "err", err)
 		}
+	}
+	if m.scheduler != nil {
+		m.scheduler.QueueReview(req.SessionID)
 	}
 	return nil
 }

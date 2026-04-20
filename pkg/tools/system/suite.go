@@ -16,11 +16,14 @@ import (
 	"google.golang.org/genai"
 )
 
-// NewSkillsSuite returns the skill-lifecycle + context tools
-// (skill_list, skill_load, skill_unload, skill_ref, skill_ref_unload,
-// context_status). Exposed through the `_skills` system provider.
-// The SessionManager is the target of every Run — tools hold a
-// reference and lookup the current Session by ID.
+// NewSkillsSuite returns the skill-lifecycle tools (skill_list,
+// skill_load, skill_unload, skill_ref, skill_ref_unload). Exposed
+// through the `_skills` system provider. The SessionManager is the
+// target of every Run — tools hold a reference and lookup the current
+// Session by ID.
+//
+// Context-management tools (context_status, context_intro,
+// context_compress) moved to the `_context` suite — see context.go.
 func NewSkillsSuite(sm interfaces.SessionManager) []tool.Tool {
 	return []tool.Tool{
 		&skillListTool{sm: sm},
@@ -28,7 +31,6 @@ func NewSkillsSuite(sm interfaces.SessionManager) []tool.Tool {
 		&skillUnloadTool{sm: sm},
 		&skillRefTool{sm: sm},
 		&skillRefUnloadTool{sm: sm},
-		&contextStatusTool{sm: sm},
 	}
 }
 
@@ -338,35 +340,3 @@ func (t *skillRefUnloadTool) Run(ctx tool.Context, args any) (map[string]any, er
 	return map[string]any{"unloaded": ref, "skill": skill}, nil
 }
 
-// ------------------------------------------------------------
-// context_status
-// ------------------------------------------------------------
-
-type contextStatusTool struct{ sm interfaces.SessionManager }
-
-func (t *contextStatusTool) Name() string { return "context_status" }
-func (t *contextStatusTool) Description() string {
-	return "Returns current token usage: system prompt size and loaded tool count."
-}
-func (t *contextStatusTool) IsLongRunning() bool { return false }
-
-func (t *contextStatusTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
-}
-
-func (t *contextStatusTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
-	tools.Pack(req, t)
-	return nil
-}
-
-func (t *contextStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
-	sess, err := sessionFor(ctx, t.sm)
-	if err != nil {
-		return nil, fmt.Errorf("context_status: %w", err)
-	}
-	snap := sess.Snapshot()
-	return map[string]any{
-		"system_prompt_chars": len(snap.Prompt),
-		"loaded_tools":        len(snap.Tools),
-	}, nil
-}

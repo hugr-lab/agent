@@ -27,9 +27,14 @@ func buildSystem(cfg config.ProviderConfig, deps Deps) (tools.Provider, error) {
 		}
 		list = system.NewSkillsSuite(deps.Sessions)
 	case "memory":
-		// 003b fills this; in 004 the suite is an empty list so
-		// sessions referencing _memory load cleanly with no tools.
+		// Full suite lands in spec 005. While tools are being added the
+		// suite may return an empty list — empty providers are fine.
 		list = system.NewMemorySuite(deps.Sessions, deps.Hub)
+	case "context":
+		// Context-management suite: status / intro / compress. Compactor
+		// wiring is injected by the runtime via deps.Compactor once it
+		// exists; for now passing nil keeps the provider loadable.
+		list = system.NewContextSuite(deps.Sessions)
 	default:
 		return nil, fmt.Errorf("provider %q: unknown system suite %q", cfg.Name, cfg.Suite)
 	}

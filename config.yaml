@@ -43,6 +43,9 @@ providers:
   - name: _memory
     type: system
     suite: memory
+  - name: _context
+    type: system
+    suite: context
   - name: hugr-main
     type: mcp
     endpoint: ${HUGR_MCP_URL}
@@ -76,6 +79,7 @@ memory:
   scheduler:
     interval: 5m
     review_delay: 30s
+    consolidation_at: "0 3 * * *"   # daily at 03:00; own-impl cron parser
   consolidation:
     hypothesis_expiry: 720h
 

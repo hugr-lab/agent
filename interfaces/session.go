@@ -12,11 +12,11 @@ import (
 // session.Service so it can be plugged into Runner, and adds our own
 // Session(id) accessor plus RestoreOpen for boot-time replay from hub.db.
 //
-// A SessionManager is also a tools.Provider (Name()+Tools()) — it exposes
-// the built-in system tools (skill_list, skill_load, skill_ref,
-// context_status) as a provider to the tools.Manager. We keep that contract
-// out of this file to avoid an import cycle with pkg/tools; pkg/session's
-// concrete Manager satisfies pkg/tools.Provider structurally.
+// Concrete SessionManager implementations are typically also used as
+// a target by the `_skills` system-provider suite
+// (skill_list / skill_load / skill_unload / skill_ref / skill_ref_unload);
+// context-management tools live behind the `_context` system provider
+// (context_status, context_intro, context_compress).
 type SessionManager interface {
 	adksession.Service
 

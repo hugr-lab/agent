@@ -3,16 +3,17 @@ package hubdb
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/hugr-lab/hugen/interfaces"
 )
 
-// notImplemented is returned by methods whose implementation lives in future
-// specs (003b Memory/Learning/Sessions). AgentRegistry (US2) and Embeddings
-// (US4) replace these stubs with real GraphQL calls.
+// notImplemented is returned by methods whose implementation is not
+// currently in scope. Memory / Learning / Sessions-read extensions all
+// landed in spec 005; the remaining stubs are cross-agent operations
+// (UpsertAgentType, ListAgents) that belong on the hub side, and
+// session notes/participants which land in spec 005 Phase 4 (US2).
 func notImplemented(op string) error {
-	return fmt.Errorf("hubdb: %s not implemented in 004", op)
+	return fmt.Errorf("hubdb: %s not implemented", op)
 }
 
 // UpsertAgentType is stubbed — agent_types rows are seeded during the
@@ -28,109 +29,8 @@ func (h *hubDB) ListAgents(ctx context.Context, typeID string) ([]interfaces.Age
 	return nil, notImplemented("ListAgents")
 }
 
-// ── Memory (filled in by 003b) ──────────────────────────────
+// ── Notes & Participants (spec 005 Phase 4 — User Story 2) ─────────
 
-func (h *hubDB) Search(ctx context.Context, query string, embedding []float32, opts interfaces.SearchOpts) ([]interfaces.SearchResult, error) {
-	return nil, notImplemented("Search")
-}
-func (h *hubDB) Get(ctx context.Context, id string) (*interfaces.SearchResult, error) {
-	return nil, notImplemented("Get")
-}
-func (h *hubDB) GetLinked(ctx context.Context, id string, depth int) ([]interfaces.SearchResult, error) {
-	return nil, notImplemented("GetLinked")
-}
-func (h *hubDB) Store(ctx context.Context, item interfaces.MemoryItem, tags []string, links []interfaces.MemoryLink) (string, error) {
-	return "", notImplemented("Store")
-}
-func (h *hubDB) Reinforce(ctx context.Context, id string, scoreBonus float64, extraTags []string, extraLinks []interfaces.MemoryLink) error {
-	return notImplemented("Reinforce")
-}
-func (h *hubDB) Supersede(ctx context.Context, oldID string, newItem interfaces.MemoryItem, tags []string, links []interfaces.MemoryLink) (string, error) {
-	return "", notImplemented("Supersede")
-}
-func (h *hubDB) Delete(ctx context.Context, id string) error { return notImplemented("Delete") }
-func (h *hubDB) DeleteExpired(ctx context.Context) (int, error) {
-	return 0, notImplemented("DeleteExpired")
-}
-func (h *hubDB) AddTags(ctx context.Context, id string, tags []string) error {
-	return notImplemented("AddTags")
-}
-func (h *hubDB) RemoveTags(ctx context.Context, id string, tags []string) error {
-	return notImplemented("RemoveTags")
-}
-func (h *hubDB) AddLink(ctx context.Context, link interfaces.MemoryLink) error {
-	return notImplemented("AddLink")
-}
-func (h *hubDB) RemoveLink(ctx context.Context, sourceID, targetID string) error {
-	return notImplemented("RemoveLink")
-}
-func (h *hubDB) Stats(ctx context.Context) (interfaces.MemoryStats, error) {
-	return interfaces.MemoryStats{}, notImplemented("Stats")
-}
-func (h *hubDB) Hint(ctx context.Context, query string, embedding []float32) (string, error) {
-	return "", notImplemented("Hint")
-}
-
-// ── Learning (filled in by 003b) ────────────────────────────
-
-func (h *hubDB) CreateHypothesis(ctx context.Context, hyp interfaces.Hypothesis) (string, error) {
-	return "", notImplemented("CreateHypothesis")
-}
-func (h *hubDB) ListPendingHypotheses(ctx context.Context, priority string, limit int) ([]interfaces.Hypothesis, error) {
-	return nil, notImplemented("ListPendingHypotheses")
-}
-func (h *hubDB) MarkHypothesisChecking(ctx context.Context, id string) error {
-	return notImplemented("MarkHypothesisChecking")
-}
-func (h *hubDB) ConfirmHypothesis(ctx context.Context, id string, evidence, factID string) error {
-	return notImplemented("ConfirmHypothesis")
-}
-func (h *hubDB) RejectHypothesis(ctx context.Context, id string, evidence string) error {
-	return notImplemented("RejectHypothesis")
-}
-func (h *hubDB) DeferHypothesis(ctx context.Context, id string) error {
-	return notImplemented("DeferHypothesis")
-}
-func (h *hubDB) ExpireOldHypotheses(ctx context.Context, maxAge time.Duration) (int, error) {
-	return 0, notImplemented("ExpireOldHypotheses")
-}
-func (h *hubDB) CreateReview(ctx context.Context, r interfaces.SessionReview) (string, error) {
-	return "", notImplemented("CreateReview")
-}
-func (h *hubDB) GetReview(ctx context.Context, sessionID string) (*interfaces.SessionReview, error) {
-	return nil, notImplemented("GetReview")
-}
-func (h *hubDB) ListPendingReviews(ctx context.Context, limit int) ([]interfaces.SessionReview, error) {
-	return nil, notImplemented("ListPendingReviews")
-}
-func (h *hubDB) CompleteReview(ctx context.Context, id string, result interfaces.ReviewResult) error {
-	return notImplemented("CompleteReview")
-}
-func (h *hubDB) FailReview(ctx context.Context, id string, errMsg string) error {
-	return notImplemented("FailReview")
-}
-func (h *hubDB) Log(ctx context.Context, entry interfaces.MemoryLogEntry) error {
-	return notImplemented("Log")
-}
-func (h *hubDB) GetLog(ctx context.Context, memoryItemID string, limit int) ([]interfaces.MemoryLogEntry, error) {
-	return nil, notImplemented("GetLog")
-}
-
-// ── Sessions (real impls live in sessions.go; remaining read helpers and
-//    participants/notes are 003b) ─────────────────────────────
-
-func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.SessionRecord, error) {
-	return nil, notImplemented("GetSession")
-}
-func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]interfaces.SessionRecord, error) {
-	return nil, notImplemented("ListChildSessions")
-}
-func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]interfaces.SessionEventFull, error) {
-	return nil, notImplemented("GetEventsFull")
-}
-func (h *hubDB) CountToolCalls(ctx context.Context, sessionID string) (int, error) {
-	return 0, notImplemented("CountToolCalls")
-}
 func (h *hubDB) AddNote(ctx context.Context, note interfaces.SessionNote) (string, error) {
 	return "", notImplemented("AddNote")
 }

@@ -1,0 +1,167 @@
+//go:build duckdb_arrow
+
+package hubdb_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// seedAgent registers the agent row used by memory tests. memory_items
+// rows FK onto agents, so this has to land before any Store call.
+func seedAgent(t *testing.T, h interfaces.HubDB, id, short string) {
+	t.Helper()
+	require.NoError(t, h.RegisterAgent(context.Background(), interfaces.Agent{
+		ID: id, AgentTypeID: "hugr-data", ShortID: short,
+		Name: "test-agent", Status: "active",
+	}))
+}
+
+func TestMemory_StoreGetDelete(t *testing.T) {
+	h := newTestHubDB(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+	seedAgent(t, h, "agt_ag01", "ag01")
+
+	now := time.Now().UTC()
+	fact := interfaces.MemoryItem{
+		Content:    "tf2.incidents has 14 fields",
+		Category:   "schema",
+		Volatility: "stable",
+		Score:      0.8,
+		Source:     "review:test",
+		ValidFrom:  now,
+		ValidTo:    now.Add(24 * time.Hour),
+	}
+	id, err := h.Store(ctx, fact, []string{"tf", "incidents", "schema"},
+		[]interfaces.MemoryLink{{TargetID: "other-fact", Relation: "uses"}})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	got, err := h.Get(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, fact.Content, got.Content)
+	assert.Equal(t, "schema", got.Category)
+	assert.ElementsMatch(t, []string{"tf", "incidents", "schema"}, got.Tags)
+	assert.ElementsMatch(t, []string{"other-fact"}, got.Links)
+	assert.True(t, got.IsValid)
+
+	// Search by content substring (keyword path, no embedding).
+	res, err := h.Search(ctx, "incidents", nil, interfaces.SearchOpts{Limit: 5})
+	require.NoError(t, err)
+	require.NotEmpty(t, res)
+	assert.Equal(t, id, res[0].ID)
+
+	// Filter by tags — should still match.
+	res, err = h.Search(ctx, "", nil, interfaces.SearchOpts{Tags: []string{"tf"}, Limit: 5})
+	require.NoError(t, err)
+	require.NotEmpty(t, res)
+
+	// Wrong tag filter → no results.
+	res, err = h.Search(ctx, "", nil, interfaces.SearchOpts{Tags: []string{"weather"}, Limit: 5})
+	require.NoError(t, err)
+	assert.Empty(t, res)
+
+	// Delete and verify.
+	require.NoError(t, h.Delete(ctx, id))
+	got, err = h.Get(ctx, id)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestMemory_Reinforce(t *testing.T) {
+	h := newTestHubDB(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+	seedAgent(t, h, "agt_ag01", "ag01")
+	now := time.Now().UTC()
+
+	id, err := h.Store(ctx, interfaces.MemoryItem{
+		Content: "query pattern: filter weather by region", Category: "query_template",
+		Volatility: "stable", Score: 0.5,
+		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
+	}, []string{"weather"}, nil)
+	require.NoError(t, err)
+
+	// Reinforce: bump score by 0.3, add a tag, add a link.
+	require.NoError(t, h.Reinforce(ctx, id, 0.3, []string{"region"},
+		[]interfaces.MemoryLink{{TargetID: "schema-weather", Relation: "uses"}}))
+
+	got, err := h.Get(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.InDelta(t, 0.8, got.Score, 0.001)
+	assert.Contains(t, got.Tags, "weather")
+	assert.Contains(t, got.Tags, "region")
+	assert.Contains(t, got.Links, "schema-weather")
+}
+
+func TestMemory_Stats(t *testing.T) {
+	h := newTestHubDB(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+	seedAgent(t, h, "agt_ag01", "ag01")
+	now := time.Now().UTC()
+
+	_, err := h.Store(ctx, interfaces.MemoryItem{
+		Content: "a", Category: "schema", Volatility: "stable", Score: 0.5,
+		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
+	}, nil, nil)
+	require.NoError(t, err)
+	_, err = h.Store(ctx, interfaces.MemoryItem{
+		Content: "b", Category: "schema", Volatility: "stable", Score: 0.5,
+		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
+	}, nil, nil)
+	require.NoError(t, err)
+	_, err = h.Store(ctx, interfaces.MemoryItem{
+		Content: "c", Category: "query_template", Volatility: "stable", Score: 0.5,
+		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
+	}, nil, nil)
+	require.NoError(t, err)
+
+	stats, err := h.Stats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 3, stats.TotalItems)
+	assert.Equal(t, 3, stats.ActiveItems)
+	assert.Equal(t, 2, stats.ByCategory["schema"])
+	assert.Equal(t, 1, stats.ByCategory["query_template"])
+
+	hint, err := h.Hint(ctx, "", nil)
+	require.NoError(t, err)
+	assert.Contains(t, hint, "3 long-term facts")
+}
+
+func TestMemory_DeleteExpired(t *testing.T) {
+	h := newTestHubDB(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+	seedAgent(t, h, "agt_ag01", "ag01")
+	now := time.Now().UTC()
+
+	// One expired, one fresh.
+	_, err := h.Store(ctx, interfaces.MemoryItem{
+		Content: "expired", Category: "schema", Volatility: "volatile", Score: 0.5,
+		ValidFrom: now.Add(-48 * time.Hour), ValidTo: now.Add(-1 * time.Hour),
+	}, nil, nil)
+	require.NoError(t, err)
+	freshID, err := h.Store(ctx, interfaces.MemoryItem{
+		Content: "fresh", Category: "schema", Volatility: "stable", Score: 0.5,
+		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
+	}, nil, nil)
+	require.NoError(t, err)
+
+	_, err = h.DeleteExpired(ctx)
+	require.NoError(t, err)
+
+	// Fresh one survives.
+	got, err := h.Get(ctx, freshID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	// Confirm expired is gone — search for "expired" returns nothing.
+	res, err := h.Search(ctx, "expired", nil, interfaces.SearchOpts{Limit: 5})
+	require.NoError(t, err)
+	assert.Empty(t, res)
+}
