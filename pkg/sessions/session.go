@@ -1,4 +1,4 @@
-package session
+package sessions
 
 import (
 	"context"
@@ -13,13 +13,12 @@ import (
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
-	"github.com/hugr-lab/hugen/pkg/tools/system"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
 
 // Session is a runtime conversation. It implements adksession.Session and
-// interfaces.Session. Prompt/tools are resolved at Snapshot time against
+// *Session. Prompt/tools are resolved at Snapshot time against
 // the current skills.Manager and tools.Manager — no caching, so hot-edits
 // of skills or newly-registered MCP tools are visible on the next turn.
 type Session struct {
@@ -46,7 +45,7 @@ type Session struct {
 
 var (
 	_ adksession.Session = (*Session)(nil)
-	_ interfaces.Session = (*Session)(nil)
+	_ *Session           = (*Session)(nil)
 )
 
 type sessionConfig struct {
@@ -94,7 +93,7 @@ func (s *Session) LastUpdateTime() time.Time {
 }
 
 // ------------------------------------------------------------
-// interfaces.Session
+// *Session
 // ------------------------------------------------------------
 
 // SetCatalog replaces the catalog shown in this session's prompt.
@@ -229,9 +228,9 @@ func (s *Session) UnloadReference(_ context.Context, skill, ref string) error {
 // Snapshot rebuilds the prompt + tool list on every call — skills may
 // have been edited on disk and MCP tools may have changed server-side,
 // both are reflected immediately.
-func (s *Session) Snapshot() interfaces.Snapshot {
+func (s *Session) Snapshot() Snapshot {
 	ctx := context.Background()
-	return interfaces.Snapshot{
+	return Snapshot{
 		Prompt: s.buildPrompt(ctx),
 		Tools:  s.buildTools(ctx),
 	}
@@ -562,19 +561,28 @@ func inlineName(skill string, idx int) string {
 // Touch is for tests/infra that need to flag activity.
 func (s *Session) Touch() { s.touch() }
 
-// ListSkills returns the current skill catalogue (system.catalogLister).
+// SkillDescriptorMeta is what skill_load needs to shape its response —
+// references with descriptions + the author-provided workflow hint.
+// Defined here so the (consumer-side) tools/system package can name the
+// type without sessions importing tools/system in return.
+type SkillDescriptorMeta struct {
+	Refs     []interfaces.SkillRefMeta
+	NextStep string
+}
+
+// ListSkills returns the current skill catalogue.
 func (s *Session) ListSkills(ctx context.Context) ([]interfaces.SkillMeta, error) {
 	return s.skills.List(ctx)
 }
 
 // SkillMeta returns the reference-document metadata + next-step hint for
-// a skill (system.skillDescriptor). Empty struct if the skill is unknown.
-func (s *Session) SkillMeta(ctx context.Context, name string) system.SkillDescriptorMeta {
+// a skill. Empty struct if the skill is unknown.
+func (s *Session) SkillMeta(ctx context.Context, name string) SkillDescriptorMeta {
 	sk, err := s.skills.Load(ctx, name)
 	if err != nil {
-		return system.SkillDescriptorMeta{}
+		return SkillDescriptorMeta{}
 	}
-	return system.SkillDescriptorMeta{
+	return SkillDescriptorMeta{
 		Refs:     append([]interfaces.SkillRefMeta(nil), sk.Refs...),
 		NextStep: sk.NextStep,
 	}

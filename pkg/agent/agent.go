@@ -10,10 +10,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/learning"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -26,7 +25,7 @@ type Config struct {
 
 	// Sessions provides per-invocation Snapshot (prompt + tools) and
 	// session lifecycle. Required.
-	Sessions interfaces.SessionManager
+	Sessions *sessions.Manager
 
 	// Tokens is the calibrateable estimator used by the AfterModelCallback
 	// to track context usage per session. Optional.
@@ -87,7 +86,7 @@ func NewAgent(cfg Config) (agent.Agent, error) {
 		InstructionProvider: instruction,
 
 		BeforeModelCallbacks: append(
-			[]llmagent.BeforeModelCallback{tools.Inject(cfg.Sessions)},
+			[]llmagent.BeforeModelCallback{sessions.Inject(cfg.Sessions)},
 			cfg.ExtraBeforeCallbacks...,
 		),
 
@@ -102,13 +101,13 @@ func NewAgent(cfg Config) (agent.Agent, error) {
 // runtime can wrap it (e.g. learning.WrapInstruction for the memory
 // status hint) before handing the composed provider back via
 // Config.InstructionProvider.
-func BaseInstructionProvider(sessions interfaces.SessionManager) llmagent.InstructionProvider {
+func BaseInstructionProvider(sm *sessions.Manager) llmagent.InstructionProvider {
 	return func(ctx agent.ReadonlyContext) (string, error) {
 		sid := ctx.SessionID()
 		if sid == "" {
 			return "", nil
 		}
-		sess, err := sessions.Session(sid)
+		sess, err := sm.Session(sid)
 		if err != nil {
 			return "", fmt.Errorf("agent: instruction provider: %w", err)
 		}
@@ -152,7 +151,7 @@ func calibrateTokens(cfg Config) llmagent.AfterModelCallback {
 
 // StartSessionCleanup launches a goroutine that periodically purges
 // sessions inactive for more than maxAge. Cancel ctx to stop it.
-func StartSessionCleanup(ctx context.Context, sm interfaces.SessionManager, maxAge time.Duration, logger *slog.Logger) {
+func StartSessionCleanup(ctx context.Context, sm *sessions.Manager, maxAge time.Duration, logger *slog.Logger) {
 	if sm == nil || maxAge <= 0 {
 		return
 	}

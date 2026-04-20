@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/model"
@@ -18,7 +18,7 @@ import (
 //
 // Each tool resolves its session from tool.Context and delegates to
 // HubDB. The suite itself is stateless.
-func NewMemorySuite(sm interfaces.SessionManager, hub store.DB) []tool.Tool {
+func NewMemorySuite(sm *sessions.Manager, hub store.DB) []tool.Tool {
 	if hub == nil {
 		return nil
 	}
@@ -36,7 +36,7 @@ func NewMemorySuite(sm interfaces.SessionManager, hub store.DB) []tool.Tool {
 // ------------------------------------------------------------
 
 type memorySearchTool struct {
-	sm  interfaces.SessionManager
+	sm  *sessions.Manager
 	hub store.DB
 }
 
@@ -120,7 +120,7 @@ func (t *memorySearchTool) Run(ctx tool.Context, args any) (map[string]any, erro
 // ------------------------------------------------------------
 
 type memoryLinkedTool struct {
-	sm  interfaces.SessionManager
+	sm  *sessions.Manager
 	hub store.DB
 }
 
@@ -179,7 +179,7 @@ func (t *memoryLinkedTool) Run(ctx tool.Context, args any) (map[string]any, erro
 // ------------------------------------------------------------
 
 type memoryStatsTool struct {
-	sm  interfaces.SessionManager
+	sm  *sessions.Manager
 	hub store.DB
 }
 
@@ -212,7 +212,7 @@ func (t *memoryStatsTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 // ------------------------------------------------------------
 
 type memoryNoteTool struct {
-	sm  interfaces.SessionManager
+	sm  *sessions.Manager
 	hub store.DB
 }
 
@@ -265,9 +265,7 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	}
 	// Mark the session dirty so the next Snapshot re-reads notes.
 	if sess, err := t.sm.Session(sid); err == nil {
-		if inv, ok := sess.(notesCacheInvalidator); ok {
-			inv.InvalidateNotesCache()
-		}
+		sess.InvalidateNotesCache()
 	}
 	return map[string]any{"id": id, "saved": true}, nil
 }
@@ -277,7 +275,7 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 // ------------------------------------------------------------
 
 type memoryClearNoteTool struct {
-	sm  interfaces.SessionManager
+	sm  *sessions.Manager
 	hub store.DB
 }
 
@@ -321,9 +319,7 @@ func (t *memoryClearNoteTool) Run(ctx tool.Context, args any) (map[string]any, e
 	sid := ctx.SessionID()
 	if sid != "" {
 		if sess, err := t.sm.Session(sid); err == nil {
-			if inv, ok := sess.(notesCacheInvalidator); ok {
-				inv.InvalidateNotesCache()
-			}
+			sess.InvalidateNotesCache()
 		}
 	}
 	return map[string]any{"cleared": true, "id": id}, nil
@@ -332,7 +328,7 @@ func (t *memoryClearNoteTool) Run(ctx tool.Context, args any) (map[string]any, e
 // notesCacheInvalidator is a narrow extension interface that concrete
 // Session implementations may expose so memory tools can mark the
 // snapshot dirty after adding or clearing a note. Keeping it here
-// (rather than on interfaces.Session) avoids bloating the public
+// (rather than on *sessions.Session) avoids bloating the public
 // contract with per-feature cache plumbing.
 type notesCacheInvalidator interface {
 	InvalidateNotesCache()

@@ -4,26 +4,20 @@ import (
 	"context"
 
 	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 )
 
-// catalogLister is the extension interface satisfied by pkg/session.Session
+// catalogLister is the extension interface satisfied by *sessions.Session
 // so skill_list can fetch the skill catalogue without system holding a
 // direct reference to skills.Manager.
 type catalogLister interface {
 	ListSkills(ctx context.Context) ([]interfaces.SkillMeta, error)
 }
 
-// SkillDescriptorMeta is what skill_load needs to shape its response —
-// references with descriptions + the author-provided workflow hint.
-type SkillDescriptorMeta struct {
-	Refs     []interfaces.SkillRefMeta
-	NextStep string
-}
-
-// skillDescriptor exposes skill metadata that isn't in interfaces.Session
-// directly. Implemented by pkg/session.Session.
+// skillDescriptor exposes skill metadata that isn't in *sessions.Session
+// directly. Implemented by *sessions.Session via its SkillMeta method.
 type skillDescriptor interface {
-	SkillMeta(ctx context.Context, skillName string) SkillDescriptorMeta
+	SkillMeta(ctx context.Context, skillName string) sessions.SkillDescriptorMeta
 }
 
 // refReader returns raw reference-document content (for the skill_ref

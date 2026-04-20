@@ -1,4 +1,4 @@
-package classifier
+package sessions
 
 import (
 	"testing"
@@ -111,7 +111,7 @@ func TestClassify_ToolResultTruncated(t *testing.T) {
 
 func TestPublish_DropOnFull(t *testing.T) {
 	// tiny buffer, fill it, third publish should drop.
-	c := New(nil, nil, 1)
+	c := NewClassifier(nil, nil, 1)
 	ok := c.Publish(Envelope{SessionID: "s1", Event: userText("a")})
 	require.True(t, ok)
 	ok = c.Publish(Envelope{SessionID: "s1", Event: userText("b")})

@@ -1,6 +1,6 @@
 // Package system contains the agent's always-on system tools —
 // skill_list, skill_load, skill_ref, context_status — implemented as
-// thin wrappers over interfaces.SessionManager. They don't own any state;
+// thin wrappers over *sessions.Manager. They don't own any state;
 // each Run call resolves the current Session from the manager and
 // delegates.
 package system
@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -24,7 +24,7 @@ import (
 //
 // Context-management tools (context_status, context_intro,
 // context_compress) moved to the `_context` suite — see context.go.
-func NewSkillsSuite(sm interfaces.SessionManager) []tool.Tool {
+func NewSkillsSuite(sm *sessions.Manager) []tool.Tool {
 	return []tool.Tool{
 		&skillListTool{sm: sm},
 		&skillLoadTool{sm: sm},
@@ -36,7 +36,7 @@ func NewSkillsSuite(sm interfaces.SessionManager) []tool.Tool {
 
 // sessionFor returns the session that owns this tool invocation, or an
 // error if the context has no session id / the session vanished.
-func sessionFor(ctx tool.Context, sm interfaces.SessionManager) (interfaces.Session, error) {
+func sessionFor(ctx tool.Context, sm *sessions.Manager) (*sessions.Session, error) {
 	sid := ctx.SessionID()
 	if sid == "" {
 		return nil, fmt.Errorf("no session id in tool context")
@@ -48,7 +48,7 @@ func sessionFor(ctx tool.Context, sm interfaces.SessionManager) (interfaces.Sess
 // skill_list
 // ------------------------------------------------------------
 
-type skillListTool struct{ sm interfaces.SessionManager }
+type skillListTool struct{ sm *sessions.Manager }
 
 func (t *skillListTool) Name() string { return "skill_list" }
 func (t *skillListTool) Description() string {
@@ -70,16 +70,7 @@ func (t *skillListTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("skill_list: %w", err)
 	}
-	// The skills manager is reachable via the session's rebuilt catalogue;
-	// but we also want to cache it into the session's prompt. Delegate
-	// through a helper on Session (SetCatalog). First we need the list —
-	// Session doesn't expose skills.Manager directly, so use the
-	// typed extension provided by our concrete impl.
-	lister, ok := sess.(catalogLister)
-	if !ok {
-		return nil, fmt.Errorf("skill_list: session does not support catalog listing")
-	}
-	skills, err := lister.ListSkills(ctx)
+	skills, err := sess.ListSkills(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("skill_list: %w", err)
 	}
@@ -95,7 +86,7 @@ func (t *skillListTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 // skill_load
 // ------------------------------------------------------------
 
-type skillLoadTool struct{ sm interfaces.SessionManager }
+type skillLoadTool struct{ sm *sessions.Manager }
 
 func (t *skillLoadTool) Name() string { return "skill_load" }
 func (t *skillLoadTool) Description() string {
@@ -149,11 +140,7 @@ func (t *skillLoadTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 	// so the model doesn't skip skill_ref. Both descriptions and the
 	// next_step come from the skill's SKILL.md frontmatter — the skill
 	// author controls wording; the code only provides generic fallbacks.
-	desc, ok := sess.(skillDescriptor)
-	if !ok {
-		return map[string]any{"loaded": name}, nil
-	}
-	meta := desc.SkillMeta(ctx, name)
+	meta := sess.SkillMeta(ctx, name)
 	var refs []map[string]string
 	for _, r := range meta.Refs {
 		refs = append(refs, map[string]string{
@@ -180,7 +167,7 @@ func (t *skillLoadTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 // skill_unload
 // ------------------------------------------------------------
 
-type skillUnloadTool struct{ sm interfaces.SessionManager }
+type skillUnloadTool struct{ sm *sessions.Manager }
 
 func (t *skillUnloadTool) Name() string { return "skill_unload" }
 func (t *skillUnloadTool) Description() string {
@@ -233,7 +220,7 @@ func (t *skillUnloadTool) Run(ctx tool.Context, args any) (map[string]any, error
 // skill_ref
 // ------------------------------------------------------------
 
-type skillRefTool struct{ sm interfaces.SessionManager }
+type skillRefTool struct{ sm *sessions.Manager }
 
 func (t *skillRefTool) Name() string { return "skill_ref" }
 func (t *skillRefTool) Description() string {
@@ -280,10 +267,7 @@ func (t *skillRefTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	}
 
 	// Re-read content for the tool response body.
-	var content string
-	if rd, ok := sess.(refReader); ok {
-		content, _ = rd.ReadReference(ctx, skill, ref)
-	}
+	content, _ := sess.ReadReference(ctx, skill, ref)
 	return map[string]any{"loaded": ref, "content": content}, nil
 }
 
@@ -291,7 +275,7 @@ func (t *skillRefTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 // skill_ref_unload
 // ------------------------------------------------------------
 
-type skillRefUnloadTool struct{ sm interfaces.SessionManager }
+type skillRefUnloadTool struct{ sm *sessions.Manager }
 
 func (t *skillRefUnloadTool) Name() string { return "skill_ref_unload" }
 func (t *skillRefUnloadTool) Description() string {

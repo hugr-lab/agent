@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/model"
@@ -28,7 +28,7 @@ type OnDemandCompactor interface {
 // Each tool resolves its session from tool.Context and delegates
 // to SessionManager.Session(id) / HubDB. No state is held by the
 // suite.
-func NewContextSuite(sm interfaces.SessionManager, hub store.DB, compactor OnDemandCompactor) []tool.Tool {
+func NewContextSuite(sm *sessions.Manager, hub store.DB, compactor OnDemandCompactor) []tool.Tool {
 	return []tool.Tool{
 		&contextStatusTool{sm: sm},
 		&contextIntroTool{sm: sm, hub: hub},
@@ -40,7 +40,7 @@ func NewContextSuite(sm interfaces.SessionManager, hub store.DB, compactor OnDem
 // context_status
 // ------------------------------------------------------------
 
-type contextStatusTool struct{ sm interfaces.SessionManager }
+type contextStatusTool struct{ sm *sessions.Manager }
 
 func (t *contextStatusTool) Name() string { return "context_status" }
 func (t *contextStatusTool) Description() string {
@@ -74,7 +74,7 @@ func (t *contextStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error)
 // ------------------------------------------------------------
 
 type contextIntroTool struct {
-	sm  interfaces.SessionManager
+	sm  *sessions.Manager
 	hub store.DB
 }
 
@@ -120,7 +120,7 @@ func (t *contextIntroTool) Run(ctx tool.Context, _ any) (map[string]any, error) 
 // ------------------------------------------------------------
 
 type contextCompressTool struct {
-	sm        interfaces.SessionManager
+	sm        *sessions.Manager
 	compactor OnDemandCompactor
 }
 

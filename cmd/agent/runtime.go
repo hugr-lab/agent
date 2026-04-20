@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
@@ -17,8 +16,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/models/hugr"
 	"github.com/hugr-lab/hugen/pkg/providers"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
-	"github.com/hugr-lab/hugen/pkg/session"
-	"github.com/hugr-lab/hugen/pkg/session/classifier"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
@@ -38,11 +36,11 @@ type agentRuntime struct {
 	hugrClient *client.Client
 	engine     *qe.Service // nil in hub mode
 	hubDB      store.DB
-	sessions   interfaces.SessionManager
+	sessions   *sessions.Manager
 	tools      *tools.Manager
 	skills     skills.Manager
 
-	classifier *classifier.Classifier
+	classifier *sessions.Classifier
 	scheduler  *scheduler.Scheduler
 	compactor  *learning.Compactor
 	bgCtx      context.Context
@@ -271,7 +269,7 @@ func buildRuntime(
 	// SessionManager so the manager can publish events + queue
 	// reviews from the very first Create. All background goroutines
 	// start after we're confident buildRuntime won't fail.
-	cls := classifier.New(hub, logger, classifier.DefaultBuffer)
+	cls := sessions.NewClassifier(hub, logger, sessions.DefaultClassifierBuffer)
 
 	loadSkillMemory := func(ctx context.Context, name string) (*learning.SkillMemoryConfig, error) {
 		sk, err := components.skills.Load(ctx, name)
@@ -348,7 +346,7 @@ func buildRuntime(
 
 	// SessionManager wires classifier + scheduler in so IngestADKEvent
 	// publishes transcript rows and Delete queues post-session review.
-	sessionMgr := session.New(session.Config{
+	sessionMgr := sessions.New(sessions.Config{
 		Skills:       components.skills,
 		Tools:        components.tools,
 		Hub:          hub,
@@ -389,7 +387,7 @@ func buildRuntime(
 	}
 
 	instruction := learning.WrapInstruction(
-		hugen.BaseInstructionProvider(sessionMgr), hub, sessionMgr)
+		hugen.BaseInstructionProvider(sessionMgr), hub)
 
 	a, err := hugen.NewAgent(hugen.Config{
 		Router:               components.router,

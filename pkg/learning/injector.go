@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -30,7 +29,7 @@ type InstructionProvider = llmagent.InstructionProvider
 // instructions (spec 005 research Decision 4). `Session.Snapshot`
 // continues to return the state-only base prompt — the hint sits on
 // top.
-func WrapInstruction(base InstructionProvider, hub store.DB, sm interfaces.SessionManager) InstructionProvider {
+func WrapInstruction(base InstructionProvider, hub store.DB) InstructionProvider {
 	if hub == nil {
 		return base
 	}
@@ -46,7 +45,7 @@ func WrapInstruction(base InstructionProvider, hub store.DB, sm interfaces.Sessi
 		}
 		hint := cache.get(sid)
 		if hint == "" {
-			hint = renderStatus(ctx, sid, hub, sm)
+			hint = renderStatus(ctx, sid, hub)
 			cache.put(sid, hint)
 		}
 		if hint == "" {
@@ -58,7 +57,7 @@ func WrapInstruction(base InstructionProvider, hub store.DB, sm interfaces.Sessi
 
 // renderStatus builds a single "## Memory Status" line from
 // HubDB.Memory.Hint + HubDB.Sessions.ListNotes count.
-func renderStatus(ctx agent.ReadonlyContext, sid string, hub store.DB, sm interfaces.SessionManager) string {
+func renderStatus(ctx agent.ReadonlyContext, sid string, hub store.DB) string {
 	h, err := hub.Hint(ctx, "", nil)
 	if err != nil || h == "" {
 		return ""

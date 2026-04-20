@@ -15,9 +15,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
@@ -37,7 +37,7 @@ type Deps struct {
 	BaseTransport http.RoundTripper
 
 	// For system-type builders:
-	Sessions interfaces.SessionManager
+	Sessions *sessions.Manager
 	Skills   skills.Manager
 	Hub      store.DB
 

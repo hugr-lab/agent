@@ -17,7 +17,7 @@ import (
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/learning"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
@@ -200,7 +200,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	toolsMgr := tools.New(logger)
 
-	sessionMgr := session.New(session.Config{
+	sessionMgr := sessions.New(sessions.Config{
 		Skills:       skillsMgr,
 		Tools:        toolsMgr,
 		Constitution: cfg.constitution,

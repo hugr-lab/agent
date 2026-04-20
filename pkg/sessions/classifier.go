@@ -1,4 +1,4 @@
-package classifier
+package sessions
 
 import (
 	"context"
@@ -25,10 +25,10 @@ type Envelope struct {
 	Event     *adksession.Event
 }
 
-// DefaultBuffer is the channel capacity used when the caller passes 0.
+// DefaultClassifierBuffer is the channel capacity used when the caller passes 0.
 // Sized for a single-process agent running typical conversations at
 // ~4 events/turn: 1024 = ~250 turns of head-room before drop-on-full.
-const DefaultBuffer = 1024
+const DefaultClassifierBuffer = 1024
 
 // Classifier drains a buffered envelope channel, maps each ADK event
 // to one or more session_events rows, and writes them to HubDB.
@@ -49,13 +49,13 @@ type Classifier struct {
 }
 
 // New constructs a Classifier with the given channel capacity. Pass 0
-// for DefaultBuffer.
-func New(hub store.DB, logger *slog.Logger, bufSize int) *Classifier {
+// for DefaultClassifierBuffer.
+func NewClassifier(hub store.DB, logger *slog.Logger, bufSize int) *Classifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if bufSize <= 0 {
-		bufSize = DefaultBuffer
+		bufSize = DefaultClassifierBuffer
 	}
 	return &Classifier{
 		hub:     hub,

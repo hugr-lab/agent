@@ -2,7 +2,7 @@
 // the ADK session.Service so a single type owns both hugr-specific
 // session state (active skills, tools, refs) and ADK-visible conversation
 // state/events.
-package session
+package sessions
 
 import (
 	"iter"

@@ -1,9 +1,9 @@
-package tools
+package sessions
 
 import (
 	"fmt"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -22,7 +22,7 @@ import (
 //
 // Session isolation is preserved — the callback resolves Session via the
 // SessionManager using ctx.SessionID().
-func Inject(sm interfaces.SessionManager) llmagent.BeforeModelCallback {
+func Inject(sm *Manager) llmagent.BeforeModelCallback {
 	return func(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 		sid := ctx.SessionID()
 		if sid == "" {
@@ -40,7 +40,7 @@ func Inject(sm interfaces.SessionManager) llmagent.BeforeModelCallback {
 		}
 		req.Config.Tools = nil
 		for _, t := range snap.Tools {
-			Pack(req, t)
+			tools.Pack(req, t)
 		}
 		return nil, nil
 	}

@@ -1,4 +1,4 @@
-package session
+package sessions
 
 import (
 	"context"
@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/pkg/session/classifier"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
@@ -47,7 +45,7 @@ type Config struct {
 	// When nil, IngestADKEvent is a no-op on the persistence side. The
 	// classifier goroutine is expected to be running when set; it is not
 	// started by the manager.
-	Classifier *classifier.Classifier
+	Classifier *Classifier
 
 	// Scheduler queues post-session reviews on Delete. When nil, reviews
 	// are never queued — useful for tests that drive the reviewer directly.
@@ -72,7 +70,7 @@ type ReviewQueuer interface {
 type InlineProviderFactory func(name, endpoint, authName string, logger *slog.Logger) (tools.Provider, error)
 
 // Manager owns runtime sessions. Implements adksession.Service and
-// interfaces.SessionManager. System tools no longer live here — they
+// *Manager. System tools no longer live here — they
 // come from a tools.Provider declared in config.yaml (`type: system`,
 // `suite: skills`).
 type Manager struct {
@@ -85,13 +83,13 @@ type Manager struct {
 	constitution  string
 	logger        *slog.Logger
 	inlineBuilder InlineProviderFactory
-	classifier    *classifier.Classifier
+	classifier    *Classifier
 	scheduler     ReviewQueuer
 }
 
 var (
-	_ adksession.Service        = (*Manager)(nil)
-	_ interfaces.SessionManager = (*Manager)(nil)
+	_ adksession.Service = (*Manager)(nil)
+	_ *Manager           = (*Manager)(nil)
 )
 
 // New builds a Manager.
@@ -119,15 +117,15 @@ func (m *Manager) publishEvent(sessionID string, ev *adksession.Event) {
 	if m.classifier == nil || ev == nil {
 		return
 	}
-	m.classifier.Publish(classifier.Envelope{SessionID: sessionID, Event: ev})
+	m.classifier.Publish(Envelope{SessionID: sessionID, Event: ev})
 }
 
 // ------------------------------------------------------------
-// interfaces.SessionManager
+// *Manager
 // ------------------------------------------------------------
 
 // Session returns the runtime session matching id, or an error.
-func (m *Manager) Session(id string) (interfaces.Session, error) {
+func (m *Manager) Session(id string) (*Session, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[id]
