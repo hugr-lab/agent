@@ -17,7 +17,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher"

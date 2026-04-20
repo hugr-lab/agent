@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/learning"

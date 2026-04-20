@@ -8,7 +8,7 @@ import (
 
 	"github.com/hugr-lab/hugen/adapters/hubdb"
 	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 )
 
 // buildHubDB constructs the HubDB over the provided querier (embedded engine

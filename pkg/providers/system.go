@@ -3,7 +3,7 @@ package providers
 import (
 	"fmt"
 
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"google.golang.org/adk/tool"

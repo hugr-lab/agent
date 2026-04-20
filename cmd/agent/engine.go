@@ -12,7 +12,7 @@ import (
 
 	"github.com/hugr-lab/hugen/adapters/hubdb"
 	"github.com/hugr-lab/hugen/adapters/hubdb/migrate"
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 )
 
 // buildLocalEngine provisions the memory DB, constructs an embedded hugr

@@ -16,7 +16,7 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/hugr-lab/hugen/pkg/skills"

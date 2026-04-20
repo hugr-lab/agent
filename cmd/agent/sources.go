@@ -10,7 +10,7 @@ import (
 	hugr "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/internal/config"
+	"github.com/hugr-lab/hugen/pkg/config"
 )
 
 // registerModelSources registers each cfg.Models entry whose type matches one
