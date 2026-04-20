@@ -6,9 +6,15 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"google.golang.org/adk/model"
 )
+
+// ConfigProvider is the minimal keyed-config view needed by
+// LoadRoutesFromConfig. Any source that can return a string by key
+// satisfies it.
+type ConfigProvider interface {
+	GetString(key string) string
+}
 
 // ModelFactory creates a model.LLM from a Hugr data source name.
 // Used by Router to instantiate models from config-driven route names.
@@ -65,7 +71,7 @@ func (r *Router) ModelFor(intent Intent) model.LLM {
 
 // LoadRoutesFromConfig reads llm.routes from the ConfigProvider and sets up
 // model routing. Called at startup and on config change.
-func (r *Router) LoadRoutesFromConfig(cfg interfaces.ConfigProvider) {
+func (r *Router) LoadRoutesFromConfig(cfg ConfigProvider) {
 	if r.factory == nil || cfg == nil {
 		return
 	}

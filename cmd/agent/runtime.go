@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/hugr-lab/hugen/adapters/file"
 	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/internal/config"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
@@ -27,7 +26,6 @@ import (
 	qetypes "github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
 
@@ -128,25 +126,6 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
 	}
 
-	// Load YAML config (model, max_tokens, routes, skills path).
-	yamlCfg, err := file.NewConfigProvider("config.yaml")
-	if err != nil {
-		logger.Debug("config.yaml not loaded", "err", err)
-	} else {
-		if m := yamlCfg.GetString("llm.model"); m != "" {
-			cfg.Agent.Model = m
-		}
-		if mt := yamlCfg.GetInt("llm.max_tokens"); mt > 0 {
-			cfg.Agent.MaxTokens = mt
-		}
-		if t := yamlCfg.GetFloat64("llm.temperature"); t > 0 {
-			cfg.Agent.Temperature = float32(t)
-		}
-		if sp := yamlCfg.GetString("skills.path"); sp != "" {
-			cfg.Agent.SkillsPath = sp
-		}
-	}
-
 	llmOpts := []hugr.Option{
 		hugr.WithLogger(logger),
 		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
@@ -157,20 +136,13 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 	}
 	llm := hugr.New(hugrClient, cfg.Agent.Model, llmOpts...)
 
-	router := intent.NewRouter(llm)
-	router.WithFactory(func(modelName string) model.LLM {
-		return hugr.New(hugrClient, modelName,
+	router := intent.NewRouter(llm).WithLogger(logger)
+	for intentName, modelName := range cfg.LLM.Routes {
+		router.SetRoute(intent.Intent(intentName), hugr.New(hugrClient, modelName,
 			hugr.WithLogger(logger),
 			hugr.WithMaxTokens(cfg.Agent.MaxTokens),
-		)
-	}).WithLogger(logger)
-
-	if yamlCfg != nil {
-		router.LoadRoutesFromConfig(yamlCfg)
-		yamlCfg.OnChange(func() {
-			logger.Info("config.yaml changed, reloading routes")
-			router.LoadRoutesFromConfig(yamlCfg)
-		})
+		))
+		logger.Info("intent route configured", "intent", intentName, "model", modelName)
 	}
 
 	constitution, err := os.ReadFile(cfg.Agent.Constitution)
