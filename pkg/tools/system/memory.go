@@ -12,9 +12,8 @@ import (
 )
 
 // NewMemorySuite returns the LLM-facing tools exposed through the
-// `_memory` system provider: memory_search, memory_linked, memory_stats.
-// Session-scratchpad tools (memory_note / memory_clear_note) and
-// write paths land in Phase 4 (US2).
+// `_memory` system provider: memory_search, memory_linked,
+// memory_stats, memory_note, memory_clear_note.
 //
 // Each tool resolves its session from tool.Context and delegates to
 // HubDB. The suite itself is stateless.
@@ -26,6 +25,8 @@ func NewMemorySuite(sm interfaces.SessionManager, hub interfaces.HubDB) []tool.T
 		&memorySearchTool{sm: sm, hub: hub},
 		&memoryLinkedTool{sm: sm, hub: hub},
 		&memoryStatsTool{sm: sm, hub: hub},
+		&memoryNoteTool{sm: sm, hub: hub},
+		&memoryClearNoteTool{sm: sm, hub: hub},
 	}
 }
 
@@ -203,4 +204,135 @@ func (t *memoryStatsTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 	}
 	data, _ := json.Marshal(stats)
 	return map[string]any{"stats": json.RawMessage(data)}, nil
+}
+
+// ------------------------------------------------------------
+// memory_note (session scratchpad)
+// ------------------------------------------------------------
+
+type memoryNoteTool struct {
+	sm  interfaces.SessionManager
+	hub interfaces.HubDB
+}
+
+func (t *memoryNoteTool) Name() string { return "memory_note" }
+func (t *memoryNoteTool) Description() string {
+	return "Saves a short finding to the session scratchpad. The note is visible in your prompt for the rest of this session and survives context compaction. Returns the note id so you can clear it later."
+}
+func (t *memoryNoteTool) IsLongRunning() bool { return false }
+
+func (t *memoryNoteTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"content": {
+					Type:        "STRING",
+					Description: "Concise, self-contained note text. Prefer ≤ 150 chars per note.",
+				},
+			},
+			Required: []string{"content"},
+		},
+	}
+}
+
+func (t *memoryNoteTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("memory_note: unexpected args: %T", args)
+	}
+	content, _ := m["content"].(string)
+	if content == "" {
+		return nil, fmt.Errorf("memory_note: missing required parameter: content")
+	}
+	sid := ctx.SessionID()
+	if sid == "" {
+		return nil, fmt.Errorf("memory_note: no session id in tool context")
+	}
+	id, err := t.hub.AddNote(ctx, interfaces.SessionNote{
+		SessionID: sid, Content: content,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("memory_note: %w", err)
+	}
+	// Mark the session dirty so the next Snapshot re-reads notes.
+	if sess, err := t.sm.Session(sid); err == nil {
+		if inv, ok := sess.(notesCacheInvalidator); ok {
+			inv.InvalidateNotesCache()
+		}
+	}
+	return map[string]any{"id": id, "saved": true}, nil
+}
+
+// ------------------------------------------------------------
+// memory_clear_note
+// ------------------------------------------------------------
+
+type memoryClearNoteTool struct {
+	sm  interfaces.SessionManager
+	hub interfaces.HubDB
+}
+
+func (t *memoryClearNoteTool) Name() string { return "memory_clear_note" }
+func (t *memoryClearNoteTool) Description() string {
+	return "Removes a previously saved session note by its id. Useful when the finding is no longer relevant for the remaining task."
+}
+func (t *memoryClearNoteTool) IsLongRunning() bool { return false }
+
+func (t *memoryClearNoteTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"id": {Type: "STRING", Description: "Note ID returned by memory_note."},
+			},
+			Required: []string{"id"},
+		},
+	}
+}
+
+func (t *memoryClearNoteTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *memoryClearNoteTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("memory_clear_note: unexpected args: %T", args)
+	}
+	id, _ := m["id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("memory_clear_note: missing required parameter: id")
+	}
+	if err := t.hub.DeleteNote(ctx, id); err != nil {
+		return nil, fmt.Errorf("memory_clear_note: %w", err)
+	}
+	sid := ctx.SessionID()
+	if sid != "" {
+		if sess, err := t.sm.Session(sid); err == nil {
+			if inv, ok := sess.(notesCacheInvalidator); ok {
+				inv.InvalidateNotesCache()
+			}
+		}
+	}
+	return map[string]any{"cleared": true, "id": id}, nil
+}
+
+// notesCacheInvalidator is a narrow extension interface that concrete
+// Session implementations may expose so memory tools can mark the
+// snapshot dirty after adding or clearing a note. Keeping it here
+// (rather than on interfaces.Session) avoids bloating the public
+// contract with per-feature cache plumbing.
+type notesCacheInvalidator interface {
+	InvalidateNotesCache()
 }

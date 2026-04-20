@@ -37,8 +37,10 @@ type Session struct {
 
 	constitution string
 
-	mu        sync.RWMutex
-	updatedAt time.Time
+	mu           sync.RWMutex
+	updatedAt    time.Time
+	notesCache   string    // rendered "## Session notes" block
+	notesCacheAt time.Time // render time for 10s TTL
 }
 
 var (
@@ -356,7 +358,62 @@ func (s *Session) buildPrompt(ctx context.Context) string {
 		b.WriteString(skills.RenderReference(refName, content))
 	}
 
+	if block := s.renderNotesBlock(ctx); block != "" {
+		b.WriteString("\n\n")
+		b.WriteString(block)
+	}
+
 	return b.String()
+}
+
+// renderNotesBlock pulls the session's notes from HubDB and renders a
+// fixed-part "## Session notes" block that survives context
+// compaction. Cached at the session level for 10 s; invalidated
+// explicitly by the memory_note / memory_clear_note tools.
+func (s *Session) renderNotesBlock(ctx context.Context) string {
+	if s.hub == nil {
+		return ""
+	}
+	s.mu.RLock()
+	cached := s.notesCache
+	cachedAt := s.notesCacheAt
+	s.mu.RUnlock()
+	if cachedAt.After(time.Now().Add(-10*time.Second)) && cached != "" {
+		return cached
+	}
+	notes, err := s.hub.ListNotes(ctx, s.id)
+	if err != nil || len(notes) == 0 {
+		s.mu.Lock()
+		s.notesCache = ""
+		s.notesCacheAt = time.Now()
+		s.mu.Unlock()
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Session notes\n")
+	for _, n := range notes {
+		b.WriteString("- [")
+		b.WriteString(n.ID)
+		b.WriteString("] ")
+		b.WriteString(n.Content)
+		b.WriteString("\n")
+	}
+	out := b.String()
+	s.mu.Lock()
+	s.notesCache = out
+	s.notesCacheAt = time.Now()
+	s.mu.Unlock()
+	return out
+}
+
+// InvalidateNotesCache clears the session's notes-render cache so the
+// next Snapshot re-reads notes from HubDB. Called by the memory_note
+// and memory_clear_note tools after they mutate.
+func (s *Session) InvalidateNotesCache() {
+	s.mu.Lock()
+	s.notesCache = ""
+	s.notesCacheAt = time.Time{}
+	s.mu.Unlock()
 }
 
 func (s *Session) buildTools(ctx context.Context) []tool.Tool {

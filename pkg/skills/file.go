@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/learning"
 	"gopkg.in/yaml.v3"
 )
 
@@ -142,7 +143,25 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 		Providers:    providers,
 		Refs:         refs,
 		NextStep:     fm.NextStep,
+		Memory:       loadSkillMemory(skillDir),
 	}, nil
+}
+
+// loadSkillMemory reads an optional memory.yaml adjacent to SKILL.md.
+// Absent file → nil (skill still usable). Parse errors → nil + no
+// fatal error; callers fall back to agent-level memory defaults. The
+// file is cheap enough to re-read on every Load since the manager
+// does not cache skill bodies.
+func loadSkillMemory(skillDir string) *learning.SkillMemoryConfig {
+	raw, err := os.ReadFile(filepath.Join(skillDir, "memory.yaml"))
+	if err != nil {
+		return nil
+	}
+	var cfg learning.SkillMemoryConfig
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	return &cfg
 }
 
 // Reference returns the raw content of a reference document.

@@ -31,10 +31,11 @@ func buildSystem(cfg config.ProviderConfig, deps Deps) (tools.Provider, error) {
 		// suite may return an empty list — empty providers are fine.
 		list = system.NewMemorySuite(deps.Sessions, deps.Hub)
 	case "context":
-		// Context-management suite: status / intro / compress. Compactor
-		// wiring is injected by the runtime via deps.Compactor once it
-		// exists; for now passing nil keeps the provider loadable.
-		list = system.NewContextSuite(deps.Sessions)
+		// Context-management suite: status / intro / compress.
+		// Compactor may be nil when the runtime does not wire one —
+		// context_compress degrades to an informative no-op in that
+		// case (see pkg/tools/system/context.go).
+		list = system.NewContextSuite(deps.Sessions, deps.Hub, deps.Compactor)
 	default:
 		return nil, fmt.Errorf("provider %q: unknown system suite %q", cfg.Name, cfg.Suite)
 	}

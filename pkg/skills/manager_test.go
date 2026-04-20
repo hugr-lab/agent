@@ -153,6 +153,81 @@ func TestFileManager_RenderCatalog(t *testing.T) {
 	assert.Empty(t, m.RenderCatalog([]interfaces.SkillMeta{}))
 }
 
+func TestFileManager_LoadMemoryYAML(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "memory-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: memory-skill
+description: test memory parsing
+---
+
+Body.
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "memory.yaml"), []byte(`categories:
+  schema:
+    volatility: stable
+    initial_score: 0.8
+review:
+  enabled: true
+  min_tool_calls: 3
+  prompt: Extract schema facts.
+compaction:
+  preserve: [schema, numbers]
+  discard: [greetings]
+`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := m.Load(context.Background(), "memory-skill")
+	require.NoError(t, err)
+	require.NotNil(t, sk.Memory)
+	require.NotNil(t, sk.Memory.Categories["schema"])
+	assert.Equal(t, "stable", sk.Memory.Categories["schema"].Volatility)
+	assert.InDelta(t, 0.8, sk.Memory.Categories["schema"].InitialScore, 0.001)
+	assert.True(t, sk.Memory.Review.Enabled)
+	assert.Equal(t, 3, sk.Memory.Review.MinToolCalls)
+	assert.ElementsMatch(t, []string{"schema", "numbers"}, sk.Memory.Compaction.Preserve)
+}
+
+func TestFileManager_LoadMemoryYAML_MalformedGoesToNil(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "bad-memory-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: bad-memory-skill
+---
+
+Body.
+`), 0o644))
+	// Malformed YAML — reviewer should see Memory == nil, not a crash.
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "memory.yaml"), []byte("this: is: not valid: yaml: :::"), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := m.Load(context.Background(), "bad-memory-skill")
+	require.NoError(t, err)
+	assert.Nil(t, sk.Memory)
+}
+
+func TestFileManager_LoadMemoryYAML_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "no-memory-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: no-memory-skill
+---
+
+Body.
+`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := m.Load(context.Background(), "no-memory-skill")
+	require.NoError(t, err)
+	assert.Nil(t, sk.Memory)
+}
+
 func TestFileManager_EndpointEnvExpansion(t *testing.T) {
 	dir := t.TempDir()
 	skillDir := filepath.Join(dir, "env-skill")

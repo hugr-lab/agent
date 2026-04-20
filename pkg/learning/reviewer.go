@@ -34,6 +34,10 @@ type Reviewer struct {
 	// to defaults when empty.
 	volatility map[string]time.Duration
 
+	// loadSkillMemory is the per-session skill-config fetcher. See
+	// ReviewerOptions.LoadSkillMemory.
+	loadSkillMemory func(ctx context.Context, skillName string) (*SkillMemoryConfig, error)
+
 	// dedupThreshold is the cosine-distance cutoff at which a newly
 	// extracted fact is treated as a reinforcement of an existing one.
 	dedupThreshold float64
@@ -49,6 +53,14 @@ type ReviewerOptions struct {
 	Logger     *slog.Logger
 	Config     MergedConfig
 	Volatility map[string]time.Duration
+
+	// LoadSkillMemory returns the per-skill memory config for a skill
+	// by name. Typically wired to `pkg/skills.Manager.Load(ctx,
+	// name).Memory`. When set, Review derives active skills from the
+	// transcript's skill_loaded / skill_unloaded events, loads each
+	// skill's memory config, and calls Merge. When nil, the reviewer
+	// uses its static Config.
+	LoadSkillMemory func(ctx context.Context, skillName string) (*SkillMemoryConfig, error)
 }
 
 // NewReviewer builds a Reviewer. Router is optional — if nil the
@@ -61,13 +73,14 @@ func NewReviewer(opts ReviewerOptions) (*Reviewer, error) {
 		opts.Logger = slog.Default()
 	}
 	return &Reviewer{
-		hub:            opts.Hub,
-		router:         opts.Router,
-		logger:         opts.Logger,
-		config:         opts.Config,
-		volatility:     opts.Volatility,
-		dedupThreshold: 0.1, // cosine distance < 0.1 → duplicate (i.e. similarity > 0.9)
-		now:            func() time.Time { return time.Now().UTC() },
+		hub:             opts.Hub,
+		router:          opts.Router,
+		logger:          opts.Logger,
+		config:          opts.Config,
+		volatility:      opts.Volatility,
+		loadSkillMemory: opts.LoadSkillMemory,
+		dedupThreshold:  0.1, // cosine distance < 0.1 → duplicate (i.e. similarity > 0.9)
+		now:             func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
@@ -102,6 +115,12 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("learning: GetEventsFull: %w", err)
 	}
+
+	// Derive per-session merged config from active skills when a
+	// loader was configured. Otherwise fall back to the static
+	// agent-level config passed at construction.
+	merged := r.mergedConfigFor(ctx, events)
+
 	toolCalls := 0
 	for _, ev := range events {
 		if ev.EventType == "tool_call" {
@@ -109,8 +128,8 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 		}
 	}
 	minCalls := 1
-	if r.config.MinToolCalls > 0 {
-		minCalls = r.config.MinToolCalls
+	if merged.MinToolCalls > 0 {
+		minCalls = merged.MinToolCalls
 	}
 	if toolCalls < minCalls {
 		r.logger.Info("reviewer: skipping session below min_tool_calls",
@@ -126,7 +145,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	}
 
 	notes, _ := r.hub.ListNotes(ctx, sessionID) // best-effort; notes are optional
-	prompt := r.buildPrompt(events, notes)
+	prompt := r.buildPrompt(events, notes, merged)
 
 	llm := r.router.ModelFor(intent.IntentSummarization)
 	rawOutput, usage, err := runOnce(ctx, llm, prompt)
@@ -148,7 +167,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 
 	// Store or reinforce each fact.
 	for _, f := range parsed.Facts {
-		reinforced, err := r.upsertFact(ctx, sessionID, f)
+		reinforced, err := r.upsertFact(ctx, sessionID, f, merged)
 		if err != nil {
 			r.logger.Warn("reviewer: upsert fact failed",
 				"session", sessionID, "content", f.Content, "err", err)
@@ -184,7 +203,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 // Returns reinforced=true when a duplicate was found. Dedup is a
 // simple content-substring match until embeddings are wired into the
 // reviewer — keeps the path testable without an embedding model.
-func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact) (bool, error) {
+func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact, merged MergedConfig) (bool, error) {
 	// Look for near-duplicates by category + keyword.
 	existing, _ := r.hub.Search(ctx, f.Content, nil, interfaces.SearchOpts{
 		Category: f.Category,
@@ -208,7 +227,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 		Content:    f.Content,
 		Category:   f.Category,
 		Volatility: vol,
-		Score:      r.initialScoreFor(f.Category),
+		Score:      r.initialScoreFor(f.Category, merged),
 		Source:     "review:" + sessionID,
 		ValidFrom:  now,
 		ValidTo:    now.Add(dur),
@@ -220,9 +239,9 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 // buildPrompt assembles the summarisation prompt from transcript +
 // notes + merged review prompt. The format is intentionally small —
 // the cheap model sees: instruction + transcript window + notes.
-func (r *Reviewer) buildPrompt(events []interfaces.SessionEventFull, notes []interfaces.SessionNote) string {
+func (r *Reviewer) buildPrompt(events []interfaces.SessionEventFull, notes []interfaces.SessionNote, merged MergedConfig) string {
 	var sb strings.Builder
-	sb.WriteString(r.reviewPrompt())
+	sb.WriteString(r.reviewPrompt(merged))
 	sb.WriteString("\n\n## Transcript\n")
 	for _, ev := range events {
 		switch ev.EventType {
@@ -268,11 +287,57 @@ Reply with a single JSON object:
 	return sb.String()
 }
 
-func (r *Reviewer) reviewPrompt() string {
+func (r *Reviewer) reviewPrompt(merged MergedConfig) string {
+	if merged.ReviewPrompt != "" {
+		return merged.ReviewPrompt
+	}
 	if r.config.ReviewPrompt != "" {
 		return r.config.ReviewPrompt
 	}
 	return `You are reviewing a completed agent session. Extract durable facts worth remembering (schema structures, working query templates, anti-patterns, user preferences) and testable hypotheses you noticed but did not verify. Skip chitchat, retries, and one-off noise.`
+}
+
+// mergedConfigFor builds the per-session merged config by replaying
+// skill_loaded / skill_unloaded events, then asking loadSkillMemory
+// for each active skill's memory.yaml. Falls back to the reviewer's
+// static config when no loader is wired.
+func (r *Reviewer) mergedConfigFor(ctx context.Context, events []interfaces.SessionEventFull) MergedConfig {
+	if r.loadSkillMemory == nil {
+		return r.config
+	}
+	active := map[string]struct{}{}
+	for _, ev := range events {
+		switch ev.EventType {
+		case interfaces.EventTypeSkillLoaded:
+			if name := skillNameFromEvent(ev); name != "" {
+				active[name] = struct{}{}
+			}
+		case interfaces.EventTypeSkillUnloaded:
+			delete(active, skillNameFromEvent(ev))
+		}
+	}
+	if len(active) == 0 {
+		return r.config
+	}
+	configs := make([]NamedConfig, 0, len(active))
+	for name := range active {
+		cfg, err := r.loadSkillMemory(ctx, name)
+		if err != nil {
+			r.logger.Warn("reviewer: load skill memory", "skill", name, "err", err)
+			continue
+		}
+		configs = append(configs, NamedConfig{Name: name, Config: cfg})
+	}
+	return MergeWithLogger(configs, r.logger)
+}
+
+func skillNameFromEvent(ev interfaces.SessionEventFull) string {
+	if ev.Metadata != nil {
+		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
+			return name
+		}
+	}
+	return ev.Content
 }
 
 func (r *Reviewer) durationFor(volatility string) time.Duration {
@@ -294,7 +359,12 @@ func (r *Reviewer) durationFor(volatility string) time.Duration {
 	return 365 * 24 * time.Hour // stable default
 }
 
-func (r *Reviewer) initialScoreFor(category string) float64 {
+func (r *Reviewer) initialScoreFor(category string, merged MergedConfig) float64 {
+	if merged.Categories != nil {
+		if cat, ok := merged.Categories[category]; ok && cat.InitialScore > 0 {
+			return cat.InitialScore
+		}
+	}
 	if r.config.Categories != nil {
 		if cat, ok := r.config.Categories[category]; ok && cat.InitialScore > 0 {
 			return cat.InitialScore

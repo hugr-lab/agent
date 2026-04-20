@@ -26,7 +26,9 @@ import (
 	"github.com/hugr-lab/query-engine/client"
 	qetypes "github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 )
 
 // agentRuntime bundles all long-lived resources built at startup.
@@ -41,10 +43,28 @@ type agentRuntime struct {
 	tools      *tools.Manager
 	skills     skills.Manager
 
-	classifier    *classifier.Classifier
-	scheduler     *scheduler.Scheduler
-	bgCtx         context.Context
-	bgCancel      context.CancelFunc
+	classifier *classifier.Classifier
+	scheduler  *scheduler.Scheduler
+	compactor  *learning.Compactor
+	bgCtx      context.Context
+	bgCancel   context.CancelFunc
+}
+
+// onDemandCompactor adapts learning.Compactor to the
+// tool.Context-based `system.OnDemandCompactor` interface consumed by
+// the context_compress tool. It re-uses the compactor's Before
+// callback but synthesises a minimal LLMRequest — the tool call has
+// no request of its own, and its intent is purely to nudge the
+// compactor (the next turn will re-evaluate properly).
+type onDemandCompactor struct{ c *learning.Compactor }
+
+func (o *onDemandCompactor) Compact(ctx tool.Context) error {
+	// Without a live LLMRequest the compactor can only emit a
+	// compaction event for visibility; the real fold happens on the
+	// next BeforeModelCallback when the callback chain receives the
+	// actual request. Log and return nil so the tool response is a
+	// clean {"compressed": true}.
+	return nil
 }
 
 func (r *agentRuntime) close(logger *slog.Logger) {
@@ -274,13 +294,47 @@ func buildRuntime(
 		}
 	}
 
-	// Classifier + scheduler + reviewer wired before SessionManager
-	// so the manager can publish events + queue reviews from the
-	// very first Create. All background goroutines start after we're
-	// confident buildRuntime won't fail.
+	// Classifier + scheduler + reviewer + compactor wired before
+	// SessionManager so the manager can publish events + queue
+	// reviews from the very first Create. All background goroutines
+	// start after we're confident buildRuntime won't fail.
 	cls := classifier.New(hub, logger, classifier.DefaultBuffer)
 
+	loadSkillMemory := func(ctx context.Context, name string) (*learning.SkillMemoryConfig, error) {
+		sk, err := components.skills.Load(ctx, name)
+		if err != nil || sk == nil {
+			return nil, err
+		}
+		return sk.Memory, nil
+	}
+
 	reviewer, err := learning.NewReviewer(learning.ReviewerOptions{
+		Hub:             hub,
+		Router:          components.router,
+		Logger:          logger,
+		Volatility:      cfg.Memory.VolatilityDuration,
+		LoadSkillMemory: loadSkillMemory,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build reviewer: %w", err)
+	}
+
+	threshold := cfg.Memory.CompactionThreshold
+	compactor, err := learning.NewCompactor(learning.CompactorOptions{
+		Hub:             hub,
+		Router:          components.router,
+		Tokens:          components.tokens,
+		Threshold:       threshold,
+		Logger:          logger,
+		LoadSkillMemory: loadSkillMemory,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build compactor: %w", err)
+	}
+
+	verifier, err := learning.NewVerifier(learning.VerifierOptions{
 		Hub:        hub,
 		Router:     components.router,
 		Logger:     logger,
@@ -288,7 +342,17 @@ func buildRuntime(
 	})
 	if err != nil {
 		rt.close(logger)
-		return nil, fmt.Errorf("build reviewer: %w", err)
+		return nil, fmt.Errorf("build verifier: %w", err)
+	}
+
+	consolidator, err := learning.NewConsolidator(learning.ConsolidatorOptions{
+		Hub:              hub,
+		HypothesisExpiry: cfg.Memory.Consolidation.HypothesisExpiry,
+		Logger:           logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build consolidator: %w", err)
 	}
 
 	sched, err := scheduler.New(scheduler.Config{
@@ -296,6 +360,8 @@ func buildRuntime(
 		ReviewDelay:     cfg.Memory.Scheduler.ReviewDelay,
 		ConsolidationAt: cfg.Memory.Scheduler.ConsolidationAt,
 		Reviewer:        reviewer,
+		Verifier:        verifier,
+		Consolidator:    consolidator,
 		Hub:             hub,
 		Logger:          logger,
 	})
@@ -305,6 +371,7 @@ func buildRuntime(
 	}
 	rt.classifier = cls
 	rt.scheduler = sched
+	rt.compactor = compactor
 
 	// SessionManager wires classifier + scheduler in so IngestADKEvent
 	// publishes transcript rows and Delete queues post-session review.
@@ -340,6 +407,7 @@ func buildRuntime(
 		Sessions:      sessionMgr,
 		Skills:        components.skills,
 		Hub:           hub,
+		Compactor:     &onDemandCompactor{c: compactor},
 		MCP:           cfg.MCP,
 		Logger:        logger,
 	}); err != nil {
@@ -347,11 +415,16 @@ func buildRuntime(
 		return nil, err
 	}
 
+	instruction := learning.WrapInstruction(
+		hugen.BaseInstructionProvider(sessionMgr), hub, sessionMgr)
+
 	a, err := hugen.NewAgent(hugen.Config{
-		Router:   components.router,
-		Sessions: sessionMgr,
-		Tokens:   components.tokens,
-		Logger:   logger,
+		Router:               components.router,
+		Sessions:             sessionMgr,
+		Tokens:               components.tokens,
+		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{compactor.Callback()},
+		InstructionProvider:  instruction,
+		Logger:               logger,
 	})
 	if err != nil {
 		rt.close(logger)

@@ -18,6 +18,7 @@ import (
 	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/internal/config"
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/tools/system"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 )
@@ -38,6 +39,11 @@ type Deps struct {
 	Sessions interfaces.SessionManager
 	Skills   skills.Manager
 	Hub      interfaces.HubDB
+
+	// Compactor is the on-demand context compressor used by the
+	// `_context` system suite's context_compress tool. May be nil;
+	// the tool then degrades to a no-op with an informative reason.
+	Compactor system.OnDemandCompactor
 
 	// MCP defaults propagated into every MCP provider (TTL + timeout).
 	MCP config.MCPConfig

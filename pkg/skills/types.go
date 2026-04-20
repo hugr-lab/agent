@@ -5,7 +5,10 @@
 // skill_load.
 package skills
 
-import "github.com/hugr-lab/hugen/interfaces"
+import (
+	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/learning"
+)
 
 // Skill is a fully-loaded skill ready for the prompt + tool wiring.
 type Skill struct {
@@ -26,6 +29,11 @@ type Skill struct {
 	// skill_load. When empty, skill_load falls back to a generic
 	// "read refs before data tools" phrase.
 	NextStep string
+	// Memory is the per-skill memory configuration loaded from an
+	// optional memory.yaml file adjacent to SKILL.md. Nil when the
+	// file is absent or malformed — the reviewer/compactor then
+	// fall back to agent-level defaults.
+	Memory *learning.SkillMemoryConfig
 }
 
 // SkillProviderSpec is one tool-source binding declared by a skill.

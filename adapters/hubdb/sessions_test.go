@@ -72,6 +72,76 @@ func TestSessions_CRUD(t *testing.T) {
 	assert.Equal(t, "hugr-data", evs[0].Content)
 }
 
+func TestSessions_Notes(t *testing.T) {
+	h := newTestHubDB(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+	require.NoError(t, h.RegisterAgent(ctx, interfaces.Agent{
+		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01", Name: "test",
+	}))
+	_, err := h.CreateSession(ctx, interfaces.SessionRecord{
+		ID: "sess-notes", OwnerID: "u1", Status: "active",
+	})
+	require.NoError(t, err)
+
+	id1, err := h.AddNote(ctx, interfaces.SessionNote{
+		SessionID: "sess-notes", Content: "found 14 fields",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id1)
+	_, err = h.AddNote(ctx, interfaces.SessionNote{
+		SessionID: "sess-notes", Content: "severity 1-3",
+	})
+	require.NoError(t, err)
+
+	notes, err := h.ListNotes(ctx, "sess-notes")
+	require.NoError(t, err)
+	require.Len(t, notes, 2)
+	assert.Equal(t, "found 14 fields", notes[0].Content)
+	assert.Equal(t, "severity 1-3", notes[1].Content)
+
+	require.NoError(t, h.DeleteNote(ctx, id1))
+	notes, err = h.ListNotes(ctx, "sess-notes")
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Equal(t, "severity 1-3", notes[0].Content)
+
+	n, err := h.DeleteSessionNotes(ctx, "sess-notes")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, n, 0)
+	notes, err = h.ListNotes(ctx, "sess-notes")
+	require.NoError(t, err)
+	assert.Empty(t, notes)
+}
+
+func TestSessions_Participants(t *testing.T) {
+	h := newTestHubDB(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+	require.NoError(t, h.RegisterAgent(ctx, interfaces.Agent{
+		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01", Name: "test",
+	}))
+	_, err := h.CreateSession(ctx, interfaces.SessionRecord{
+		ID: "sess-p", OwnerID: "u1", Status: "active",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.AddParticipant(ctx, interfaces.SessionParticipant{
+		SessionID: "sess-p", UserID: "u1", Role: "owner",
+	}))
+	require.NoError(t, h.AddParticipant(ctx, interfaces.SessionParticipant{
+		SessionID: "sess-p", UserID: "u2", Role: "observer",
+	}))
+
+	parts, err := h.ListParticipants(ctx, "sess-p")
+	require.NoError(t, err)
+	require.Len(t, parts, 2)
+
+	require.NoError(t, h.RemoveParticipant(ctx, "sess-p", "u2"))
+	parts, err = h.ListParticipants(ctx, "sess-p")
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	assert.Equal(t, "u1", parts[0].UserID)
+}
+
 func TestSessions_EmptyListActive(t *testing.T) {
 	h := newTestHubDB(t, "agt_ag02", "ag02")
 	ctx := context.Background()

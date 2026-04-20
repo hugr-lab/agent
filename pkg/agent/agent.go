@@ -32,6 +32,18 @@ type Config struct {
 	// to track context usage per session. Optional.
 	Tokens *learning.TokenEstimator
 
+	// ExtraBeforeCallbacks are appended to the BeforeModelCallbacks
+	// chain after tools.Inject. Order matters: the runtime ships with
+	// [tools.Inject, learning.Compactor.Before], ensuring the compactor
+	// operates on a tools-aware request and runs last before the model.
+	ExtraBeforeCallbacks []llmagent.BeforeModelCallback
+
+	// InstructionProvider overrides the default `Session.Snapshot().Prompt`
+	// provider. Runtime uses learning.WrapInstruction to append a
+	// "## Memory Status" block on top of the session's base prompt.
+	// When nil, the default (state-only Snapshot prompt) is used.
+	InstructionProvider llmagent.InstructionProvider
+
 	// Logger is optional; defaults to slog.Default.
 	Logger *slog.Logger
 }
@@ -50,32 +62,58 @@ func NewAgent(cfg Config) (agent.Agent, error) {
 		cfg.Logger = slog.Default()
 	}
 
+	baseInstruction := func(ctx agent.ReadonlyContext) (string, error) {
+		sid := ctx.SessionID()
+		if sid == "" {
+			return "", nil
+		}
+		sess, err := cfg.Sessions.Session(sid)
+		if err != nil {
+			return "", fmt.Errorf("agent: instruction provider: %w", err)
+		}
+		return sess.Snapshot().Prompt, nil
+	}
+	instruction := cfg.InstructionProvider
+	if instruction == nil {
+		instruction = baseInstruction
+	}
+
 	return llmagent.New(llmagent.Config{
 		Name:        "hugr_agent",
 		Description: "Hugr Data Mesh Agent — explores data sources, builds queries, presents results",
 		Model:       cfg.Router,
 		Toolsets:    nil,
 
-		InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
-			sid := ctx.SessionID()
-			if sid == "" {
-				return "", nil
-			}
-			sess, err := cfg.Sessions.Session(sid)
-			if err != nil {
-				return "", fmt.Errorf("agent: instruction provider: %w", err)
-			}
-			return sess.Snapshot().Prompt, nil
-		},
+		InstructionProvider: instruction,
 
-		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
-			tools.Inject(cfg.Sessions),
-		},
+		BeforeModelCallbacks: append(
+			[]llmagent.BeforeModelCallback{tools.Inject(cfg.Sessions)},
+			cfg.ExtraBeforeCallbacks...,
+		),
 
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
 			calibrateTokens(cfg),
 		},
 	})
+}
+
+// BaseInstructionProvider returns the default instruction provider:
+// reads the current session's Snapshot().Prompt. Exposed so the
+// runtime can wrap it (e.g. learning.WrapInstruction for the memory
+// status hint) before handing the composed provider back via
+// Config.InstructionProvider.
+func BaseInstructionProvider(sessions interfaces.SessionManager) llmagent.InstructionProvider {
+	return func(ctx agent.ReadonlyContext) (string, error) {
+		sid := ctx.SessionID()
+		if sid == "" {
+			return "", nil
+		}
+		sess, err := sessions.Session(sid)
+		if err != nil {
+			return "", fmt.Errorf("agent: instruction provider: %w", err)
+		}
+		return sess.Snapshot().Prompt, nil
+	}
 }
 
 // calibrateTokens returns an AfterModelCallback that feeds LLM usage

@@ -1,5 +1,7 @@
 package learning
 
+import "log/slog"
+
 // Per-skill memory configuration types. Populated by
 // pkg/skills/file.go from an optional memory.yaml adjacent to each
 // skill's SKILL.md. Nil SkillMemoryConfig means the skill has no
@@ -53,20 +55,15 @@ type MergedConfig struct {
 
 // Merge combines memory configs from a set of active skill configs
 // into a single MergedConfig. Merge rules:
-//   - Category names are globally unique: first encountered wins; later
-//     collisions are discarded with a WARN-level log by the caller
-//     (Merge itself is silent).
+//   - Category names are globally unique: first encountered wins;
+//     later collisions are discarded and logged at WARN when a
+//     non-nil logger is provided.
 //   - Review prompts are concatenated with "## Skill: <name>\n" headers
 //     in the order provided by the caller.
 //   - Review is enabled if ANY skill enables it; MinToolCalls is the
 //     maximum across enabled skills (most-restrictive wins).
 //   - Compaction hint lists are unioned with de-duplication preserving
 //     first-seen order.
-//
-// The implementation is intentionally minimal here. Callers that need
-// collision warnings should compare the input configs against the
-// merged output (or pass a logger and have Merge emit the warnings —
-// the logger variant lands in T079).
 func Merge(configs []NamedConfig) MergedConfig {
 	out := MergedConfig{
 		Categories: map[string]CategoryConfig{},
@@ -118,4 +115,57 @@ func Merge(configs []NamedConfig) MergedConfig {
 type NamedConfig struct {
 	Name   string
 	Config *SkillMemoryConfig
+}
+
+// MergeWithLogger is the logging variant of Merge: it emits a WARN
+// entry for every category collision between skills. Useful at
+// runtime (reviewer / compactor) so operators can spot conflicting
+// skill configs; not appropriate for pure-logic unit tests.
+func MergeWithLogger(configs []NamedConfig, logger *slog.Logger) MergedConfig {
+	out := MergedConfig{Categories: map[string]CategoryConfig{}}
+	seen := map[string]struct{}{}
+	origin := map[string]string{} // category → winning skill
+	for _, nc := range configs {
+		if nc.Config == nil {
+			continue
+		}
+		for name, cat := range nc.Config.Categories {
+			if first, dup := origin[name]; dup {
+				if logger != nil {
+					logger.Warn("learning.Merge: category collision",
+						"category", name, "winner", first, "loser", nc.Name)
+				}
+				continue
+			}
+			out.Categories[name] = cat
+			origin[name] = nc.Name
+		}
+		if nc.Config.Review.Enabled {
+			out.ReviewEnabled = true
+			if nc.Config.Review.MinToolCalls > out.MinToolCalls {
+				out.MinToolCalls = nc.Config.Review.MinToolCalls
+			}
+			if nc.Config.Review.Prompt != "" {
+				if out.ReviewPrompt != "" {
+					out.ReviewPrompt += "\n\n"
+				}
+				out.ReviewPrompt += "## Skill: " + nc.Name + "\n" + nc.Config.Review.Prompt
+			}
+		}
+		for _, s := range nc.Config.Compaction.Preserve {
+			if _, dup := seen["p:"+s]; dup {
+				continue
+			}
+			seen["p:"+s] = struct{}{}
+			out.CompactPreserve = append(out.CompactPreserve, s)
+		}
+		for _, s := range nc.Config.Compaction.Discard {
+			if _, dup := seen["d:"+s]; dup {
+				continue
+			}
+			seen["d:"+s] = struct{}{}
+			out.CompactDiscard = append(out.CompactDiscard, s)
+		}
+	}
+	return out
 }

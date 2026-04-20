@@ -434,6 +434,214 @@ func (h *hubDB) CountToolCalls(ctx context.Context, sessionID string) (int, erro
 }
 
 // ------------------------------------------------------------
+// Session notes
+// ------------------------------------------------------------
+
+// AddNote inserts a session_notes row and returns the assigned ID.
+// Caller may supply note.ID; otherwise pkg/id.New(PrefixNote, short)
+// generates one. Session notes are the LLM's scratchpad — they live
+// in the system prompt's fixed part and survive context compaction.
+func (h *hubDB) AddNote(ctx context.Context, note interfaces.SessionNote) (string, error) {
+	if note.SessionID == "" {
+		return "", fmt.Errorf("hubdb: AddNote requires SessionID")
+	}
+	if note.Content == "" {
+		return "", fmt.Errorf("hubdb: AddNote requires Content")
+	}
+	if note.ID == "" {
+		note.ID = id.New(id.PrefixNote, h.agentShort)
+	}
+	if note.AgentID == "" {
+		note.AgentID = h.agentID
+	}
+	data := map[string]any{
+		"id":         note.ID,
+		"agent_id":   note.AgentID,
+		"session_id": note.SessionID,
+		"content":    note.Content,
+	}
+	if err := runMutation(ctx, h.querier,
+		`mutation ($data: hub_db_session_notes_mut_input_data!) {
+			hub { db { agent {
+				insert_session_notes(data: $data) { id }
+			}}}
+		}`,
+		map[string]any{"data": data},
+	); err != nil {
+		return "", err
+	}
+	return note.ID, nil
+}
+
+// ListNotes returns every note in a session ordered by created_at ASC.
+func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]interfaces.SessionNote, error) {
+	type row struct {
+		ID        string `json:"id"`
+		AgentID   string `json:"agent_id"`
+		SessionID string `json:"session_id"`
+		Content   string `json:"content"`
+		CreatedAt dbTime `json:"created_at"`
+	}
+	rows, err := runQuery[[]row](ctx, h.querier,
+		`query ($sid: String!) {
+			hub { db { agent {
+				session_notes(filter: {session_id: {eq: $sid}}, order_by: [{field: "created_at", direction: ASC}]) {
+					id agent_id session_id content created_at
+				}
+			}}}
+		}`,
+		map[string]any{"sid": sessionID},
+		"hub.db.agent.session_notes",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]interfaces.SessionNote, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, interfaces.SessionNote{
+			ID:        r.ID,
+			AgentID:   r.AgentID,
+			SessionID: r.SessionID,
+			Content:   r.Content,
+			CreatedAt: r.CreatedAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// DeleteNote removes a single note by ID.
+func (h *hubDB) DeleteNote(ctx context.Context, noteID string) error {
+	return runMutation(ctx, h.querier,
+		`mutation ($id: String!) {
+			hub { db { agent {
+				delete_session_notes(filter: {id: {eq: $id}}) { affected_rows }
+			}}}
+		}`,
+		map[string]any{"id": noteID},
+	)
+}
+
+// DeleteSessionNotes removes every note in a session. Returns the
+// affected_rows count reported by the mutation (best-effort; 0 on
+// parse failure is not treated as an error).
+func (h *hubDB) DeleteSessionNotes(ctx context.Context, sessionID string) (int, error) {
+	type result struct {
+		Affected int `json:"affected_rows"`
+	}
+	resp, err := h.querier.Query(ctx,
+		`mutation ($sid: String!) {
+			hub { db { agent {
+				delete_session_notes(filter: {session_id: {eq: $sid}}) { affected_rows }
+			}}}
+		}`,
+		map[string]any{"sid": sessionID},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("hubdb mutation: %w", err)
+	}
+	defer resp.Close()
+	if err := resp.Err(); err != nil {
+		return 0, fmt.Errorf("hubdb graphql: %w", err)
+	}
+	var r result
+	if err := resp.ScanData("hub.db.agent.delete_session_notes", &r); err != nil {
+		if !errors.Is(err, types.ErrWrongDataPath) && !errors.Is(err, types.ErrNoData) {
+			return 0, fmt.Errorf("hubdb scan: %w", err)
+		}
+	}
+	return r.Affected, nil
+}
+
+// ------------------------------------------------------------
+// Session participants
+// ------------------------------------------------------------
+
+// AddParticipant inserts a session_participants row.
+func (h *hubDB) AddParticipant(ctx context.Context, p interfaces.SessionParticipant) error {
+	if p.SessionID == "" || p.UserID == "" {
+		return fmt.Errorf("hubdb: AddParticipant requires SessionID + UserID")
+	}
+	role := p.Role
+	if role == "" {
+		role = "participant"
+	}
+	data := map[string]any{
+		"session_id": p.SessionID,
+		"user_id":    p.UserID,
+		"role":       role,
+	}
+	return runMutation(ctx, h.querier,
+		`mutation ($data: hub_db_session_participants_mut_input_data!) {
+			hub { db { agent {
+				insert_session_participants(data: $data) { session_id user_id }
+			}}}
+		}`,
+		map[string]any{"data": data},
+	)
+}
+
+// RemoveParticipant hard-deletes a participant row. An audit-preserving
+// variant (set left_at=now) can land later if a need arises.
+func (h *hubDB) RemoveParticipant(ctx context.Context, sessionID, userID string) error {
+	return runMutation(ctx, h.querier,
+		`mutation ($sid: String!, $uid: String!) {
+			hub { db { agent {
+				delete_session_participants(filter: {session_id: {eq: $sid}, user_id: {eq: $uid}}) {
+					affected_rows
+				}
+			}}}
+		}`,
+		map[string]any{"sid": sessionID, "uid": userID},
+	)
+}
+
+// ListParticipants returns every participant row for a session.
+func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]interfaces.SessionParticipant, error) {
+	type row struct {
+		SessionID string  `json:"session_id"`
+		UserID    string  `json:"user_id"`
+		Role      string  `json:"role"`
+		JoinedAt  dbTime  `json:"joined_at"`
+		LeftAt    *dbTime `json:"left_at"`
+	}
+	rows, err := runQuery[[]row](ctx, h.querier,
+		`query ($sid: String!) {
+			hub { db { agent {
+				session_participants(filter: {session_id: {eq: $sid}}) {
+					session_id user_id role joined_at left_at
+				}
+			}}}
+		}`,
+		map[string]any{"sid": sessionID},
+		"hub.db.agent.session_participants",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]interfaces.SessionParticipant, 0, len(rows))
+	for _, r := range rows {
+		p := interfaces.SessionParticipant{
+			SessionID: r.SessionID,
+			UserID:    r.UserID,
+			Role:      r.Role,
+			JoinedAt:  r.JoinedAt.Time,
+		}
+		if r.LeftAt != nil && !r.LeftAt.Time.IsZero() {
+			t := r.LeftAt.Time
+			p.LeftAt = &t
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// ------------------------------------------------------------
 // internal
 // ------------------------------------------------------------
 

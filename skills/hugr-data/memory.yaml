@@ -1,0 +1,53 @@
+categories:
+  schema:
+    description: "Table structures, field names and types"
+    volatility: stable
+    initial_score: 0.8
+    tags_hint: "domain, entity"
+  query_template:
+    description: "Working GraphQL query patterns"
+    volatility: stable
+    initial_score: 0.7
+    tags_hint: "domain, entity, operation"
+  anti_pattern:
+    description: "Errors and corrections with full context"
+    volatility: stable
+    initial_score: 0.9
+    tags_hint: "domain, entity, error_type"
+  field_values:
+    description: "Distinct values and distributions"
+    volatility: moderate
+    initial_score: 0.6
+    tags_hint: "domain, entity, field"
+  data_insight:
+    description: "Discovered patterns and relationships"
+    volatility: fast
+    initial_score: 0.5
+    tags_hint: "domain, topic"
+  user_preference:
+    description: "User's language, format, detail level"
+    volatility: slow
+    initial_score: 0.85
+    tags_hint: "preference_type"
+
+review:
+  enabled: true
+  min_tool_calls: 3
+  prompt: |
+    Focus on Hugr Data Mesh artefacts worth remembering:
+    schema structures, working query templates, anti-patterns
+    (errors + corrections), notable field values, cross-table
+    relationships. Skip greetings, retries, and raw tool output.
+
+compaction:
+  preserve:
+    - schema
+    - query_patterns
+    - error_messages
+    - identifiers
+    - numbers
+  discard:
+    - greetings
+    - repeated_tool_calls
+    - verbose_raw_output
+    - reasoning
