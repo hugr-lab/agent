@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,13 +40,13 @@ func TestSchedule_NextMatches(t *testing.T) {
 
 // stubHub lets us fake ListPendingReviews without a real engine.
 type stubHub struct {
-	interfaces.HubDB
-	pending atomic.Value // []interfaces.SessionReview
+	store.DB
+	pending atomic.Value // []store.SessionReview
 }
 
-func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]interfaces.SessionReview, error) {
+func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]store.SessionReview, error) {
 	if v := s.pending.Load(); v != nil {
-		return v.([]interfaces.SessionReview), nil
+		return v.([]store.SessionReview), nil
 	}
 	return nil, nil
 }
@@ -72,7 +72,7 @@ func (r *stubReviewer) Review(ctx context.Context, sessionID string) error {
 
 func TestScheduler_PicksPendingReview(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]interfaces.SessionReview{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
+	hub.pending.Store([]store.SessionReview{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
 	rv := newStubReviewer()
 
 	s, err := New(Config{
@@ -118,7 +118,7 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 	s.Start(ctx)
 
 	// Populate pending list then nudge.
-	hub.pending.Store([]interfaces.SessionReview{{ID: "r1", SessionID: "sX", Status: "pending"}})
+	hub.pending.Store([]store.SessionReview{{ID: "r1", SessionID: "sX", Status: "pending"}})
 	s.QueueReview("sX")
 
 	select {
@@ -130,7 +130,7 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 
 func TestScheduler_ReviewerErrorLogged(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]interfaces.SessionReview{{SessionID: "s1", Status: "pending"}})
+	hub.pending.Store([]store.SessionReview{{SessionID: "s1", Status: "pending"}})
 	rv := newStubReviewer()
 	rv.err = errors.New("boom")
 	s, err := New(Config{
@@ -190,7 +190,7 @@ func TestScheduler_StopTimeout(t *testing.T) {
 // twice across two separate Scheduler lifetimes.
 func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]interfaces.SessionReview{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
+	hub.pending.Store([]store.SessionReview{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
 
 	// First run — picks the review, then "crashes" via ctx cancel.
 	rv1 := newStubReviewer()

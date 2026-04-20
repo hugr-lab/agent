@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -20,7 +20,7 @@ import (
 // calls Review). Review is idempotent: re-running on a completed
 // session is a no-op.
 type Reviewer struct {
-	hub    interfaces.HubDB
+	hub    store.DB
 	router *intent.Router
 	logger *slog.Logger
 
@@ -48,7 +48,7 @@ type Reviewer struct {
 
 // ReviewerOptions bundle reviewer construction parameters.
 type ReviewerOptions struct {
-	Hub        interfaces.HubDB
+	Hub        store.DB
 	Router     *intent.Router
 	Logger     *slog.Logger
 	Config     MergedConfig
@@ -102,7 +102,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if existing != nil {
 		reviewID = existing.ID
 	} else {
-		id, err := r.hub.CreateReview(ctx, interfaces.SessionReview{
+		id, err := r.hub.CreateReview(ctx, store.SessionReview{
 			SessionID: sessionID, Status: "pending",
 		})
 		if err != nil {
@@ -134,7 +134,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if toolCalls < minCalls {
 		r.logger.Info("reviewer: skipping session below min_tool_calls",
 			"session", sessionID, "tool_calls", toolCalls, "min", minCalls)
-		return r.hub.CompleteReview(ctx, reviewID, interfaces.ReviewResult{
+		return r.hub.CompleteReview(ctx, reviewID, store.ReviewResult{
 			ModelUsed: "skipped",
 		})
 	}
@@ -160,7 +160,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("learning: parse: %w", err)
 	}
 
-	result := interfaces.ReviewResult{
+	result := store.ReviewResult{
 		ModelUsed:  llm.Name(),
 		TokensUsed: usage,
 	}
@@ -181,7 +181,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	}
 
 	for _, hy := range parsed.Hypotheses {
-		if _, err := r.hub.CreateHypothesis(ctx, interfaces.Hypothesis{
+		if _, err := r.hub.CreateHypothesis(ctx, store.Hypothesis{
 			Content:        hy.Content,
 			Category:       hy.Category,
 			Priority:       defaultStr(hy.Priority, "medium"),
@@ -205,7 +205,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 // reviewer — keeps the path testable without an embedding model.
 func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact, merged MergedConfig) (bool, error) {
 	// Look for near-duplicates by category + keyword.
-	existing, _ := r.hub.Search(ctx, f.Content, nil, interfaces.SearchOpts{
+	existing, _ := r.hub.Search(ctx, f.Content, nil, store.SearchOpts{
 		Category: f.Category,
 		Limit:    5,
 	})
@@ -223,7 +223,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 	vol := defaultStr(f.Volatility, "stable")
 	dur := r.durationFor(vol)
 	now := r.now()
-	item := interfaces.MemoryItem{
+	item := store.MemoryItem{
 		Content:    f.Content,
 		Category:   f.Category,
 		Volatility: vol,
@@ -239,7 +239,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 // buildPrompt assembles the summarisation prompt from transcript +
 // notes + merged review prompt. The format is intentionally small —
 // the cheap model sees: instruction + transcript window + notes.
-func (r *Reviewer) buildPrompt(events []interfaces.SessionEventFull, notes []interfaces.SessionNote, merged MergedConfig) string {
+func (r *Reviewer) buildPrompt(events []store.SessionEventFull, notes []store.SessionNote, merged MergedConfig) string {
 	var sb strings.Builder
 	sb.WriteString(r.reviewPrompt(merged))
 	sb.WriteString("\n\n## Transcript\n")
@@ -301,18 +301,18 @@ func (r *Reviewer) reviewPrompt(merged MergedConfig) string {
 // skill_loaded / skill_unloaded events, then asking loadSkillMemory
 // for each active skill's memory.yaml. Falls back to the reviewer's
 // static config when no loader is wired.
-func (r *Reviewer) mergedConfigFor(ctx context.Context, events []interfaces.SessionEventFull) MergedConfig {
+func (r *Reviewer) mergedConfigFor(ctx context.Context, events []store.SessionEventFull) MergedConfig {
 	if r.loadSkillMemory == nil {
 		return r.config
 	}
 	active := map[string]struct{}{}
 	for _, ev := range events {
 		switch ev.EventType {
-		case interfaces.EventTypeSkillLoaded:
+		case store.EventTypeSkillLoaded:
 			if name := skillNameFromEvent(ev); name != "" {
 				active[name] = struct{}{}
 			}
-		case interfaces.EventTypeSkillUnloaded:
+		case store.EventTypeSkillUnloaded:
 			delete(active, skillNameFromEvent(ev))
 		}
 	}
@@ -331,7 +331,7 @@ func (r *Reviewer) mergedConfigFor(ctx context.Context, events []interfaces.Sess
 	return MergeWithLogger(configs, r.logger)
 }
 
-func skillNameFromEvent(ev interfaces.SessionEventFull) string {
+func skillNameFromEvent(ev store.SessionEventFull) string {
 	if ev.Metadata != nil {
 		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
 			return name
@@ -493,13 +493,13 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func linkList(targetIDs []string) []interfaces.MemoryLink {
+func linkList(targetIDs []string) []store.MemoryLink {
 	if len(targetIDs) == 0 {
 		return nil
 	}
-	links := make([]interfaces.MemoryLink, 0, len(targetIDs))
+	links := make([]store.MemoryLink, 0, len(targetIDs))
 	for _, id := range targetIDs {
-		links = append(links, interfaces.MemoryLink{TargetID: id, Relation: "related"})
+		links = append(links, store.MemoryLink{TargetID: id, Relation: "related"})
 	}
 	return links
 }

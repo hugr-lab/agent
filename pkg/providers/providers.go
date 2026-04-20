@@ -16,11 +16,12 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/auth"
-	"github.com/hugr-lab/hugen/pkg/tools/system"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/skills"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/hugen/pkg/tools/system"
 )
 
 // Builder constructs a tools.Provider from a ProviderConfig and the
@@ -38,7 +39,7 @@ type Deps struct {
 	// For system-type builders:
 	Sessions interfaces.SessionManager
 	Skills   skills.Manager
-	Hub      interfaces.HubDB
+	Hub      store.DB
 
 	// Compactor is the on-demand context compressor used by the
 	// `_context` system suite's context_compress tool. May be nil;

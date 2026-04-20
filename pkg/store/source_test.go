@@ -1,6 +1,6 @@
 //go:build duckdb_arrow
 
-package hubdb_test
+package store_test
 
 import (
 	"context"
@@ -18,12 +18,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/adapters/hubdb"
-	"github.com/hugr-lab/hugen/adapters/hubdb/migrate"
+	"github.com/hugr-lab/hugen/pkg/store"
+	"github.com/hugr-lab/hugen/pkg/store/migrate"
 )
 
 type testOpts struct {
-	Source    hubdb.Config
+	Source    store.Config
 	VectorDim int
 }
 
@@ -37,7 +37,7 @@ func testEngine(t *testing.T, opts ...func(*testOpts)) (*hugr.Service, string) {
 	hubPath := filepath.Join(dir, "memory.db")
 
 	o := &testOpts{
-		Source: hubdb.Config{Path: hubPath},
+		Source: store.Config{Path: hubPath},
 	}
 	for _, apply := range opts {
 		apply(o)
@@ -67,7 +67,7 @@ func testEngine(t *testing.T, opts ...func(*testOpts)) (*hugr.Service, string) {
 	}))
 
 	// 2. Attach the provisioned DB through the engine.
-	source := hubdb.NewSource(o.Source)
+	source := store.NewSource(o.Source)
 	service, err := hugr.New(hugr.Config{
 		DB:     db.Config{},
 		CoreDB: coredb.New(coredb.Config{VectorSize: 0}),
@@ -164,7 +164,7 @@ func TestAttach_Idempotent(t *testing.T) {
 	runEngine := func() {
 		ctx := context.Background()
 		provision()
-		src := hubdb.NewSource(hubdb.Config{Path: hubPath})
+		src := store.NewSource(store.Config{Path: hubPath})
 		service, err := hugr.New(hugr.Config{
 			DB:     db.Config{},
 			CoreDB: coredb.New(coredb.Config{VectorSize: 0}),

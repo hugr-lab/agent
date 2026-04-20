@@ -34,7 +34,6 @@ func NewSkillsSuite(sm interfaces.SessionManager) []tool.Tool {
 	}
 }
 
-
 // sessionFor returns the session that owns this tool invocation, or an
 // error if the context has no session id / the session vanished.
 func sessionFor(ctx tool.Context, sm interfaces.SessionManager) (interfaces.Session, error) {
@@ -339,4 +338,3 @@ func (t *skillRefUnloadTool) Run(ctx tool.Context, args any) (map[string]any, er
 	}
 	return map[string]any{"unloaded": ref, "skill": skill}, nil
 }
-

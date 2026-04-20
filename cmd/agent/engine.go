@@ -10,9 +10,9 @@ import (
 	coredb "github.com/hugr-lab/query-engine/pkg/data-sources/sources/runtime/core-db"
 	"github.com/hugr-lab/query-engine/pkg/db"
 
-	"github.com/hugr-lab/hugen/adapters/hubdb"
-	"github.com/hugr-lab/hugen/adapters/hubdb/migrate"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/store"
+	"github.com/hugr-lab/hugen/pkg/store/migrate"
 )
 
 // buildLocalEngine provisions the memory DB, constructs an embedded hugr
@@ -64,7 +64,7 @@ func buildLocalEngine(ctx context.Context, cfg *config.Config, logger *slog.Logg
 		return nil, fmt.Errorf("hugr.New: %w", err)
 	}
 
-	source := hubdb.NewSource(hubdb.Config{
+	source := store.NewSource(store.Config{
 		Path:          cfg.Memory.Path,
 		VectorSize:    cfg.Embedding.Dimension,
 		EmbedderModel: cfg.Embedding.Model,

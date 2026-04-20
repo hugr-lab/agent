@@ -1,22 +1,22 @@
 //go:build duckdb_arrow
 
-package hubdb_test
+package store_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // seedAgent registers the agent row used by memory tests. memory_items
 // rows FK onto agents, so this has to land before any Store call.
-func seedAgent(t *testing.T, h interfaces.HubDB, id, short string) {
+func seedAgent(t *testing.T, h store.DB, id, short string) {
 	t.Helper()
-	require.NoError(t, h.RegisterAgent(context.Background(), interfaces.Agent{
+	require.NoError(t, h.RegisterAgent(context.Background(), store.Agent{
 		ID: id, AgentTypeID: "hugr-data", ShortID: short,
 		Name: "test-agent", Status: "active",
 	}))
@@ -28,7 +28,7 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 	seedAgent(t, h, "agt_ag01", "ag01")
 
 	now := time.Now().UTC()
-	fact := interfaces.MemoryItem{
+	fact := store.MemoryItem{
 		Content:    "tf2.incidents has 14 fields",
 		Category:   "schema",
 		Volatility: "stable",
@@ -38,7 +38,7 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 		ValidTo:    now.Add(24 * time.Hour),
 	}
 	id, err := h.Store(ctx, fact, []string{"tf", "incidents", "schema"},
-		[]interfaces.MemoryLink{{TargetID: "other-fact", Relation: "uses"}})
+		[]store.MemoryLink{{TargetID: "other-fact", Relation: "uses"}})
 	require.NoError(t, err)
 	require.NotEmpty(t, id)
 
@@ -52,18 +52,18 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 	assert.True(t, got.IsValid)
 
 	// Search by content substring (keyword path, no embedding).
-	res, err := h.Search(ctx, "incidents", nil, interfaces.SearchOpts{Limit: 5})
+	res, err := h.Search(ctx, "incidents", nil, store.SearchOpts{Limit: 5})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 	assert.Equal(t, id, res[0].ID)
 
 	// Filter by tags — should still match.
-	res, err = h.Search(ctx, "", nil, interfaces.SearchOpts{Tags: []string{"tf"}, Limit: 5})
+	res, err = h.Search(ctx, "", nil, store.SearchOpts{Tags: []string{"tf"}, Limit: 5})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 
 	// Wrong tag filter → no results.
-	res, err = h.Search(ctx, "", nil, interfaces.SearchOpts{Tags: []string{"weather"}, Limit: 5})
+	res, err = h.Search(ctx, "", nil, store.SearchOpts{Tags: []string{"weather"}, Limit: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res)
 
@@ -80,7 +80,7 @@ func TestMemory_Reinforce(t *testing.T) {
 	seedAgent(t, h, "agt_ag01", "ag01")
 	now := time.Now().UTC()
 
-	id, err := h.Store(ctx, interfaces.MemoryItem{
+	id, err := h.Store(ctx, store.MemoryItem{
 		Content: "query pattern: filter weather by region", Category: "query_template",
 		Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
@@ -89,7 +89,7 @@ func TestMemory_Reinforce(t *testing.T) {
 
 	// Reinforce: bump score by 0.3, add a tag, add a link.
 	require.NoError(t, h.Reinforce(ctx, id, 0.3, []string{"region"},
-		[]interfaces.MemoryLink{{TargetID: "schema-weather", Relation: "uses"}}))
+		[]store.MemoryLink{{TargetID: "schema-weather", Relation: "uses"}}))
 
 	got, err := h.Get(ctx, id)
 	require.NoError(t, err)
@@ -106,17 +106,17 @@ func TestMemory_Stats(t *testing.T) {
 	seedAgent(t, h, "agt_ag01", "ag01")
 	now := time.Now().UTC()
 
-	_, err := h.Store(ctx, interfaces.MemoryItem{
+	_, err := h.Store(ctx, store.MemoryItem{
 		Content: "a", Category: "schema", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
 	require.NoError(t, err)
-	_, err = h.Store(ctx, interfaces.MemoryItem{
+	_, err = h.Store(ctx, store.MemoryItem{
 		Content: "b", Category: "schema", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
 	require.NoError(t, err)
-	_, err = h.Store(ctx, interfaces.MemoryItem{
+	_, err = h.Store(ctx, store.MemoryItem{
 		Content: "c", Category: "query_template", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
@@ -141,12 +141,12 @@ func TestMemory_DeleteExpired(t *testing.T) {
 	now := time.Now().UTC()
 
 	// One expired, one fresh.
-	_, err := h.Store(ctx, interfaces.MemoryItem{
+	_, err := h.Store(ctx, store.MemoryItem{
 		Content: "expired", Category: "schema", Volatility: "volatile", Score: 0.5,
 		ValidFrom: now.Add(-48 * time.Hour), ValidTo: now.Add(-1 * time.Hour),
 	}, nil, nil)
 	require.NoError(t, err)
-	freshID, err := h.Store(ctx, interfaces.MemoryItem{
+	freshID, err := h.Store(ctx, store.MemoryItem{
 		Content: "fresh", Category: "schema", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
@@ -161,7 +161,7 @@ func TestMemory_DeleteExpired(t *testing.T) {
 	require.NotNil(t, got)
 
 	// Confirm expired is gone — search for "expired" returns nothing.
-	res, err := h.Search(ctx, "expired", nil, interfaces.SearchOpts{Limit: 5})
+	res, err := h.Search(ctx, "expired", nil, store.SearchOpts{Limit: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res)
 }

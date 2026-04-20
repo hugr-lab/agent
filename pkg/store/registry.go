@@ -1,4 +1,4 @@
-package hubdb
+package store
 
 import (
 	"context"
@@ -7,12 +7,10 @@ import (
 	"time"
 
 	"github.com/hugr-lab/query-engine/types"
-
-	"github.com/hugr-lab/hugen/interfaces"
 )
 
 // GetAgentType fetches an agent type by ID. Returns (nil, nil) if not found.
-func (h *hubDB) GetAgentType(ctx context.Context, typeID string) (*interfaces.AgentType, error) {
+func (h *hubDB) GetAgentType(ctx context.Context, typeID string) (*AgentType, error) {
 	type row struct {
 		ID          string         `json:"id"`
 		Name        string         `json:"name"`
@@ -42,7 +40,7 @@ func (h *hubDB) GetAgentType(ctx context.Context, typeID string) (*interfaces.Ag
 		return nil, nil
 	}
 	r := rows[0]
-	return &interfaces.AgentType{
+	return &AgentType{
 		ID:          r.ID,
 		Name:        r.Name,
 		Description: r.Description,
@@ -53,7 +51,7 @@ func (h *hubDB) GetAgentType(ctx context.Context, typeID string) (*interfaces.Ag
 }
 
 // GetAgent fetches an agent instance by ID. Returns (nil, nil) if not found.
-func (h *hubDB) GetAgent(ctx context.Context, id string) (*interfaces.Agent, error) {
+func (h *hubDB) GetAgent(ctx context.Context, id string) (*Agent, error) {
 	type row struct {
 		ID             string         `json:"id"`
 		AgentTypeID    string         `json:"agent_type_id"`
@@ -85,7 +83,7 @@ func (h *hubDB) GetAgent(ctx context.Context, id string) (*interfaces.Agent, err
 		return nil, nil
 	}
 	r := rows[0]
-	return &interfaces.Agent{
+	return &Agent{
 		ID:             r.ID,
 		AgentTypeID:    r.AgentTypeID,
 		ShortID:        r.ShortID,
@@ -101,7 +99,7 @@ func (h *hubDB) GetAgent(ctx context.Context, id string) (*interfaces.Agent, err
 // ID, it refreshes mutable fields (name, status, config_override, last_active)
 // — agent_type_id and short_id stay pinned to what's already in the DB.
 // Idempotent across restarts.
-func (h *hubDB) RegisterAgent(ctx context.Context, a interfaces.Agent) error {
+func (h *hubDB) RegisterAgent(ctx context.Context, a Agent) error {
 	if a.ID == "" {
 		return fmt.Errorf("hubdb: RegisterAgent requires ID")
 	}

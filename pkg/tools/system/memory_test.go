@@ -3,7 +3,7 @@ package system
 import (
 	"testing"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,4 +30,4 @@ func TestNewMemorySuite_WiredWithHub(t *testing.T) {
 // stubHub is a zero-value HubDB that returns empty results for every
 // method. The real adapter is exercised by adapters/hubdb/*_test.go;
 // this package only verifies wiring.
-type stubHub struct{ interfaces.HubDB }
+type stubHub struct{ store.DB }

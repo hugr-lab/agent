@@ -6,21 +6,21 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 )
 
 // Consolidator performs idempotent background maintenance: deletes
 // expired memory items and expires stale hypotheses. Runs under the
 // scheduler's priority-30 cron lane (ADR v7.2 §8).
 type Consolidator struct {
-	hub              interfaces.HubDB
+	hub              store.DB
 	hypothesisExpiry time.Duration
 	logger           *slog.Logger
 }
 
 // ConsolidatorOptions bundles consolidator construction parameters.
 type ConsolidatorOptions struct {
-	Hub              interfaces.HubDB
+	Hub              store.DB
 	HypothesisExpiry time.Duration
 	Logger           *slog.Logger
 }

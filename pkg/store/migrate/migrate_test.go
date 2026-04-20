@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/adapters/hubdb/migrate"
+	"github.com/hugr-lab/hugen/pkg/store/migrate"
 )
 
 func TestEnsure_Fresh(t *testing.T) {

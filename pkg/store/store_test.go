@@ -1,6 +1,6 @@
 //go:build duckdb_arrow
 
-package hubdb_test
+package store_test
 
 import (
 	"context"
@@ -11,18 +11,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/adapters/hubdb"
+	"github.com/hugr-lab/hugen/pkg/store"
 )
 
 func TestHubDB_New_RequiresAgentID(t *testing.T) {
 	service, _ := testEngine(t)
-	_, err := hubdb.New(service, hubdb.Options{})
+	_, err := store.New(service, store.Options{})
 	require.Error(t, err)
 }
 
 func TestHubDB_New_Defaults(t *testing.T) {
 	service, _ := testEngine(t)
-	h, err := hubdb.New(service, hubdb.Options{
+	h, err := store.New(service, store.Options{
 		AgentID:    "agt_ag01",
 		AgentShort: "ag01",
 	})
@@ -34,7 +34,7 @@ func TestHubDB_New_Defaults(t *testing.T) {
 	// Embed with no model → disabled, not a transport error.
 	_, err = h.Embed(context.Background(), "hello")
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, hubdb.ErrEmbeddingDisabled))
+	assert.True(t, errors.Is(err, store.ErrEmbeddingDisabled))
 
 	// Close is idempotent.
 	require.NoError(t, h.Close())
@@ -43,7 +43,7 @@ func TestHubDB_New_Defaults(t *testing.T) {
 
 func TestHubDB_Dimension_WithModel(t *testing.T) {
 	service, _ := testEngine(t)
-	h, err := hubdb.New(service, hubdb.Options{
+	h, err := store.New(service, store.Options{
 		AgentID:        "agt_ag01",
 		AgentShort:     "ag01",
 		Dimension:      768,
@@ -53,6 +53,6 @@ func TestHubDB_Dimension_WithModel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 768, h.Dimension())
 	// Available reports only config — the actual probe is done by
-	// setupLocalSources at startup and is not re-run per HubDB call.
+	// setupLocalSources at startup and is not re-run per store.DB call.
 	assert.True(t, h.Available())
 }

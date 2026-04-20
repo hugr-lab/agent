@@ -1,4 +1,4 @@
-package hubdb
+package store
 
 import (
 	"context"

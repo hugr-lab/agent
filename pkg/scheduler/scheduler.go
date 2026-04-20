@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 )
 
 // Reviewer, Verifier, and Consolidator are the contracts the scheduler
@@ -46,7 +46,7 @@ type Config struct {
 	Reviewer     Reviewer
 	Verifier     Verifier
 	Consolidator Consolidator
-	Hub          interfaces.HubDB
+	Hub          store.DB
 	Logger       *slog.Logger
 }
 

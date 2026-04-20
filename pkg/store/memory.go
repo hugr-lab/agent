@@ -1,4 +1,4 @@
-// Memory GraphQL bindings for interfaces.HubDB.Memory and the
+// Memory GraphQL bindings for HubDB.Memory and the
 // memory_tags / memory_links / memory_log satellite tables.
 //
 // APPEND-ONLY: Reinforce/Supersede = DELETE + INSERT, never UPDATE.
@@ -8,7 +8,7 @@
 // baseTime and offsets each row by idx*1µs so the composite PK
 // (event_time, event_type, memory_item_id, session_id) never
 // collides within the batch.
-package hubdb
+package store
 
 import (
 	"context"
@@ -18,7 +18,6 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/id"
 )
 
@@ -81,9 +80,9 @@ type memoryLinkRow struct {
 	Relation string `json:"relation"`
 }
 
-func toSearchResult(r memoryRow, tags []memoryTagRow, links []memoryLinkRow) interfaces.SearchResult {
-	res := interfaces.SearchResult{
-		MemoryItem: interfaces.MemoryItem{
+func toSearchResult(r memoryRow, tags []memoryTagRow, links []memoryLinkRow) SearchResult {
+	res := SearchResult{
+		MemoryItem: MemoryItem{
 			ID:         r.ID,
 			AgentID:    r.AgentID,
 			Content:    r.Content,
@@ -113,7 +112,7 @@ func toSearchResult(r memoryRow, tags []memoryTagRow, links []memoryLinkRow) int
 // scope + valid_to > now by default. When embedding is provided and the
 // engine exposes similarity, results are ordered by cosine distance;
 // otherwise the query-string is used as an ILIKE pattern.
-func (h *hubDB) Search(ctx context.Context, query string, embedding []float32, opts interfaces.SearchOpts) ([]interfaces.SearchResult, error) {
+func (h *hubDB) Search(ctx context.Context, query string, embedding []float32, opts SearchOpts) ([]SearchResult, error) {
 	type row struct {
 		memoryRow
 		Tags  []memoryTagRow  `json:"tags"`
@@ -185,7 +184,7 @@ func (h *hubDB) Search(ctx context.Context, query string, embedding []float32, o
 		return nil, err
 	}
 
-	results := make([]interfaces.SearchResult, 0, len(rows))
+	results := make([]SearchResult, 0, len(rows))
 	// Filter by tags client-side if requested — avoids a more complex
 	// nested filter against the GraphQL compiler.
 	for _, r := range rows {
@@ -217,7 +216,7 @@ func (h *hubDB) Search(ctx context.Context, query string, embedding []float32, o
 
 // Get fetches a single memory item by id. Returns (nil, nil) when
 // the item does not exist.
-func (h *hubDB) Get(ctx context.Context, memID string) (*interfaces.SearchResult, error) {
+func (h *hubDB) Get(ctx context.Context, memID string) (*SearchResult, error) {
 	type row struct {
 		memoryRow
 		Tags  []memoryTagRow  `json:"tags"`
@@ -254,13 +253,13 @@ func (h *hubDB) Get(ctx context.Context, memID string) (*interfaces.SearchResult
 // GetLinked returns facts reachable from memID through outgoing links
 // up to the requested depth. Performed client-side as a BFS because
 // the schema doesn't provide a recursive view for memory_links.
-func (h *hubDB) GetLinked(ctx context.Context, memID string, depth int) ([]interfaces.SearchResult, error) {
+func (h *hubDB) GetLinked(ctx context.Context, memID string, depth int) ([]SearchResult, error) {
 	if depth <= 0 {
 		depth = 1
 	}
 	visited := map[string]bool{memID: true}
 	frontier := []string{memID}
-	var collected []interfaces.SearchResult
+	var collected []SearchResult
 	for level := 0; level < depth && len(frontier) > 0; level++ {
 		next := frontier
 		frontier = nil
@@ -290,7 +289,7 @@ func (h *hubDB) GetLinked(ctx context.Context, memID string, depth int) ([]inter
 // Stats returns counts of memory items grouped by category + aggregate
 // figures. Implemented as a small set of targeted queries rather than
 // a GraphQL aggregate — keeps us portable across compiler versions.
-func (h *hubDB) Stats(ctx context.Context) (interfaces.MemoryStats, error) {
+func (h *hubDB) Stats(ctx context.Context) (MemoryStats, error) {
 	type row struct {
 		ID        string  `json:"id"`
 		Category  string  `json:"category"`
@@ -311,9 +310,9 @@ func (h *hubDB) Stats(ctx context.Context) (interfaces.MemoryStats, error) {
 		"hub.db.agent.memory_items",
 	)
 	if err != nil && !errors.Is(err, types.ErrWrongDataPath) && !errors.Is(err, types.ErrNoData) {
-		return interfaces.MemoryStats{}, err
+		return MemoryStats{}, err
 	}
-	stats := interfaces.MemoryStats{ByCategory: map[string]int{}}
+	stats := MemoryStats{ByCategory: map[string]int{}}
 	for _, r := range rows {
 		stats.TotalItems++
 		if r.IsValid {
@@ -391,7 +390,7 @@ func (h *hubDB) Hint(ctx context.Context, query string, embedding []float32) (st
 // Store inserts a new memory_item plus its tags and links, then a
 // matching memory_log entry. Returns the assigned ID (caller may pre-
 // fill item.ID; otherwise the adapter generates one via pkg/id).
-func (h *hubDB) Store(ctx context.Context, item interfaces.MemoryItem, tags []string, links []interfaces.MemoryLink) (string, error) {
+func (h *hubDB) Store(ctx context.Context, item MemoryItem, tags []string, links []MemoryLink) (string, error) {
 	if item.Content == "" {
 		return "", fmt.Errorf("hubdb: Store requires Content")
 	}
@@ -440,7 +439,7 @@ func (h *hubDB) Store(ctx context.Context, item interfaces.MemoryItem, tags []st
 	}
 	base := baseTimeForBatch()
 	sid := sessionIDFrom(ctx)
-	logs := []interfaces.MemoryLogEntry{{
+	logs := []MemoryLogEntry{{
 		EventTime:    offsetMicro(base, 0),
 		EventType:    "store",
 		MemoryItemID: item.ID,
@@ -449,14 +448,14 @@ func (h *hubDB) Store(ctx context.Context, item interfaces.MemoryItem, tags []st
 		Details:      map[string]any{"category": item.Category, "score": item.Score},
 	}}
 	for i, tag := range tags {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime: offsetMicro(base, i+1), EventType: "add_tag",
 			MemoryItemID: item.ID, SessionID: sid, AgentID: item.AgentID,
 			Details: map[string]any{"tag": tag},
 		})
 	}
 	for i, link := range links {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime: offsetMicro(base, 1+len(tags)+i), EventType: "add_link",
 			MemoryItemID: item.ID, SessionID: sid, AgentID: item.AgentID,
 			Details: map[string]any{"target_id": link.TargetID, "relation": link.Relation},
@@ -473,7 +472,7 @@ func (h *hubDB) Store(ctx context.Context, item interfaces.MemoryItem, tags []st
 // refreshed valid_to. Volatility duration is not touched here —
 // callers handle it by passing a bonus that implicitly represents a
 // validity refresh as well.
-func (h *hubDB) Reinforce(ctx context.Context, memID string, scoreBonus float64, extraTags []string, extraLinks []interfaces.MemoryLink) error {
+func (h *hubDB) Reinforce(ctx context.Context, memID string, scoreBonus float64, extraTags []string, extraLinks []MemoryLink) error {
 	existing, err := h.Get(ctx, memID)
 	if err != nil {
 		return err
@@ -502,7 +501,7 @@ func (h *hubDB) Reinforce(ctx context.Context, memID string, scoreBonus float64,
 	for _, t := range existing.Links {
 		existingLinks[t] = true
 	}
-	mergedLinks := make([]interfaces.MemoryLink, 0, len(extraLinks))
+	mergedLinks := make([]MemoryLink, 0, len(extraLinks))
 	for _, l := range extraLinks {
 		if existingLinks[l.TargetID] {
 			continue
@@ -552,20 +551,20 @@ func (h *hubDB) Reinforce(ctx context.Context, memID string, scoreBonus float64,
 	}
 	base := baseTimeForBatch()
 	sid := sessionIDFrom(ctx)
-	logs := []interfaces.MemoryLogEntry{{
+	logs := []MemoryLogEntry{{
 		EventTime: offsetMicro(base, 0), EventType: "reinforce",
 		MemoryItemID: memID, SessionID: sid, AgentID: item.AgentID,
 		Details: map[string]any{"old_score": existing.Score, "new_score": newScore},
 	}}
 	for i, tag := range extraTags {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime: offsetMicro(base, i+1), EventType: "add_tag",
 			MemoryItemID: memID, SessionID: sid, AgentID: item.AgentID,
 			Details: map[string]any{"tag": tag},
 		})
 	}
 	for i, l := range mergedLinks {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime: offsetMicro(base, 1+len(extraTags)+i), EventType: "add_link",
 			MemoryItemID: memID, SessionID: sid, AgentID: item.AgentID,
 			Details: map[string]any{"target_id": l.TargetID, "relation": l.Relation},
@@ -576,7 +575,7 @@ func (h *hubDB) Reinforce(ctx context.Context, memID string, scoreBonus float64,
 
 // Supersede deletes an old fact and inserts a new one with a link
 // back to the deleted predecessor (relation="supersedes").
-func (h *hubDB) Supersede(ctx context.Context, oldID string, newItem interfaces.MemoryItem, tags []string, links []interfaces.MemoryLink) (string, error) {
+func (h *hubDB) Supersede(ctx context.Context, oldID string, newItem MemoryItem, tags []string, links []MemoryLink) (string, error) {
 	existing, err := h.Get(ctx, oldID)
 	if err != nil {
 		return "", err
@@ -588,7 +587,7 @@ func (h *hubDB) Supersede(ctx context.Context, oldID string, newItem interfaces.
 		return "", err
 	}
 	// Link new → old to preserve history.
-	links = append(links, interfaces.MemoryLink{
+	links = append(links, MemoryLink{
 		TargetID: oldID,
 		Relation: "supersedes",
 	})
@@ -597,7 +596,7 @@ func (h *hubDB) Supersede(ctx context.Context, oldID string, newItem interfaces.
 		return "", err
 	}
 	// Audit log for the supersede event explicitly.
-	return newID, h.Log(ctx, interfaces.MemoryLogEntry{
+	return newID, h.Log(ctx, MemoryLogEntry{
 		EventTime: time.Now().UTC(), EventType: "supersede",
 		MemoryItemID: oldID, SessionID: sessionIDFrom(ctx), AgentID: h.agentID,
 		Details: map[string]any{"superseded_by": newID},
@@ -610,7 +609,7 @@ func (h *hubDB) Delete(ctx context.Context, memID string) error {
 	if err := h.deleteItem(ctx, memID); err != nil {
 		return err
 	}
-	return h.Log(ctx, interfaces.MemoryLogEntry{
+	return h.Log(ctx, MemoryLogEntry{
 		EventTime: time.Now().UTC(), EventType: "delete",
 		MemoryItemID: memID, SessionID: sessionIDFrom(ctx), AgentID: h.agentID,
 	})
@@ -650,7 +649,7 @@ func (h *hubDB) DeleteExpired(ctx context.Context) (int, error) {
 		}
 	}
 	if r.Affected > 0 {
-		_ = h.Log(ctx, interfaces.MemoryLogEntry{
+		_ = h.Log(ctx, MemoryLogEntry{
 			EventTime: time.Now().UTC(), EventType: "delete_expired",
 			AgentID: h.agentID,
 			Details: map[string]any{"count": r.Affected},
@@ -667,9 +666,9 @@ func (h *hubDB) AddTags(ctx context.Context, memID string, tags []string) error 
 	}
 	base := baseTimeForBatch()
 	sid := sessionIDFrom(ctx)
-	logs := make([]interfaces.MemoryLogEntry, 0, len(tags))
+	logs := make([]MemoryLogEntry, 0, len(tags))
 	for i, t := range tags {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime: offsetMicro(base, i), EventType: "add_tag",
 			MemoryItemID: memID, SessionID: sid, AgentID: h.agentID,
 			Details: map[string]any{"tag": t},
@@ -696,9 +695,9 @@ func (h *hubDB) RemoveTags(ctx context.Context, memID string, tags []string) err
 	}
 	base := baseTimeForBatch()
 	sid := sessionIDFrom(ctx)
-	logs := make([]interfaces.MemoryLogEntry, 0, len(tags))
+	logs := make([]MemoryLogEntry, 0, len(tags))
 	for i, t := range tags {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime: offsetMicro(base, i), EventType: "remove_tag",
 			MemoryItemID: memID, SessionID: sid, AgentID: h.agentID,
 			Details: map[string]any{"tag": t},
@@ -708,7 +707,7 @@ func (h *hubDB) RemoveTags(ctx context.Context, memID string, tags []string) err
 }
 
 // AddLink inserts a single memory_links row + audit entry.
-func (h *hubDB) AddLink(ctx context.Context, link interfaces.MemoryLink) error {
+func (h *hubDB) AddLink(ctx context.Context, link MemoryLink) error {
 	data := map[string]any{
 		"source_id": link.SourceID,
 		"target_id": link.TargetID,
@@ -724,7 +723,7 @@ func (h *hubDB) AddLink(ctx context.Context, link interfaces.MemoryLink) error {
 	); err != nil {
 		return err
 	}
-	return h.Log(ctx, interfaces.MemoryLogEntry{
+	return h.Log(ctx, MemoryLogEntry{
 		EventTime: time.Now().UTC(), EventType: "add_link",
 		MemoryItemID: link.SourceID, SessionID: sessionIDFrom(ctx), AgentID: h.agentID,
 		Details: map[string]any{"target_id": link.TargetID, "relation": link.Relation},
@@ -743,7 +742,7 @@ func (h *hubDB) RemoveLink(ctx context.Context, sourceID, targetID string) error
 	); err != nil {
 		return err
 	}
-	return h.Log(ctx, interfaces.MemoryLogEntry{
+	return h.Log(ctx, MemoryLogEntry{
 		EventTime: time.Now().UTC(), EventType: "remove_link",
 		MemoryItemID: sourceID, SessionID: sessionIDFrom(ctx), AgentID: h.agentID,
 		Details: map[string]any{"target_id": targetID},
@@ -773,7 +772,7 @@ func (h *hubDB) insertTags(ctx context.Context, memID string, tags []string) err
 	return nil
 }
 
-func (h *hubDB) insertLinks(ctx context.Context, sourceID string, links []interfaces.MemoryLink) error {
+func (h *hubDB) insertLinks(ctx context.Context, sourceID string, links []MemoryLink) error {
 	for _, l := range links {
 		if l.TargetID == "" {
 			continue
@@ -827,11 +826,11 @@ func (h *hubDB) deleteItem(ctx context.Context, memID string) error {
 	)
 }
 
-func (h *hubDB) logRetrievals(ctx context.Context, results []interfaces.SearchResult, sessionID string) error {
+func (h *hubDB) logRetrievals(ctx context.Context, results []SearchResult, sessionID string) error {
 	base := baseTimeForBatch()
-	logs := make([]interfaces.MemoryLogEntry, 0, len(results))
+	logs := make([]MemoryLogEntry, 0, len(results))
 	for i, r := range results {
-		logs = append(logs, interfaces.MemoryLogEntry{
+		logs = append(logs, MemoryLogEntry{
 			EventTime:    offsetMicro(base, i),
 			EventType:    "retrieve",
 			MemoryItemID: r.ID,

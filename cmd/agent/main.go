@@ -128,7 +128,6 @@ func a2aHandlers(a agent.Agent, sessionSvc adksession.Service, artifactSvc artif
 	return a2asrv.NewStaticAgentCardHandler(agentCard), a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
 }
 
-
 // serveAndShutdown starts the HTTP server and handles graceful shutdown.
 // postListen functions run once after the listener is bound (used to
 // prompt OIDC login only after /auth/<name>/callback is actually
@@ -265,4 +264,3 @@ func corsMiddleware(baseURL string, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

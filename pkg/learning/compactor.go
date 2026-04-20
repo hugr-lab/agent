@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/store"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -27,7 +27,7 @@ import (
 //     describing the fold so the post-session reviewer can still see
 //     how many turns were summarised.
 type Compactor struct {
-	hub             interfaces.HubDB
+	hub             store.DB
 	router          *intent.Router
 	tokens          *TokenEstimator
 	threshold       float64
@@ -38,7 +38,7 @@ type Compactor struct {
 
 // CompactorOptions bundles compactor construction parameters.
 type CompactorOptions struct {
-	Hub       interfaces.HubDB
+	Hub       store.DB
 	Router    *intent.Router
 	Tokens    *TokenEstimator
 	Threshold float64 // default 0.70
@@ -75,7 +75,7 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 	return &Compactor{
 		hub:             opts.Hub,
 		router:          opts.Router,
-		tokens:           opts.Tokens,
+		tokens:          opts.Tokens,
 		threshold:       opts.Threshold,
 		minTurns:        opts.MinTurns,
 		logger:          opts.Logger,
@@ -118,14 +118,14 @@ func (c *Compactor) Before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 	// Replace oldest with a single synthetic summary message.
 	newContents := make([]*genai.Content, 0, 1+len(tail))
 	newContents = append(newContents, &genai.Content{
-		Role: "user",
+		Role:  "user",
 		Parts: []*genai.Part{{Text: "[compacted " + itoa(len(oldest)) + " earlier turns]\n" + summary}},
 	})
 	newContents = append(newContents, tail...)
 	req.Contents = newContents
 
 	if sid != "" && c.hub != nil {
-		_, _ = c.hub.AppendEvent(ctx, interfaces.SessionEvent{
+		_, _ = c.hub.AppendEvent(ctx, store.SessionEvent{
 			SessionID: sid,
 			EventType: "compaction",
 			Author:    "system",
@@ -282,11 +282,11 @@ func (c *Compactor) mergedHints(ctx context.Context, sid string) MergedConfig {
 	active := map[string]struct{}{}
 	for _, ev := range events {
 		switch ev.EventType {
-		case interfaces.EventTypeSkillLoaded:
+		case store.EventTypeSkillLoaded:
 			if name := skillNameFromSessionEvent(ev); name != "" {
 				active[name] = struct{}{}
 			}
-		case interfaces.EventTypeSkillUnloaded:
+		case store.EventTypeSkillUnloaded:
 			delete(active, skillNameFromSessionEvent(ev))
 		}
 	}
@@ -307,7 +307,7 @@ func (c *Compactor) mergedHints(ctx context.Context, sid string) MergedConfig {
 // skillNameFromSessionEvent is the SessionEvent counterpart to
 // skillNameFromEvent — shares the Metadata["skill"] fallback to
 // SessionEvent.Content.
-func skillNameFromSessionEvent(ev interfaces.SessionEvent) string {
+func skillNameFromSessionEvent(ev store.SessionEvent) string {
 	if ev.Metadata != nil {
 		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
 			return name

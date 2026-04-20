@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/store"
 )
 
 // Verifier runs one hypothesis check per VerifyNext invocation. The
@@ -19,7 +19,7 @@ import (
 // standalone mode; Hub-mode can later route verification through a
 // sub-agent with richer tool access.
 type Verifier struct {
-	hub    interfaces.HubDB
+	hub    store.DB
 	router *intent.Router
 	logger *slog.Logger
 
@@ -33,7 +33,7 @@ type Verifier struct {
 
 // VerifierOptions bundles verifier construction parameters.
 type VerifierOptions struct {
-	Hub        interfaces.HubDB
+	Hub        store.DB
 	Router     *intent.Router
 	Logger     *slog.Logger
 	Volatility map[string]time.Duration
@@ -80,7 +80,7 @@ func (v *Verifier) VerifyNext(ctx context.Context) error {
 // → parse verdict → Confirm / Reject / Defer. Failures mid-flight
 // leave the row in `checking` — a subsequent Consolidator run can
 // reset stuck rows, or the operator can inspect the hypothesis.
-func (v *Verifier) verify(ctx context.Context, h interfaces.Hypothesis) error {
+func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
 	if err := v.hub.MarkHypothesisChecking(ctx, h.ID); err != nil {
 		return fmt.Errorf("learning: MarkChecking %q: %w", h.ID, err)
 	}
@@ -112,10 +112,10 @@ func (v *Verifier) verify(ctx context.Context, h interfaces.Hypothesis) error {
 	}
 }
 
-func (v *Verifier) confirmHypothesis(ctx context.Context, h interfaces.Hypothesis, verdict verifierVerdict) error {
+func (v *Verifier) confirmHypothesis(ctx context.Context, h store.Hypothesis, verdict verifierVerdict) error {
 	now := v.now()
 	dur := v.durationFor(defaultStr(verdict.Volatility, "stable"))
-	factID, err := v.hub.Store(ctx, interfaces.MemoryItem{
+	factID, err := v.hub.Store(ctx, store.MemoryItem{
 		Content:    h.Content + "\nEvidence: " + verdict.Evidence,
 		Category:   defaultStr(h.Category, "data_insight"),
 		Volatility: defaultStr(verdict.Volatility, "stable"),
@@ -130,10 +130,10 @@ func (v *Verifier) confirmHypothesis(ctx context.Context, h interfaces.Hypothesi
 	return v.hub.ConfirmHypothesis(ctx, h.ID, verdict.Evidence, factID)
 }
 
-func (v *Verifier) rejectHypothesis(ctx context.Context, h interfaces.Hypothesis, verdict verifierVerdict) error {
+func (v *Verifier) rejectHypothesis(ctx context.Context, h store.Hypothesis, verdict verifierVerdict) error {
 	now := v.now()
 	dur := v.durationFor("moderate")
-	_, err := v.hub.Store(ctx, interfaces.MemoryItem{
+	_, err := v.hub.Store(ctx, store.MemoryItem{
 		Content:    "Rejected hypothesis: " + h.Content + "\nReality: " + verdict.Evidence,
 		Category:   "anti_pattern",
 		Volatility: "moderate",
@@ -148,7 +148,7 @@ func (v *Verifier) rejectHypothesis(ctx context.Context, h interfaces.Hypothesis
 	return v.hub.RejectHypothesis(ctx, h.ID, verdict.Evidence)
 }
 
-func (v *Verifier) buildPrompt(h interfaces.Hypothesis) string {
+func (v *Verifier) buildPrompt(h store.Hypothesis) string {
 	var b strings.Builder
 	b.WriteString("You are verifying a hypothesis derived from a prior agent session. Respond with a single JSON object describing your verdict — do not use tools.\n\n")
 	b.WriteString("Hypothesis: ")

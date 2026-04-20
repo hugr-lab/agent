@@ -48,9 +48,9 @@ type HugrModel struct {
 	hugrModel      string
 	client         *client.Client
 	logger         *slog.Logger
-	maxTokens      int            // default max completion tokens (0 = provider default)
-	temperature    *float32       // default temperature (nil = provider default)
-	toolChoiceFunc func() string  // returns "auto" or "required"; nil defaults to "auto"
+	maxTokens      int           // default max completion tokens (0 = provider default)
+	temperature    *float32      // default temperature (nil = provider default)
+	toolChoiceFunc func() string // returns "auto" or "required"; nil defaults to "auto"
 }
 
 // Option configures a HugrModel.

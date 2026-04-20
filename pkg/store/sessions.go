@@ -1,4 +1,4 @@
-package hubdb
+package store
 
 import (
 	"context"
@@ -8,13 +8,12 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/id"
 )
 
 // CreateSession inserts a new row into hub.db.agent.sessions. Idempotent:
 // if a row with the same ID already exists, returns that ID.
-func (h *hubDB) CreateSession(ctx context.Context, s interfaces.SessionRecord) (string, error) {
+func (h *hubDB) CreateSession(ctx context.Context, s SessionRecord) (string, error) {
 	if s.ID == "" {
 		return "", fmt.Errorf("hubdb: CreateSession requires ID")
 	}
@@ -76,7 +75,7 @@ func (h *hubDB) UpdateSessionStatus(ctx context.Context, id, status string) erro
 
 // ListActiveSessions returns all sessions owned by this agent with
 // status="active". Used by SessionManager.RestoreOpen on startup.
-func (h *hubDB) ListActiveSessions(ctx context.Context) ([]interfaces.SessionRecord, error) {
+func (h *hubDB) ListActiveSessions(ctx context.Context) ([]SessionRecord, error) {
 	type row struct {
 		ID              string         `json:"id"`
 		AgentID         string         `json:"agent_id"`
@@ -106,9 +105,9 @@ func (h *hubDB) ListActiveSessions(ctx context.Context) ([]interfaces.SessionRec
 		}
 		return nil, err
 	}
-	out := make([]interfaces.SessionRecord, 0, len(rows))
+	out := make([]SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, interfaces.SessionRecord{
+		out = append(out, SessionRecord{
 			ID:              r.ID,
 			AgentID:         r.AgentID,
 			OwnerID:         r.OwnerID,
@@ -127,7 +126,7 @@ func (h *hubDB) ListActiveSessions(ctx context.Context) ([]interfaces.SessionRec
 // AppendEvent inserts a row into hub.db.agent.session_events. Computes seq
 // as max(seq)+1 within the session (not transactionally atomic; fine for
 // single-writer-per-session which is how ADK drives sessions).
-func (h *hubDB) AppendEvent(ctx context.Context, ev interfaces.SessionEvent) (string, error) {
+func (h *hubDB) AppendEvent(ctx context.Context, ev SessionEvent) (string, error) {
 	if ev.SessionID == "" {
 		return "", fmt.Errorf("hubdb: AppendEvent requires SessionID")
 	}
@@ -186,7 +185,7 @@ func (h *hubDB) AppendEvent(ctx context.Context, ev interfaces.SessionEvent) (st
 }
 
 // GetEvents returns every event in a session ordered by seq ASC.
-func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]interfaces.SessionEvent, error) {
+func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]SessionEvent, error) {
 	type row struct {
 		ID         string          `json:"id"`
 		SessionID  string          `json:"session_id"`
@@ -218,13 +217,13 @@ func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]interfaces.S
 		}
 		return nil, err
 	}
-	out := make([]interfaces.SessionEvent, 0, len(rows))
+	out := make([]SessionEvent, 0, len(rows))
 	for _, r := range rows {
 		var toolArgs map[string]any
 		if len(r.ToolArgs) > 0 {
 			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
 		}
-		out = append(out, interfaces.SessionEvent{
+		out = append(out, SessionEvent{
 			ID:         r.ID,
 			SessionID:  r.SessionID,
 			AgentID:    r.AgentID,
@@ -244,7 +243,7 @@ func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]interfaces.S
 
 // GetSession fetches a single session row. Returns (nil, nil) when
 // the session is not found.
-func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.SessionRecord, error) {
+func (h *hubDB) GetSession(ctx context.Context, id string) (*SessionRecord, error) {
 	type row struct {
 		ID              string         `json:"id"`
 		AgentID         string         `json:"agent_id"`
@@ -278,7 +277,7 @@ func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.SessionR
 		return nil, nil
 	}
 	r := rows[0]
-	return &interfaces.SessionRecord{
+	return &SessionRecord{
 		ID:              r.ID,
 		AgentID:         r.AgentID,
 		OwnerID:         r.OwnerID,
@@ -294,7 +293,7 @@ func (h *hubDB) GetSession(ctx context.Context, id string) (*interfaces.SessionR
 
 // ListChildSessions returns every session whose parent_session_id
 // matches parentSessionID. Empty slice when none exist.
-func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]interfaces.SessionRecord, error) {
+func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]SessionRecord, error) {
 	type row struct {
 		ID              string         `json:"id"`
 		AgentID         string         `json:"agent_id"`
@@ -324,9 +323,9 @@ func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) (
 		}
 		return nil, err
 	}
-	out := make([]interfaces.SessionRecord, 0, len(rows))
+	out := make([]SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, interfaces.SessionRecord{
+		out = append(out, SessionRecord{
 			ID:              r.ID,
 			AgentID:         r.AgentID,
 			OwnerID:         r.OwnerID,
@@ -346,7 +345,7 @@ func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) (
 // the session_events_full view, which recursively includes inherited
 // events from the parent chain for forked sessions. Sub-agents (no
 // fork_after_seq) see only their own events.
-func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]interfaces.SessionEventFull, error) {
+func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]SessionEventFull, error) {
 	type row struct {
 		ID         string          `json:"id"`
 		SessionID  string          `json:"session_id"`
@@ -380,14 +379,14 @@ func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]interfac
 		}
 		return nil, err
 	}
-	out := make([]interfaces.SessionEventFull, 0, len(rows))
+	out := make([]SessionEventFull, 0, len(rows))
 	for _, r := range rows {
 		var toolArgs map[string]any
 		if len(r.ToolArgs) > 0 {
 			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
 		}
-		out = append(out, interfaces.SessionEventFull{
-			SessionEvent: interfaces.SessionEvent{
+		out = append(out, SessionEventFull{
+			SessionEvent: SessionEvent{
 				ID:         r.ID,
 				SessionID:  r.SessionID,
 				AgentID:    r.AgentID,
@@ -441,7 +440,7 @@ func (h *hubDB) CountToolCalls(ctx context.Context, sessionID string) (int, erro
 // Caller may supply note.ID; otherwise pkg/id.New(PrefixNote, short)
 // generates one. Session notes are the LLM's scratchpad — they live
 // in the system prompt's fixed part and survive context compaction.
-func (h *hubDB) AddNote(ctx context.Context, note interfaces.SessionNote) (string, error) {
+func (h *hubDB) AddNote(ctx context.Context, note SessionNote) (string, error) {
 	if note.SessionID == "" {
 		return "", fmt.Errorf("hubdb: AddNote requires SessionID")
 	}
@@ -474,7 +473,7 @@ func (h *hubDB) AddNote(ctx context.Context, note interfaces.SessionNote) (strin
 }
 
 // ListNotes returns every note in a session ordered by created_at ASC.
-func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]interfaces.SessionNote, error) {
+func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]SessionNote, error) {
 	type row struct {
 		ID        string `json:"id"`
 		AgentID   string `json:"agent_id"`
@@ -499,9 +498,9 @@ func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]interfaces.S
 		}
 		return nil, err
 	}
-	out := make([]interfaces.SessionNote, 0, len(rows))
+	out := make([]SessionNote, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, interfaces.SessionNote{
+		out = append(out, SessionNote{
 			ID:        r.ID,
 			AgentID:   r.AgentID,
 			SessionID: r.SessionID,
@@ -560,7 +559,7 @@ func (h *hubDB) DeleteSessionNotes(ctx context.Context, sessionID string) (int, 
 // ------------------------------------------------------------
 
 // AddParticipant inserts a session_participants row.
-func (h *hubDB) AddParticipant(ctx context.Context, p interfaces.SessionParticipant) error {
+func (h *hubDB) AddParticipant(ctx context.Context, p SessionParticipant) error {
 	if p.SessionID == "" || p.UserID == "" {
 		return fmt.Errorf("hubdb: AddParticipant requires SessionID + UserID")
 	}
@@ -599,7 +598,7 @@ func (h *hubDB) RemoveParticipant(ctx context.Context, sessionID, userID string)
 }
 
 // ListParticipants returns every participant row for a session.
-func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]interfaces.SessionParticipant, error) {
+func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]SessionParticipant, error) {
 	type row struct {
 		SessionID string  `json:"session_id"`
 		UserID    string  `json:"user_id"`
@@ -624,9 +623,9 @@ func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]inter
 		}
 		return nil, err
 	}
-	out := make([]interfaces.SessionParticipant, 0, len(rows))
+	out := make([]SessionParticipant, 0, len(rows))
 	for _, r := range rows {
-		p := interfaces.SessionParticipant{
+		p := SessionParticipant{
 			SessionID: r.SessionID,
 			UserID:    r.UserID,
 			Role:      r.Role,

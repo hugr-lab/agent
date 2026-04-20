@@ -4,7 +4,7 @@
 // pool and renders the GraphQL SDL. Schema creation, seed data, and migrations
 // live in adapters/hubdb/migrate and run on a direct connection to the DB file
 // before the engine is initialised.
-package hubdb
+package store
 
 import (
 	"context"

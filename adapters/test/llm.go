@@ -91,7 +91,7 @@ func (m *ScriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ 
 			},
 			TurnComplete: true,
 			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-				PromptTokenCount:    100,
+				PromptTokenCount:     100,
 				CandidatesTokenCount: 50,
 			},
 		}, nil)

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 	adksession "google.golang.org/adk/session"
 )
 
@@ -37,7 +37,7 @@ const DefaultBuffer = 1024
 // invoked from any goroutine (including the producer Session), never
 // blocks, and drops events silently when the channel is full.
 type Classifier struct {
-	hub    interfaces.HubDB
+	hub    store.DB
 	logger *slog.Logger
 
 	ch      chan Envelope
@@ -50,7 +50,7 @@ type Classifier struct {
 
 // New constructs a Classifier with the given channel capacity. Pass 0
 // for DefaultBuffer.
-func New(hub interfaces.HubDB, logger *slog.Logger, bufSize int) *Classifier {
+func New(hub store.DB, logger *slog.Logger, bufSize int) *Classifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -143,7 +143,7 @@ func (c *Classifier) handle(ctx context.Context, env Envelope) {
 //   - Every Part carrying a FunctionCall → 1 tool_call row.
 //   - Every Part carrying a FunctionResponse → 1 tool_result row,
 //     with tool_result capped at maxToolResultBytes.
-func Classify(env Envelope) []interfaces.SessionEvent {
+func Classify(env Envelope) []store.SessionEvent {
 	ev := env.Event
 	if ev == nil {
 		return nil
@@ -151,7 +151,7 @@ func Classify(env Envelope) []interfaces.SessionEvent {
 	if ev.Partial {
 		return nil
 	}
-	var rows []interfaces.SessionEvent
+	var rows []store.SessionEvent
 
 	// Function calls / responses first — ADK emits them on both the
 	// user and the agent side of a tool invocation.
@@ -161,8 +161,8 @@ func Classify(env Envelope) []interfaces.SessionEvent {
 				continue
 			}
 			if fc := part.FunctionCall; fc != nil {
-				row := interfaces.SessionEvent{
-					EventType: interfaces.EventTypeToolCall,
+				row := store.SessionEvent{
+					EventType: store.EventTypeToolCall,
 					Author:    nonEmpty(ev.Author, "agent"),
 					ToolName:  fc.Name,
 					ToolArgs:  fc.Args,
@@ -180,8 +180,8 @@ func Classify(env Envelope) []interfaces.SessionEvent {
 				if truncated {
 					meta["truncated"] = true
 				}
-				rows = append(rows, interfaces.SessionEvent{
-					EventType:  interfaces.EventTypeToolResult,
+				rows = append(rows, store.SessionEvent{
+					EventType:  store.EventTypeToolResult,
 					Author:     "tool",
 					ToolName:   fr.Name,
 					ToolResult: body,
@@ -200,8 +200,8 @@ func Classify(env Envelope) []interfaces.SessionEvent {
 	switch {
 	case role == "user" || author == "user":
 		if text != "" {
-			rows = append(rows, interfaces.SessionEvent{
-				EventType: interfaces.EventTypeUserMessage,
+			rows = append(rows, store.SessionEvent{
+				EventType: store.EventTypeUserMessage,
 				Author:    "user",
 				Content:   text,
 			})
@@ -224,8 +224,8 @@ func Classify(env Envelope) []interfaces.SessionEvent {
 			meta["prompt_tokens"] = int(ev.UsageMetadata.PromptTokenCount)
 			meta["completion_tokens"] = int(ev.UsageMetadata.CandidatesTokenCount)
 		}
-		rows = append(rows, interfaces.SessionEvent{
-			EventType: interfaces.EventTypeLLMResponse,
+		rows = append(rows, store.SessionEvent{
+			EventType: store.EventTypeLLMResponse,
 			Author:    nonEmpty(author, "agent"),
 			Content:   text,
 			Metadata:  meta,
@@ -304,6 +304,6 @@ func (c *Classifier) Drain(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
-// notes keeps a reference to interfaces.SessionEvent so we don't lose
+// notes keeps a reference to store.SessionEvent so we don't lose
 // the import (will be used when classification lands).
-var _ = interfaces.SessionEvent{}
+var _ = store.SessionEvent{}

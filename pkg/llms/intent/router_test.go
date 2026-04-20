@@ -64,8 +64,8 @@ type fakeConfig struct {
 
 func (c *fakeConfig) Get(key string) any          { return c.data[key] }
 func (c *fakeConfig) GetString(key string) string { return c.data[key] }
-func (c *fakeConfig) GetInt(key string) int        { return 0 }
-func (c *fakeConfig) OnChange(func())              {}
+func (c *fakeConfig) GetInt(key string) int       { return 0 }
+func (c *fakeConfig) OnChange(func())             {}
 
 func TestRouter_LoadRoutesFromConfig(t *testing.T) {
 	defaultM := &fakeLLM{name: "default"}

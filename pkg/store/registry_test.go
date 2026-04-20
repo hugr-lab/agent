@@ -1,6 +1,6 @@
 //go:build duckdb_arrow
 
-package hubdb_test
+package store_test
 
 import (
 	"context"
@@ -10,14 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/adapters/hubdb"
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 )
 
-func newTestHubDB(t *testing.T, agentID, shortID string) interfaces.HubDB {
+func newTestHubDB(t *testing.T, agentID, shortID string) store.DB {
 	t.Helper()
 	service, _ := testEngine(t)
-	h, err := hubdb.New(service, hubdb.Options{
+	h, err := store.New(service, store.Options{
 		AgentID:    agentID,
 		AgentShort: shortID,
 		Logger:     slog.New(slog.NewTextHandler(discardWriter{}, nil)),
@@ -51,7 +50,7 @@ func TestRegisterAgent_FirstTime(t *testing.T) {
 	h := newTestHubDB(t, "agt_ag01", "ag01")
 	ctx := context.Background()
 
-	err := h.RegisterAgent(ctx, interfaces.Agent{
+	err := h.RegisterAgent(ctx, store.Agent{
 		ID:          "agt_ag02",
 		AgentTypeID: "hugr-data",
 		ShortID:     "ag02",
@@ -76,7 +75,7 @@ func TestRegisterAgent_Idempotent(t *testing.T) {
 	originalCreatedAt := first.CreatedAt
 
 	// Second register refreshes config_override + last_active, keeps created_at.
-	require.NoError(t, h.RegisterAgent(ctx, interfaces.Agent{
+	require.NoError(t, h.RegisterAgent(ctx, store.Agent{
 		ID:             "agt_ag01",
 		AgentTypeID:    "hugr-data",
 		ShortID:        "ag01",

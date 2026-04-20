@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -17,7 +18,7 @@ import (
 //
 // Each tool resolves its session from tool.Context and delegates to
 // HubDB. The suite itself is stateless.
-func NewMemorySuite(sm interfaces.SessionManager, hub interfaces.HubDB) []tool.Tool {
+func NewMemorySuite(sm interfaces.SessionManager, hub store.DB) []tool.Tool {
 	if hub == nil {
 		return nil
 	}
@@ -36,7 +37,7 @@ func NewMemorySuite(sm interfaces.SessionManager, hub interfaces.HubDB) []tool.T
 
 type memorySearchTool struct {
 	sm  interfaces.SessionManager
-	hub interfaces.HubDB
+	hub store.DB
 }
 
 func (t *memorySearchTool) Name() string { return "memory_search" }
@@ -102,7 +103,7 @@ func (t *memorySearchTool) Run(ctx tool.Context, args any) (map[string]any, erro
 			limit = 20
 		}
 	}
-	results, err := t.hub.Search(ctx, query, nil, interfaces.SearchOpts{
+	results, err := t.hub.Search(ctx, query, nil, store.SearchOpts{
 		Category: category,
 		Tags:     tags,
 		Limit:    limit,
@@ -120,7 +121,7 @@ func (t *memorySearchTool) Run(ctx tool.Context, args any) (map[string]any, erro
 
 type memoryLinkedTool struct {
 	sm  interfaces.SessionManager
-	hub interfaces.HubDB
+	hub store.DB
 }
 
 func (t *memoryLinkedTool) Name() string { return "memory_linked" }
@@ -179,7 +180,7 @@ func (t *memoryLinkedTool) Run(ctx tool.Context, args any) (map[string]any, erro
 
 type memoryStatsTool struct {
 	sm  interfaces.SessionManager
-	hub interfaces.HubDB
+	hub store.DB
 }
 
 func (t *memoryStatsTool) Name() string { return "memory_stats" }
@@ -212,7 +213,7 @@ func (t *memoryStatsTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 
 type memoryNoteTool struct {
 	sm  interfaces.SessionManager
-	hub interfaces.HubDB
+	hub store.DB
 }
 
 func (t *memoryNoteTool) Name() string { return "memory_note" }
@@ -256,7 +257,7 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	if sid == "" {
 		return nil, fmt.Errorf("memory_note: no session id in tool context")
 	}
-	id, err := t.hub.AddNote(ctx, interfaces.SessionNote{
+	id, err := t.hub.AddNote(ctx, store.SessionNote{
 		SessionID: sid, Content: content,
 	})
 	if err != nil {
@@ -277,7 +278,7 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 
 type memoryClearNoteTool struct {
 	sm  interfaces.SessionManager
-	hub interfaces.HubDB
+	hub store.DB
 }
 
 func (t *memoryClearNoteTool) Name() string { return "memory_clear_note" }

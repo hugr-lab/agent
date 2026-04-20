@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/pkg/config"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/learning"
 	"github.com/hugr-lab/hugen/pkg/llms/intent"
 	"github.com/hugr-lab/hugen/pkg/models/hugr"
@@ -20,6 +20,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/classifier"
 	"github.com/hugr-lab/hugen/pkg/skills"
+	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	qe "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
@@ -36,7 +37,7 @@ type agentRuntime struct {
 	agent      agent.Agent
 	hugrClient *client.Client
 	engine     *qe.Service // nil in hub mode
-	hubDB      interfaces.HubDB
+	hubDB      store.DB
 	sessions   interfaces.SessionManager
 	tools      *tools.Manager
 	skills     skills.Manager
@@ -422,7 +423,7 @@ func buildRuntime(
 // migration) and upserts the agents row with the current
 // config_override. Runs only in local mode — in hub mode the hub owns
 // registration.
-func registerAgentInstance(ctx context.Context, cfg *config.Config, hub interfaces.HubDB, logger *slog.Logger) error {
+func registerAgentInstance(ctx context.Context, cfg *config.Config, hub store.DB, logger *slog.Logger) error {
 	at, err := hub.GetAgentType(ctx, cfg.Identity.Type)
 	if err != nil {
 		return fmt.Errorf("get agent_type %q: %w", cfg.Identity.Type, err)
@@ -436,7 +437,7 @@ func registerAgentInstance(ctx context.Context, cfg *config.Config, hub interfac
 		"embedding": cfg.Embedding,
 		"memory":    cfg.Memory,
 	}
-	if err := hub.RegisterAgent(ctx, interfaces.Agent{
+	if err := hub.RegisterAgent(ctx, store.Agent{
 		ID:             cfg.Identity.ID,
 		AgentTypeID:    cfg.Identity.Type,
 		ShortID:        cfg.Identity.ShortID,
