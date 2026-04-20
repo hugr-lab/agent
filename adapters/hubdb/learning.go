@@ -55,7 +55,7 @@ func (h *hubDB) CreateHypothesis(ctx context.Context, hyp interfaces.Hypothesis)
 		"estimated_calls": hyp.EstimatedCalls,
 	}
 	if hyp.SourceSession != "" {
-		data["source_session"] = hyp.SourceSession
+		data["source_session_id"] = hyp.SourceSession
 	}
 	if err := runMutation(ctx, h.querier,
 		`mutation ($data: hub_db_hypotheses_mut_input_data!) {
@@ -92,7 +92,7 @@ func (h *hubDB) ListPendingHypotheses(ctx context.Context, priority string, limi
 		Priority       string `json:"priority"`
 		Verification   string `json:"verification"`
 		EstimatedCalls int    `json:"estimated_calls"`
-		SourceSession  string `json:"source_session"`
+		SourceSession  string `json:"source_session_id"`
 		CreatedAt      dbTime `json:"created_at"`
 	}
 	rows, err := runQuery[[]row](ctx, h.querier,
@@ -100,7 +100,7 @@ func (h *hubDB) ListPendingHypotheses(ctx context.Context, priority string, limi
 			hub { db { agent {
 				hypotheses(filter: $filter, limit: $limit, order_by: [{field: "created_at", direction: ASC}]) {
 					id agent_id content category status priority verification
-					estimated_calls source_session created_at
+					estimated_calls source_session_id created_at
 				}
 			}}}
 		}`,
@@ -164,7 +164,7 @@ func (h *hubDB) hypothesisReplace(ctx context.Context, hypID string, mutate func
 		"estimated_calls": current.EstimatedCalls,
 	}
 	if current.SourceSession != "" {
-		data["source_session"] = current.SourceSession
+		data["source_session_id"] = current.SourceSession
 	}
 	if current.CheckedAt != nil {
 		data["checked_at"] = current.CheckedAt.UTC().Format(time.RFC3339)
@@ -195,7 +195,7 @@ func (h *hubDB) getHypothesis(ctx context.Context, hypID string) (*interfaces.Hy
 		Priority       string  `json:"priority"`
 		Verification   string  `json:"verification"`
 		EstimatedCalls int     `json:"estimated_calls"`
-		SourceSession  string  `json:"source_session"`
+		SourceSession  string  `json:"source_session_id"`
 		CreatedAt      dbTime  `json:"created_at"`
 		CheckedAt      *dbTime `json:"checked_at"`
 		Result         string  `json:"result"`
@@ -206,7 +206,7 @@ func (h *hubDB) getHypothesis(ctx context.Context, hypID string) (*interfaces.Hy
 			hub { db { agent {
 				hypotheses(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
 					id agent_id content category status priority verification
-					estimated_calls source_session created_at checked_at result fact_id
+					estimated_calls source_session_id created_at checked_at result fact_id
 				}
 			}}}
 		}`,
