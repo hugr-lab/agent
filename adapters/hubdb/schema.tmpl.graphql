@@ -234,11 +234,13 @@ type hypotheses @table(name: "hypotheses") @module(name: "agent") {
   """Expected number of tool calls to verify"""
   estimated_calls: Int     @default(value: "3")
   """Session that spawned this hypothesis"""
-  source_session:  String  @field_references(
+  source_session_id: String @field_source(field: "source_session") @field_references(
     references_name: "sessions"
     field: "id"
     query: "source_session"
     description: "Session where this hypothesis was identified"
+    references_query: "hypotheses"
+    references_description: "Hypotheses that originated from this session"
   )
   """When created"""
   created_at:      Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
