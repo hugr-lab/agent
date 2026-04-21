@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/store"
 )
 
@@ -20,7 +20,7 @@ import (
 // sub-agent with richer tool access.
 type Verifier struct {
 	hub    store.DB
-	router *intent.Router
+	router *models.Router
 	logger *slog.Logger
 
 	// volatility maps a volatility label to duration used when storing
@@ -34,7 +34,7 @@ type Verifier struct {
 // VerifierOptions bundles verifier construction parameters.
 type VerifierOptions struct {
 	Hub        store.DB
-	Router     *intent.Router
+	Router     *models.Router
 	Logger     *slog.Logger
 	Volatility map[string]time.Duration
 }
@@ -86,7 +86,7 @@ func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
 	}
 
 	prompt := v.buildPrompt(h)
-	llm := v.router.ModelFor(intent.IntentToolCalling)
+	llm := v.router.ModelFor(models.IntentToolCalling)
 	raw, _, err := runOnce(ctx, llm, prompt)
 	if err != nil {
 		_ = v.hub.DeferHypothesis(ctx, h.ID)

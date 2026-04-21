@@ -1,4 +1,4 @@
-package hugr
+package models
 
 import (
 	"testing"

@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/store"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -28,8 +28,8 @@ import (
 //     how many turns were summarised.
 type Compactor struct {
 	hub             store.DB
-	router          *intent.Router
-	tokens          *TokenEstimator
+	router          *models.Router
+	tokens          *models.TokenEstimator
 	threshold       float64
 	minTurns        int
 	logger          *slog.Logger
@@ -39,8 +39,8 @@ type Compactor struct {
 // CompactorOptions bundles compactor construction parameters.
 type CompactorOptions struct {
 	Hub       store.DB
-	Router    *intent.Router
-	Tokens    *TokenEstimator
+	Router    *models.Router
+	Tokens    *models.TokenEstimator
 	Threshold float64 // default 0.70
 	MinTurns  int     // minimum turn groups retained after compaction; default 4
 	Logger    *slog.Logger
@@ -61,7 +61,7 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 		return nil, fmt.Errorf("learning: Compactor requires Router")
 	}
 	if opts.Tokens == nil {
-		opts.Tokens = NewTokenEstimator()
+		opts.Tokens = models.NewTokenEstimator()
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -227,13 +227,13 @@ func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merg
 		}
 		b.WriteString("\n")
 	}
-	llm := c.router.ModelFor(intent.IntentSummarization)
+	llm := c.router.ModelFor(models.IntentSummarization)
 	out, _, err := runOnce(ctx, llm, b.String())
 	return out, err
 }
 
 // usageRatio estimates how close the current req.Contents is to the
-// model's context budget. Uses the calibrated TokenEstimator on a
+// model's context budget. Uses the calibrated models.TokenEstimator on a
 // concatenated string view — heuristic, good enough to trigger
 // compaction without reaching for a precise tokenizer.
 func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {

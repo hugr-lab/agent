@@ -10,8 +10,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/learning"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -21,7 +20,7 @@ import (
 // Config bundles agent dependencies.
 type Config struct {
 	// Router is the intent-based LLM router.
-	Router *intent.Router
+	Router *models.Router
 
 	// Sessions provides per-invocation Snapshot (prompt + tools) and
 	// session lifecycle. Required.
@@ -29,7 +28,7 @@ type Config struct {
 
 	// Tokens is the calibrateable estimator used by the AfterModelCallback
 	// to track context usage per session. Optional.
-	Tokens *learning.TokenEstimator
+	Tokens *models.TokenEstimator
 
 	// ExtraBeforeCallbacks are appended to the BeforeModelCallbacks
 	// chain after tools.Inject. Order matters: the runtime ships with

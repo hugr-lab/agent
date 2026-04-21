@@ -1,4 +1,4 @@
-package hugr
+package models
 
 import (
 	"context"
@@ -87,7 +87,7 @@ func WithToolChoiceFunc(f func() string) Option {
 // New creates a new HugrModel.
 //   - c: Hugr Go client connection
 //   - hugrModel: Hugr data source name (e.g. "gemma4-26b")
-func New(c *client.Client, hugrModel string, opts ...Option) *HugrModel {
+func NewHugr(c *client.Client, hugrModel string, opts ...Option) *HugrModel {
 	m := &HugrModel{
 		name:      "hugr-model",
 		hugrModel: hugrModel,

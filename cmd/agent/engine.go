@@ -61,7 +61,7 @@ func buildLocalEngine(ctx context.Context, cfg *config.Config, logger *slog.Logg
 		}),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("hugr.New: %w", err)
+		return nil, fmt.Errorf("models.NewHugr: %w", err)
 	}
 
 	source := store.NewSource(store.Config{

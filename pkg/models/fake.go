@@ -1,5 +1,5 @@
 // Package test provides deterministic adapters for testing.
-package test
+package models
 
 import (
 	"context"

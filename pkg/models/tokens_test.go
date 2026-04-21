@@ -1,4 +1,4 @@
-package learning
+package models
 
 import (
 	"testing"

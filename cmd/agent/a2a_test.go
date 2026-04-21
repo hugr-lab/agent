@@ -13,10 +13,8 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
-	testadapters "github.com/hugr-lab/hugen/adapters/test"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
-	"github.com/hugr-lab/hugen/pkg/learning"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
@@ -170,15 +168,15 @@ func writeTestSkills(t *testing.T, specs map[string]string) string {
 
 // testHugrAgentConfig configures startTestHugrAgent.
 type testHugrAgentConfig struct {
-	llm          *testadapters.ScriptedLLM
+	llm          *models.ScriptedLLM
 	constitution string
 	skillsDir    string // optional; if set, used for skills.NewFileManager
-	tokens       *learning.TokenEstimator
+	tokens       *models.TokenEstimator
 }
 
 // startTestHugrAgent builds the full HugrAgent stack (skills + tools +
 // session + agent) for tests and returns an a2aclient.Client.
-func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitution string) *a2aclient.Client {
+func startTestHugrAgent(t *testing.T, llm *models.ScriptedLLM, constitution string) *a2aclient.Client {
 	t.Helper()
 	client, _ := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
 		llm:          llm,
@@ -187,7 +185,7 @@ func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitutio
 	return client
 }
 
-func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *learning.TokenEstimator) {
+func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *models.TokenEstimator) {
 	t.Helper()
 	logger := slog.Default()
 
@@ -216,10 +214,10 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	tokens := cfg.tokens
 	if tokens == nil {
-		tokens = learning.NewTokenEstimator()
+		tokens = models.NewTokenEstimator()
 	}
 
-	router := intent.NewRouter(cfg.llm)
+	router := models.NewRouter(cfg.llm)
 	a, err := hugen.NewAgent(hugen.Config{
 		Router:   router,
 		Sessions: sessionMgr,
@@ -250,7 +248,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 }
 
 func TestHugrAgent_SendMessage(t *testing.T) {
-	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
+	llm := models.NewScriptedLLM("test", []models.ScriptedResponse{
 		{Content: "Hello from HugrAgent!"},
 	})
 	client := startTestHugrAgent(t, llm, "You are a test agent.")
@@ -282,7 +280,7 @@ func TestHugrAgent_SendMessage(t *testing.T) {
 }
 
 func TestHugrAgent_TokenCalibration(t *testing.T) {
-	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
+	llm := models.NewScriptedLLM("test", []models.ScriptedResponse{
 		{Content: "Calibrated response"},
 	})
 	client, tokens := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
@@ -307,9 +305,9 @@ func TestHugrAgent_TokenCalibration(t *testing.T) {
 
 func TestHugrAgent_SkillLifecycle(t *testing.T) {
 	// Scripted LLM: turn 1 → skill_list, turn 2 → skill_load, turn 3 → final.
-	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
-		{ToolCalls: []testadapters.ScriptedToolCall{{Name: "skill_list", Args: map[string]any{}}}},
-		{ToolCalls: []testadapters.ScriptedToolCall{{Name: "skill_load", Args: map[string]any{"name": "test-data"}}}},
+	llm := models.NewScriptedLLM("test", []models.ScriptedResponse{
+		{ToolCalls: []models.ScriptedToolCall{{Name: "skill_list", Args: map[string]any{}}}},
+		{ToolCalls: []models.ScriptedToolCall{{Name: "skill_load", Args: map[string]any{"name": "test-data"}}}},
 		{Content: "I loaded the test-data skill and I'm ready to help."},
 	})
 

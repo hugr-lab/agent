@@ -12,8 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/learning"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/models/hugr"
+	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/providers"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/sessions"
@@ -105,11 +104,11 @@ func (r *agentRuntime) close(logger *slog.Logger) {
 // hugr LLM client, router, skills/tools managers, constitution.
 type buildComponents struct {
 	hugrClient   *client.Client
-	router       *intent.Router
+	router       *models.Router
 	skills       skills.Manager
 	tools        *tools.Manager
 	constitution string
-	tokens       *learning.TokenEstimator
+	tokens       *models.TokenEstimator
 }
 
 func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger, hugrTransport http.RoundTripper) (*buildComponents, error) {
@@ -125,21 +124,21 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
 	}
 
-	llmOpts := []hugr.Option{
-		hugr.WithLogger(logger),
-		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
-		hugr.WithToolChoiceFunc(func() string { return "auto" }),
+	llmOpts := []models.Option{
+		models.WithLogger(logger),
+		models.WithMaxTokens(cfg.Agent.MaxTokens),
+		models.WithToolChoiceFunc(func() string { return "auto" }),
 	}
 	if cfg.Agent.Temperature > 0 {
-		llmOpts = append(llmOpts, hugr.WithTemperature(cfg.Agent.Temperature))
+		llmOpts = append(llmOpts, models.WithTemperature(cfg.Agent.Temperature))
 	}
-	llm := hugr.New(hugrClient, cfg.Agent.Model, llmOpts...)
+	llm := models.NewHugr(hugrClient, cfg.Agent.Model, llmOpts...)
 
-	router := intent.NewRouter(llm).WithLogger(logger)
+	router := models.NewRouter(llm).WithLogger(logger)
 	for intentName, modelName := range cfg.LLM.Routes {
-		router.SetRoute(intent.Intent(intentName), hugr.New(hugrClient, modelName,
-			hugr.WithLogger(logger),
-			hugr.WithMaxTokens(cfg.Agent.MaxTokens),
+		router.SetRoute(models.Intent(intentName), models.NewHugr(hugrClient, modelName,
+			models.WithLogger(logger),
+			models.WithMaxTokens(cfg.Agent.MaxTokens),
 		))
 		logger.Info("intent route configured", "intent", intentName, "model", modelName)
 	}
@@ -165,7 +164,7 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		skills:       skillsMgr,
 		tools:        toolsMgr,
 		constitution: string(constitution),
-		tokens:       learning.NewTokenEstimator(),
+		tokens:       models.NewTokenEstimator(),
 	}, nil
 }
 

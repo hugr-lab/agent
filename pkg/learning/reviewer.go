@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
+	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -21,7 +21,7 @@ import (
 // session is a no-op.
 type Reviewer struct {
 	hub    store.DB
-	router *intent.Router
+	router *models.Router
 	logger *slog.Logger
 
 	// Injected merged memory config — reviewer needs it to know which
@@ -49,7 +49,7 @@ type Reviewer struct {
 // ReviewerOptions bundle reviewer construction parameters.
 type ReviewerOptions struct {
 	Hub        store.DB
-	Router     *intent.Router
+	Router     *models.Router
 	Logger     *slog.Logger
 	Config     MergedConfig
 	Volatility map[string]time.Duration
@@ -147,7 +147,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	notes, _ := r.hub.ListNotes(ctx, sessionID) // best-effort; notes are optional
 	prompt := r.buildPrompt(events, notes, merged)
 
-	llm := r.router.ModelFor(intent.IntentSummarization)
+	llm := r.router.ModelFor(models.IntentSummarization)
 	rawOutput, usage, err := runOnce(ctx, llm, prompt)
 	if err != nil {
 		_ = r.hub.FailReview(ctx, reviewID, err.Error())
