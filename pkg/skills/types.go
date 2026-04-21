@@ -5,7 +5,7 @@
 // skill_load.
 package skills
 
-import "github.com/hugr-lab/hugen/pkg/learning"
+import "github.com/hugr-lab/hugen/pkg/memory"
 
 // SkillMeta is a compact catalog entry for prompt injection (~50 tokens per skill).
 type SkillMeta struct {
@@ -43,7 +43,7 @@ type Skill struct {
 	// optional memory.yaml file adjacent to SKILL.md. Nil when the
 	// file is absent or malformed — the reviewer/compactor then
 	// fall back to agent-level defaults.
-	Memory *learning.SkillMemoryConfig
+	Memory *memory.SkillMemoryConfig
 }
 
 // SkillProviderSpec is one tool-source binding declared by a skill.

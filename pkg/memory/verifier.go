@@ -1,4 +1,4 @@
-package learning
+package memory
 
 import (
 	"context"
@@ -87,7 +87,7 @@ func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
 
 	prompt := v.buildPrompt(h)
 	llm := v.router.ModelFor(models.IntentToolCalling)
-	raw, _, err := runOnce(ctx, llm, prompt)
+	raw, _, err := RunOnce(ctx, llm, prompt)
 	if err != nil {
 		_ = v.hub.DeferHypothesis(ctx, h.ID)
 		return fmt.Errorf("learning: LLM: %w", err)

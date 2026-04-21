@@ -8,5 +8,5 @@
 //
 // Dependencies flow inward: the SessionManager publishes work via
 // QueueReview, and the scheduler reads from HubDB + invokes functions
-// in pkg/learning. Scheduler itself does not depend on pkg/session.
+// in pkg/memory. Scheduler itself does not depend on pkg/session.
 package scheduler

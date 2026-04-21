@@ -1,4 +1,4 @@
-package learning
+package memory
 
 import (
 	"context"
@@ -148,7 +148,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	prompt := r.buildPrompt(events, notes, merged)
 
 	llm := r.router.ModelFor(models.IntentSummarization)
-	rawOutput, usage, err := runOnce(ctx, llm, prompt)
+	rawOutput, usage, err := RunOnce(ctx, llm, prompt)
 	if err != nil {
 		_ = r.hub.FailReview(ctx, reviewID, err.Error())
 		return fmt.Errorf("learning: LLM: %w", err)
@@ -424,7 +424,7 @@ func parseReviewOutput(raw string) (reviewOutput, error) {
 // helpers
 // ------------------------------------------------------------
 
-func runOnce(ctx context.Context, llm model.LLM, prompt string) (string, int, error) {
+func RunOnce(ctx context.Context, llm model.LLM, prompt string) (string, int, error) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{
 			Role:  "user",

@@ -1,4 +1,4 @@
-package learning
+package chatcontext
 
 import (
 	"testing"

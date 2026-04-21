@@ -32,12 +32,12 @@ type Config struct {
 
 	// ExtraBeforeCallbacks are appended to the BeforeModelCallbacks
 	// chain after tools.Inject. Order matters: the runtime ships with
-	// [tools.Inject, learning.Compactor.Before], ensuring the compactor
+	// [tools.Inject, chatcontext.Compactor.Before], ensuring the compactor
 	// operates on a tools-aware request and runs last before the model.
 	ExtraBeforeCallbacks []llmagent.BeforeModelCallback
 
 	// InstructionProvider overrides the default `Session.Snapshot().Prompt`
-	// provider. Runtime uses learning.WrapInstruction to append a
+	// provider. Runtime uses memory.WrapInstruction to append a
 	// "## Memory Status" block on top of the session's base prompt.
 	// When nil, the default (state-only Snapshot prompt) is used.
 	InstructionProvider llmagent.InstructionProvider
@@ -97,7 +97,7 @@ func NewAgent(cfg Config) (agent.Agent, error) {
 
 // BaseInstructionProvider returns the default instruction provider:
 // reads the current session's Snapshot().Prompt. Exposed so the
-// runtime can wrap it (e.g. learning.WrapInstruction for the memory
+// runtime can wrap it (e.g. memory.WrapInstruction for the memory
 // status hint) before handing the composed provider back via
 // Config.InstructionProvider.
 func BaseInstructionProvider(sm *sessions.Manager) llmagent.InstructionProvider {

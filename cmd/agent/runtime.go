@@ -10,8 +10,9 @@ import (
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/chatcontext"
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/learning"
+	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/providers"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
@@ -41,18 +42,18 @@ type agentRuntime struct {
 
 	classifier *sessions.Classifier
 	scheduler  *scheduler.Scheduler
-	compactor  *learning.Compactor
+	compactor  *chatcontext.Compactor
 	bgCtx      context.Context
 	bgCancel   context.CancelFunc
 }
 
-// onDemandCompactor adapts learning.Compactor to the
+// onDemandCompactor adapts chatcontext.Compactor to the
 // tool.Context-based `system.OnDemandCompactor` interface consumed by
 // the context_compress tool. It re-uses the compactor's Before
 // callback but synthesises a minimal LLMRequest — the tool call has
 // no request of its own, and its intent is purely to nudge the
 // compactor (the next turn will re-evaluate properly).
-type onDemandCompactor struct{ c *learning.Compactor }
+type onDemandCompactor struct{ c *chatcontext.Compactor }
 
 func (o *onDemandCompactor) Compact(ctx tool.Context) error {
 	// Without a live LLMRequest the compactor can only emit a
@@ -270,7 +271,7 @@ func buildRuntime(
 	// start after we're confident buildRuntime won't fail.
 	cls := sessions.NewClassifier(hub, logger, sessions.DefaultClassifierBuffer)
 
-	loadSkillMemory := func(ctx context.Context, name string) (*learning.SkillMemoryConfig, error) {
+	loadSkillMemory := func(ctx context.Context, name string) (*memory.SkillMemoryConfig, error) {
 		sk, err := components.skills.Load(ctx, name)
 		if err != nil || sk == nil {
 			return nil, err
@@ -278,7 +279,7 @@ func buildRuntime(
 		return sk.Memory, nil
 	}
 
-	reviewer, err := learning.NewReviewer(learning.ReviewerOptions{
+	reviewer, err := memory.NewReviewer(memory.ReviewerOptions{
 		Hub:             hub,
 		Router:          components.router,
 		Logger:          logger,
@@ -291,7 +292,7 @@ func buildRuntime(
 	}
 
 	threshold := cfg.Memory.CompactionThreshold
-	compactor, err := learning.NewCompactor(learning.CompactorOptions{
+	compactor, err := chatcontext.NewCompactor(chatcontext.CompactorOptions{
 		Hub:             hub,
 		Router:          components.router,
 		Tokens:          components.tokens,
@@ -304,7 +305,7 @@ func buildRuntime(
 		return nil, fmt.Errorf("build compactor: %w", err)
 	}
 
-	verifier, err := learning.NewVerifier(learning.VerifierOptions{
+	verifier, err := memory.NewVerifier(memory.VerifierOptions{
 		Hub:        hub,
 		Router:     components.router,
 		Logger:     logger,
@@ -315,7 +316,7 @@ func buildRuntime(
 		return nil, fmt.Errorf("build verifier: %w", err)
 	}
 
-	consolidator, err := learning.NewConsolidator(learning.ConsolidatorOptions{
+	consolidator, err := memory.NewConsolidator(memory.ConsolidatorOptions{
 		Hub:              hub,
 		HypothesisExpiry: cfg.Memory.Consolidation.HypothesisExpiry,
 		Logger:           logger,
@@ -385,7 +386,7 @@ func buildRuntime(
 		return nil, err
 	}
 
-	instruction := learning.WrapInstruction(
+	instruction := memory.WrapInstruction(
 		hugen.BaseInstructionProvider(sessionMgr), hub)
 
 	a, err := hugen.NewAgent(hugen.Config{

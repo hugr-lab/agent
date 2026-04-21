@@ -16,4 +16,4 @@
 // functions from this package. Keeping the direction one-way avoids
 // import cycles and keeps background work independent of any single
 // conversation's lifetime.
-package learning
+package memory

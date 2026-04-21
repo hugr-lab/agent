@@ -1,4 +1,4 @@
-package learning
+package memory
 
 import "log/slog"
 
@@ -132,7 +132,7 @@ func MergeWithLogger(configs []NamedConfig, logger *slog.Logger) MergedConfig {
 		for name, cat := range nc.Config.Categories {
 			if first, dup := origin[name]; dup {
 				if logger != nil {
-					logger.Warn("learning.Merge: category collision",
+					logger.Warn("memory.Merge: category collision",
 						"category", name, "winner", first, "loser", nc.Name)
 				}
 				continue

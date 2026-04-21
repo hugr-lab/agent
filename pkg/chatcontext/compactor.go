@@ -1,4 +1,4 @@
-package learning
+package chatcontext
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/store"
 	adkagent "google.golang.org/adk/agent"
@@ -33,7 +34,7 @@ type Compactor struct {
 	threshold       float64
 	minTurns        int
 	logger          *slog.Logger
-	loadSkillMemory func(ctx context.Context, skillName string) (*SkillMemoryConfig, error)
+	loadSkillMemory func(ctx context.Context, skillName string) (*memory.SkillMemoryConfig, error)
 }
 
 // CompactorOptions bundles compactor construction parameters.
@@ -49,7 +50,7 @@ type CompactorOptions struct {
 	// by name. When set, the compactor uses the session's active
 	// skills' compaction hints (preserve / discard). When nil, the
 	// summary prompt stays generic.
-	LoadSkillMemory func(ctx context.Context, skillName string) (*SkillMemoryConfig, error)
+	LoadSkillMemory func(ctx context.Context, skillName string) (*memory.SkillMemoryConfig, error)
 }
 
 // NewCompactor constructs a Compactor.
@@ -179,7 +180,7 @@ func (c *Compactor) carriesFunctionResponse(ct *genai.Content) bool {
 // groups serialised as plain text. Keeps the prompt small — the
 // reviewer gets the full transcript anyway, this is only about
 // context relief.
-func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merged MergedConfig) (string, error) {
+func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merged memory.MergedConfig) (string, error) {
 	var b strings.Builder
 	b.WriteString("Summarise the following conversation turns into a short paragraph (≤ 150 words). ")
 	if len(merged.CompactPreserve) > 0 {
@@ -228,7 +229,7 @@ func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merg
 		b.WriteString("\n")
 	}
 	llm := c.router.ModelFor(models.IntentSummarization)
-	out, _, err := runOnce(ctx, llm, b.String())
+	out, _, err := memory.RunOnce(ctx, llm, b.String())
 	return out, err
 }
 
@@ -269,15 +270,15 @@ func (c *Compactor) Callback() llmagent.BeforeModelCallback {
 
 // mergedHints returns the merged compaction hints (preserve / discard)
 // for the session's active skills. When no hub/loader are wired, or
-// the session has no transcript, returns a zero-value MergedConfig so
+// the session has no transcript, returns a zero-value memory.MergedConfig so
 // summarise uses its built-in defaults.
-func (c *Compactor) mergedHints(ctx context.Context, sid string) MergedConfig {
+func (c *Compactor) mergedHints(ctx context.Context, sid string) memory.MergedConfig {
 	if c.loadSkillMemory == nil || c.hub == nil || sid == "" {
-		return MergedConfig{}
+		return memory.MergedConfig{}
 	}
 	events, err := c.hub.GetEvents(ctx, sid)
 	if err != nil {
-		return MergedConfig{}
+		return memory.MergedConfig{}
 	}
 	active := map[string]struct{}{}
 	for _, ev := range events {
@@ -291,17 +292,17 @@ func (c *Compactor) mergedHints(ctx context.Context, sid string) MergedConfig {
 		}
 	}
 	if len(active) == 0 {
-		return MergedConfig{}
+		return memory.MergedConfig{}
 	}
-	configs := make([]NamedConfig, 0, len(active))
+	configs := make([]memory.NamedConfig, 0, len(active))
 	for name := range active {
 		cfg, err := c.loadSkillMemory(ctx, name)
 		if err != nil {
 			continue
 		}
-		configs = append(configs, NamedConfig{Name: name, Config: cfg})
+		configs = append(configs, memory.NamedConfig{Name: name, Config: cfg})
 	}
-	return MergeWithLogger(configs, c.logger)
+	return memory.MergeWithLogger(configs, c.logger)
 }
 
 // skillNameFromSessionEvent is the SessionEvent counterpart to
