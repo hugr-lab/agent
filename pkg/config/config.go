@@ -1,4 +1,12 @@
-// Package config provides application configuration loaded from environment and config.yaml.
+// Package config composes YAML-shaped sub-configs owned by their
+// domain packages into a single Config loaded from .env + config.yaml.
+//
+// pkg/config does not own domain types — each sub-config (memory,
+// chatcontext, skills, models, a2a, devui, agent, tools, store/local)
+// is declared in its owner package and referenced here via
+// composition. The only types still owned by pkg/config are
+// cross-cutting (HugrConfig — platform connection, AuthConfig —
+// pending separate refactor).
 package config
 
 import (
@@ -9,34 +17,45 @@ import (
 
 	"github.com/spf13/viper"
 
+	agentcfg "github.com/hugr-lab/hugen/pkg/agent"
+	a2acfg "github.com/hugr-lab/hugen/pkg/a2a"
+	chatcontextcfg "github.com/hugr-lab/hugen/pkg/chatcontext"
+	devuicfg "github.com/hugr-lab/hugen/pkg/devui"
+	memorycfg "github.com/hugr-lab/hugen/pkg/memory"
+	modelscfg "github.com/hugr-lab/hugen/pkg/models"
+	skillscfg "github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store/local"
+	toolscfg "github.com/hugr-lab/hugen/pkg/tools"
 )
 
-// Config holds all application configuration.
-//
-// Identity and Embedding reuse types from pkg/store/local — defining
-// them there keeps the composition (Config → local.Config via
-// LocalDB) cycle-free. Semantically they are global (used by both
-// local and remote modes); the physical location is a cycle-
-// avoidance detail.
+// Config is the application configuration: pure composition of
+// domain-owned sub-configs.
 type Config struct {
 	Hugr           HugrConfig
-	Agent          AgentConfig
 	Identity       local.Identity
 	Embedding      local.EmbeddingConfig
 	LocalDBEnabled bool
 	LocalDB        local.Config
-	Memory         MemoryConfig
-	LLM            LLMConfig
-	MCP            MCPConfig
-	Auth           []AuthConfig
-	Providers      []ProviderConfig
+
+	Agent       agentcfg.Config
+	Skills      skillscfg.Config
+	A2A         a2acfg.Config
+	DevUI       devuicfg.Config
+	LLM         modelscfg.Config
+	Memory      memorycfg.Config
+	ChatContext chatcontextcfg.Config
+	MCP         toolscfg.MCPConfig
+
+	Auth      []AuthConfig
+	Providers []toolscfg.ProviderConfig
 }
 
 // AuthConfig declares a named auth mechanism. Callers build a
 // TokenStore per config and mount any required HTTP callback routes on
 // the given mux. callback_path must be unique across all OIDC entries
 // in the same process.
+//
+// Remains in pkg/config pending a separate auth-focused refactor.
 type AuthConfig struct {
 	Name         string `mapstructure:"name"`
 	Type         string `mapstructure:"type"` // hugr | oidc
@@ -48,104 +67,14 @@ type AuthConfig struct {
 	TokenURL     string `mapstructure:"token_url"`
 }
 
-// ProviderConfig declares a tools.Provider instance built at startup.
-// The `type` picks a builder registered in pkg/providers; the rest of
-// the fields are type-specific.
-//
-// For type=mcp the `transport` field selects the MCP transport:
-//   - "streamable-http" (default): Streamable HTTP (one URL, one HTTP
-//     client, bidirectional chunked JSON-RPC).
-//   - "sse": Server-Sent Events over HTTP.
-//   - "stdio": spawns `command` + `args` and talks JSON-RPC over
-//     stdin/stdout. Auth-by-name is ignored; credentials go through
-//     env instead.
-type ProviderConfig struct {
-	Name      string            `mapstructure:"name"`
-	Type      string            `mapstructure:"type"`      // mcp | system
-	Suite     string            `mapstructure:"suite"`     // for type=system: skills|memory|...
-	Transport string            `mapstructure:"transport"` // for type=mcp: streamable-http|sse|stdio
-	Endpoint  string            `mapstructure:"endpoint"`  // for HTTP transports
-	Command   string            `mapstructure:"command"`   // for stdio
-	Args      []string          `mapstructure:"args"`      // for stdio
-	Env       map[string]string `mapstructure:"env"`       // for stdio
-	Auth      string            `mapstructure:"auth"`      // optional auth config name (HTTP only)
-}
-
-// MCPConfig controls behaviour of every MCP-backed tools.Provider.
-type MCPConfig struct {
-	// TTL is how long a provider keeps the ListTools result cached between
-	// explicit invalidation events. Zero = no TTL (always refetch).
-	TTL time.Duration `mapstructure:"ttl"`
-	// FetchTimeout bounds a single ListTools call.
-	FetchTimeout time.Duration `mapstructure:"fetch_timeout"`
-}
-
-// ── Hugr server connection ───────────────────────────────────
-
-// HugrConfig holds Hugr server connection settings. Auth moved into
-// top-level `auth:` list as of 005b — this block only carries the base
-// URL, the MCP URL default, and a reference to which auth entry to use
-// for the hugr LLM client + engine connection.
+// HugrConfig — platform connection. URL comes from .env:HUGR_URL (not
+// YAML); MCPUrl is derived; Auth is a name reference into the Auth
+// list used by the hugr LLM client + engine transport.
 type HugrConfig struct {
 	URL    string
 	MCPUrl string
-	Auth   string // name of an entry in cfg.Auth; empty = unauthenticated
+	Auth   string
 }
-
-// ── Agent runtime (legacy — LLM model name + skills path + server) ────
-
-// AgentConfig holds agent runtime settings.
-type AgentConfig struct {
-	Model        string
-	Constitution string
-	SkillsPath   string
-	MaxTokens    int
-	Temperature  float32
-	Port         int // A2A listener (and auth callbacks) — default 10000
-	BaseURL      string
-	// DevUIPort is the separate listener for the ADK devui + REST +
-	// /dev/* helpers. Only consumed in `devui` mode; A2A and auth
-	// callbacks stay on Port so redirect_uri configuration is
-	// independent of the run mode.
-	DevUIPort    int
-	DevUIBaseURL string
-}
-
-// ── Memory storage ──────────────────────────────────────────
-
-// MemoryConfig holds runtime memory-management tuning. The hub.db
-// file path has moved into local.Config.MemoryPath (populated via
-// LocalDB) since it is only relevant when the embedded engine runs.
-type MemoryConfig struct {
-	Mode                string                   `mapstructure:"mode"`
-	HugrURL             string                   `mapstructure:"hugr_url"`
-	VolatilityDuration  map[string]time.Duration `mapstructure:"volatility_duration"`
-	CompactionThreshold float64                  `mapstructure:"compaction_threshold"`
-	Scheduler           MemoryScheduler          `mapstructure:"scheduler"`
-	Consolidation       MemoryConsolidation      `mapstructure:"consolidation"`
-}
-
-type MemoryScheduler struct {
-	Interval        time.Duration `mapstructure:"interval"`
-	ReviewDelay     time.Duration `mapstructure:"review_delay"`
-	ConsolidationAt string        `mapstructure:"consolidation_at"`
-}
-
-type MemoryConsolidation struct {
-	HypothesisExpiry time.Duration `mapstructure:"hypothesis_expiry"`
-}
-
-// ── LLM routing ─────────────────────────────────────────────
-
-type LLMConfig struct {
-	Mode        string            `mapstructure:"mode"`
-	Model       string            `mapstructure:"model"`
-	Temperature float32           `mapstructure:"temperature"`
-	MaxTokens   int               `mapstructure:"max_tokens"`
-	Routes      map[string]string `mapstructure:"routes"`
-}
-
-// ── Loading ─────────────────────────────────────────────────
 
 func baseURL(configured string, port int) string {
 	if configured != "" {
@@ -154,8 +83,8 @@ func baseURL(configured string, port int) string {
 	return fmt.Sprintf("http://localhost:%d", port)
 }
 
-// Load reads configuration from .env, environment variables, and config.yaml.
-// yamlPath may be empty to skip YAML loading.
+// Load reads configuration from .env, environment variables, and
+// config.yaml. yamlPath may be empty to skip YAML loading.
 func Load(yamlPath string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(".env")
@@ -198,15 +127,23 @@ func Load(yamlPath string) (*Config, error) {
 			URL:    hugrURL,
 			MCPUrl: hugrURL + "/mcp",
 		},
-		Agent: AgentConfig{
-			Model:        v.GetString("AGENT_MODEL"),
+		Agent: agentcfg.Config{
 			Constitution: v.GetString("AGENT_CONSTITUTION"),
-			SkillsPath:   v.GetString("AGENT_SKILLS_PATH"),
-			MaxTokens:    v.GetInt("AGENT_MAX_TOKENS"),
-			Port:         port,
-			BaseURL:      baseURL(v.GetString("AGENT_BASE_URL"), port),
-			DevUIPort:    devUIPort,
-			DevUIBaseURL: baseURL(v.GetString("AGENT_DEVUI_BASE_URL"), devUIPort),
+		},
+		Skills: skillscfg.Config{
+			Path: v.GetString("AGENT_SKILLS_PATH"),
+		},
+		LLM: modelscfg.Config{
+			Model:     v.GetString("AGENT_MODEL"),
+			MaxTokens: v.GetInt("AGENT_MAX_TOKENS"),
+		},
+		A2A: a2acfg.Config{
+			Port:    port,
+			BaseURL: baseURL(v.GetString("AGENT_BASE_URL"), port),
+		},
+		DevUI: devuicfg.Config{
+			Port:    devUIPort,
+			BaseURL: baseURL(v.GetString("AGENT_DEVUI_BASE_URL"), devUIPort),
 		},
 	}
 
@@ -242,9 +179,9 @@ func expandAuthEnv(list []AuthConfig) {
 	}
 }
 
-// expandProvidersEnv does the same for ProviderConfig fields that
-// accept ${VAR} in yaml.
-func expandProvidersEnv(list []ProviderConfig) {
+// expandProvidersEnv does the same for tools.ProviderConfig fields
+// that accept ${VAR} in yaml.
+func expandProvidersEnv(list []toolscfg.ProviderConfig) {
 	for i := range list {
 		p := &list[i]
 		p.Endpoint = os.ExpandEnv(p.Endpoint)
@@ -296,7 +233,7 @@ func validateAuth(list []AuthConfig) error {
 
 // validateProviders enforces unique provider names and that every
 // provider's `auth:` reference (when set) exists in the auth list.
-func validateProviders(list []ProviderConfig, auths []AuthConfig) error {
+func validateProviders(list []toolscfg.ProviderConfig, auths []AuthConfig) error {
 	seen := map[string]struct{}{}
 	authNames := map[string]struct{}{}
 	for _, a := range auths {
@@ -322,7 +259,10 @@ func validateProviders(list []ProviderConfig, auths []AuthConfig) error {
 	return nil
 }
 
-// applyYAML unmarshals config.yaml into cfg, overwriting relevant fields.
+// applyYAML unmarshals config.yaml into cfg, overwriting relevant
+// sub-configs. The `agent:` key is read twice: once for Identity
+// (id/short_id/name/type) and once for the Agent YAML section
+// (constitution); unmarshal-by-tag does not conflict.
 func applyYAML(cfg *Config, path string) error {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -338,9 +278,24 @@ func applyYAML(cfg *Config, path string) error {
 		return err
 	}
 
-	// Agent identity
+	// agent: contains both Identity (id/short_id/name/type) and
+	// agent.Config (constitution). Read both from the same key.
 	if err := y.UnmarshalKey("agent", &cfg.Identity); err != nil {
-		return fmt.Errorf("unmarshal agent: %w", err)
+		return fmt.Errorf("unmarshal agent (identity): %w", err)
+	}
+	if c := y.GetString("agent.constitution"); c != "" {
+		cfg.Agent.Constitution = c
+	}
+
+	if err := y.UnmarshalKey("skills", &cfg.Skills); err != nil {
+		return fmt.Errorf("unmarshal skills: %w", err)
+	}
+
+	if err := y.UnmarshalKey("a2a", &cfg.A2A); err != nil {
+		return fmt.Errorf("unmarshal a2a: %w", err)
+	}
+	if err := y.UnmarshalKey("devui", &cfg.DevUI); err != nil {
+		return fmt.Errorf("unmarshal devui: %w", err)
 	}
 
 	// Local DB gate + section
@@ -349,33 +304,36 @@ func applyYAML(cfg *Config, path string) error {
 		return fmt.Errorf("unmarshal local_db: %w", err)
 	}
 
-	// Memory
+	// Memory (YAML schema: volatility_duration / consolidation /
+	// scheduler — mode/hugr_url/compaction_threshold removed).
 	if err := y.UnmarshalKey("memory", &cfg.Memory); err != nil {
 		return fmt.Errorf("unmarshal memory: %w", err)
 	}
 
-	// LLM
+	// Chatcontext (own block — compaction threshold).
+	if err := y.UnmarshalKey("chatcontext", &cfg.ChatContext); err != nil {
+		return fmt.Errorf("unmarshal chatcontext: %w", err)
+	}
+
+	// LLM routing + defaults.
 	if err := y.UnmarshalKey("llm", &cfg.LLM); err != nil {
 		return fmt.Errorf("unmarshal llm: %w", err)
 	}
 
-	// Embedding
+	// Embedding (top-level).
 	if err := y.UnmarshalKey("embedding", &cfg.Embedding); err != nil {
 		return fmt.Errorf("unmarshal embedding: %w", err)
 	}
 
-	// MCP (optional; defaults applied below).
 	if err := y.UnmarshalKey("mcp", &cfg.MCP); err != nil {
 		return fmt.Errorf("unmarshal mcp: %w", err)
 	}
 
-	// Hugr block can set the auth name used for the LLM client / engine
-	// transport. URL already came from env; auth only lives in yaml.
+	// Hugr block auth-ref (URL stays from env).
 	if a := y.GetString("hugr.auth"); a != "" {
 		cfg.Hugr.Auth = a
 	}
 
-	// Auth + providers (new in 005b — skills-driven architecture).
 	if err := y.UnmarshalKey("auth", &cfg.Auth); err != nil {
 		return fmt.Errorf("unmarshal auth: %w", err)
 	}
@@ -395,21 +353,6 @@ func applyYAML(cfg *Config, path string) error {
 	}
 	if cfg.MCP.FetchTimeout == 0 {
 		cfg.MCP.FetchTimeout = 30 * time.Second
-	}
-
-	// Legacy AgentConfig fields from YAML (llm.model, llm.max_tokens, skills.path) —
-	// keep behaviour consistent with what buildAgent used to do itself.
-	if cfg.LLM.Model != "" {
-		cfg.Agent.Model = cfg.LLM.Model
-	}
-	if cfg.LLM.MaxTokens > 0 {
-		cfg.Agent.MaxTokens = cfg.LLM.MaxTokens
-	}
-	if cfg.LLM.Temperature > 0 {
-		cfg.Agent.Temperature = cfg.LLM.Temperature
-	}
-	if sp := y.GetString("skills.path"); sp != "" {
-		cfg.Agent.SkillsPath = sp
 	}
 
 	return nil

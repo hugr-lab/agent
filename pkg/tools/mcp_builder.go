@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
-	"github.com/hugr-lab/hugen/pkg/config"
 )
 
 // MCPSpec is the configuration an MCP-backed Provider is built from.
@@ -31,7 +30,7 @@ type MCPSpec struct {
 	BaseTransport http.RoundTripper
 
 	// Config carries MCP-wide TTL + fetch timeout.
-	Config config.MCPConfig
+	Config MCPConfig
 	Logger *slog.Logger
 }
 

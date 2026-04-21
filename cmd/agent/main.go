@@ -47,7 +47,7 @@ func main() {
 
 	logger.Info("hugr-agent starting",
 		"hugr_url", cfg.Hugr.URL,
-		"model", cfg.Agent.Model,
+		"model", cfg.LLM.Model,
 	)
 
 	mode := ""
@@ -84,7 +84,7 @@ func runConsole(ctx context.Context, cfg *config.Config, logger *slog.Logger) er
 	}
 	hugrTransport := resolveHugrTransport(cfg, authStores, logger)
 
-	addr := fmt.Sprintf(":%d", cfg.Agent.Port)
+	addr := fmt.Sprintf(":%d", cfg.A2A.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -205,21 +205,21 @@ func runA2A(ctx context.Context, cfg *config.Config, logger *slog.Logger) error 
 		return err
 	}
 
-	cardH, invokeH := a2a.BuildHandlers(rt.agent, rt.sessions, artifactSvc, cfg.Agent.BaseURL)
+	cardH, invokeH := a2a.BuildHandlers(rt.agent, rt.sessions, artifactSvc, cfg.A2A.BaseURL)
 	smux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	smux.Handle("/invoke", invokeH)
 	registerAdminRoutes(smux, rt.tools, rt.skills)
 
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Agent.Port), Handler: smux}
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.A2A.Port), Handler: smux}
 	logger.Info("A2A server listening",
 		"addr", srv.Addr,
-		"invoke", cfg.Agent.BaseURL+"/invoke",
+		"invoke", cfg.A2A.BaseURL+"/invoke",
 	)
 	return serveAndShutdown(ctx, srv, rt, authStores.PromptLogin, logger)
 }
 
-// runWithDevUI runs the A2A endpoints on cfg.Agent.Port (same as prod)
-// and the ADK webui + REST + /dev helpers on cfg.Agent.DevUIPort,
+// runWithDevUI runs the A2A endpoints on cfg.A2A.Port (same as prod)
+// and the ADK webui + REST + /dev helpers on cfg.DevUI.Port,
 // loopback-only. Two listeners, one runtime.
 func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	artifactSvc := artifact.InMemoryService()
@@ -238,7 +238,7 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		return err
 	}
 
-	cardH, invokeH := a2a.BuildHandlers(rt.agent, rt.sessions, artifactSvc, cfg.Agent.BaseURL)
+	cardH, invokeH := a2a.BuildHandlers(rt.agent, rt.sessions, artifactSvc, cfg.A2A.BaseURL)
 	a2aMux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	a2aMux.Handle("/invoke", invokeH)
 	registerAdminRoutes(a2aMux, rt.tools, rt.skills)
@@ -260,16 +260,16 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		return fmt.Errorf("create REST server: %w", err)
 	}
 	devRouter.PathPrefix("/api").Handler(
-		corsMiddleware(cfg.Agent.DevUIBaseURL, http.StripPrefix("/api", apiServer)),
+		corsMiddleware(cfg.DevUI.BaseURL, http.StripPrefix("/api", apiServer)),
 	)
 
 	// /dev/token → JSON {access_token, name, type}; /dev/auth/trigger
 	// → 302 to A2A listener's /auth/<name>/login for re-login.
 	devRouter.Handle("/dev/token", devui.TokenHandler(authStores.Tokens))
-	devRouter.Handle("/dev/auth/trigger", devui.TriggerAuthHandler(cfg.Agent.BaseURL))
+	devRouter.Handle("/dev/auth/trigger", devui.TriggerAuthHandler(cfg.A2A.BaseURL))
 
 	ui := webui.NewLauncher()
-	apiAddr := cfg.Agent.DevUIBaseURL + "/api"
+	apiAddr := cfg.DevUI.BaseURL + "/api"
 	if _, err := ui.Parse([]string{"-api_server_address", apiAddr}); err != nil {
 		return fmt.Errorf("parse webui flags: %w", err)
 	}
@@ -281,17 +281,17 @@ func runWithDevUI(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		return fmt.Errorf("setup webui: %w", err)
 	}
 
-	a2aSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Agent.Port), Handler: a2aMux}
+	a2aSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.A2A.Port), Handler: a2aMux}
 	devSrv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Agent.DevUIPort),
+		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.DevUI.Port),
 		Handler: devRouter,
 	}
 	logger.Info("devui: A2A listener",
-		"addr", a2aSrv.Addr, "invoke", cfg.Agent.BaseURL+"/invoke")
+		"addr", a2aSrv.Addr, "invoke", cfg.A2A.BaseURL+"/invoke")
 	logger.Info("devui: UI + REST listener (loopback only)",
 		"addr", devSrv.Addr,
-		"ui", cfg.Agent.DevUIBaseURL+"/",
-		"token", cfg.Agent.DevUIBaseURL+"/dev/token")
+		"ui", cfg.DevUI.BaseURL+"/",
+		"token", cfg.DevUI.BaseURL+"/dev/token")
 
 	return serveMany(ctx, []*http.Server{a2aSrv, devSrv}, rt, authStores.PromptLogin, logger)
 }

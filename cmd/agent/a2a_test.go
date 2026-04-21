@@ -214,7 +214,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 	}
 
 	router := models.NewRouter(cfg.llm)
-	a, err := hugen.NewAgent(hugen.Config{
+	a, err := hugen.NewAgent(hugen.Runtime{
 		Router:   router,
 		Sessions: sessionMgr,
 		Tokens:   tokens,

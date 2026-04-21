@@ -27,8 +27,8 @@ type (
 	}
 )
 
-// Config is the scheduler's construction surface.
-type Config struct {
+// Runtime is the scheduler's construction surface.
+type Runtime struct {
 	// Interval is the baseline tick at which the scheduler polls for
 	// work. Default: 30s.
 	Interval time.Duration
@@ -52,7 +52,7 @@ type Config struct {
 
 // Scheduler picks the highest-priority pending work on every tick.
 type Scheduler struct {
-	cfg   Config
+	cfg   Runtime
 	wake  chan struct{}
 	done  chan struct{}
 	mu    sync.Mutex
@@ -61,7 +61,7 @@ type Scheduler struct {
 
 // New constructs a Scheduler. Fills in defaults but does not start
 // any goroutine. Start(ctx) kicks the loop off.
-func New(cfg Config) (*Scheduler, error) {
+func New(cfg Runtime) (*Scheduler, error) {
 	if cfg.Hub == nil {
 		return nil, fmt.Errorf("scheduler: Hub required")
 	}

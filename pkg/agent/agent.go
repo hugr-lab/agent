@@ -17,8 +17,10 @@ import (
 	"google.golang.org/adk/model"
 )
 
-// Config bundles agent dependencies.
-type Config struct {
+// Runtime bundles agent runtime dependencies (Router, Sessions,
+// Tokens, callbacks, InstructionProvider). Static YAML-driven settings
+// live in agent.Config.
+type Runtime struct {
 	// Router is the intent-based LLM router.
 	Router *models.Router
 
@@ -52,7 +54,7 @@ type Config struct {
 //   - AfterModelCallbacks → calibrateTokens(Tokens) (updates token stats)
 //   - Toolsets: nil — the Inject callback is the single source of truth
 //     for both req.Config.Tools and req.Tools.
-func NewAgent(cfg Config) (agent.Agent, error) {
+func NewAgent(cfg Runtime) (agent.Agent, error) {
 	if cfg.Sessions == nil {
 		return nil, fmt.Errorf("agent: Sessions required")
 	}
@@ -116,7 +118,7 @@ func BaseInstructionProvider(sm *sessions.Manager) llmagent.InstructionProvider 
 
 // calibrateTokens returns an AfterModelCallback that feeds LLM usage
 // metadata into the TokenEstimator.
-func calibrateTokens(cfg Config) llmagent.AfterModelCallback {
+func calibrateTokens(cfg Runtime) llmagent.AfterModelCallback {
 	return func(ctx agent.CallbackContext, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
 		if resp == nil || resp.UsageMetadata == nil || cfg.Tokens == nil {
 			return nil, nil

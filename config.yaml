@@ -1,9 +1,12 @@
-# ── Agent identity ──────────────────────────────────────────
+# ── Agent identity + runtime ────────────────────────────────
+# id/short_id/name/type read into local.Identity; constitution into
+# agent.Config. Both come from the same YAML key.
 agent:
   id: agt_ag01
   short_id: ag01
   name: hugr-data-agent
   type: hugr-data
+  constitution: constitution/base.md
 
 # ── Hugr connection (URL comes from .env:HUGR_URL) ──────────
 # auth: references an entry in `auth:` — used for the LLM client,
@@ -101,19 +104,17 @@ local_db:
       type: llm-openai
       path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
 
-# ── Memory storage tuning ───────────────────────────────────
-# Runtime memory-management settings. The hub.db path has moved
-# into local_db.memory_path (only relevant in embedded mode).
+# ── Memory tuning ───────────────────────────────────────────
+# Runtime memory-management settings. Memory hub.db path lives in
+# local_db.memory_path; compaction threshold lives in `chatcontext:`
+# below; the old `mode` / `hugr_url` fields were dead and removed.
 memory:
-  mode: local            # local | remote
-  hugr_url: ""            # used only when mode=remote
   volatility_duration:
     stable: 8760h
     slow: 2160h
     moderate: 720h
     fast: 168h
     volatile: 24h
-  compaction_threshold: 0.7
   scheduler:
     interval: 5m
     review_delay: 30s
@@ -121,12 +122,17 @@ memory:
   consolidation:
     hypothesis_expiry: 720h
 
+# ── Chat-context compaction ─────────────────────────────────
+# Budget threshold at which the chatcontext.Compactor starts
+# summarising old turns (fraction of the context window, 0..1).
+chatcontext:
+  compaction_threshold: 0.7
+
 # ── LLM routing ─────────────────────────────────────────────
-# mode=local registers each `models:` entry (type llm-*) in the embedded
-# engine. Switch AGENT_MODEL in .env (or override llm.model here) to
-# route to a different provider without restarting LM Studio.
+# Model/max_tokens/temperature are the default for the main LLM;
+# routes: selects a different registered model per intent. Override
+# AGENT_MODEL in .env to switch the default without touching yaml.
 llm:
-  mode: local
   model: gemini-pro-3-1
   max_tokens: 8096
   temperature: 0.4
@@ -147,3 +153,16 @@ embedding:
 # ── Skills (file-based) ─────────────────────────────────────
 skills:
   path: ./skills
+
+# ── Listeners ───────────────────────────────────────────────
+# a2a: public endpoints (invoke + auth callbacks).
+# devui: loopback-only dev UI + REST + /dev helpers.
+# Overridable via AGENT_PORT / AGENT_DEVUI_PORT / AGENT_BASE_URL /
+# AGENT_DEVUI_BASE_URL in .env.
+a2a:
+  port: 10000
+  base_url: http://localhost:10000
+
+devui:
+  port: 10001
+  base_url: http://localhost:10001

@@ -2,9 +2,36 @@ package memory
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/skills"
 )
+
+// Config holds memory-domain YAML settings read from `memory:` in
+// config.yaml. VolatilityDuration drives the reviewer / verifier;
+// Consolidation drives the consolidator; Scheduler tunes the
+// memory-workers pass inside pkg/scheduler — the scheduler itself
+// has no YAML-owned config because its tuning parameters are really
+// memory-specific (review delay, consolidation cron).
+type Config struct {
+	VolatilityDuration map[string]time.Duration `mapstructure:"volatility_duration"`
+	Consolidation      ConsolidationConfig      `mapstructure:"consolidation"`
+	Scheduler          SchedulerConfig          `mapstructure:"scheduler"`
+}
+
+// ConsolidationConfig tunes the daily hypothesis-consolidation pass.
+type ConsolidationConfig struct {
+	HypothesisExpiry time.Duration `mapstructure:"hypothesis_expiry"`
+}
+
+// SchedulerConfig — tuning for the memory-workers pass driven by
+// pkg/scheduler. Owned by memory (these are memory-worker cadence
+// knobs, not scheduler-mechanics knobs).
+type SchedulerConfig struct {
+	Interval        time.Duration `mapstructure:"interval"`
+	ReviewDelay     time.Duration `mapstructure:"review_delay"`
+	ConsolidationAt string        `mapstructure:"consolidation_at"`
+}
 
 // MergedConfig is the result of merging skills.SkillMemoryConfig across
 // all active skills in a session. Consumed by the reviewer (category

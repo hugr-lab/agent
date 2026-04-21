@@ -119,19 +119,19 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 
 	llmOpts := []models.Option{
 		models.WithLogger(logger),
-		models.WithMaxTokens(cfg.Agent.MaxTokens),
+		models.WithMaxTokens(cfg.LLM.MaxTokens),
 		models.WithToolChoiceFunc(func() string { return "auto" }),
 	}
-	if cfg.Agent.Temperature > 0 {
-		llmOpts = append(llmOpts, models.WithTemperature(cfg.Agent.Temperature))
+	if cfg.LLM.Temperature > 0 {
+		llmOpts = append(llmOpts, models.WithTemperature(cfg.LLM.Temperature))
 	}
-	llm := models.NewHugr(hugrClient, cfg.Agent.Model, llmOpts...)
+	llm := models.NewHugr(hugrClient, cfg.LLM.Model, llmOpts...)
 
 	router := models.NewRouter(llm).WithLogger(logger)
 	for intentName, modelName := range cfg.LLM.Routes {
 		router.SetRoute(models.Intent(intentName), models.NewHugr(hugrClient, modelName,
 			models.WithLogger(logger),
-			models.WithMaxTokens(cfg.Agent.MaxTokens),
+			models.WithMaxTokens(cfg.LLM.MaxTokens),
 		))
 		logger.Info("intent route configured", "intent", intentName, "model", modelName)
 	}
@@ -141,7 +141,7 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		return nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
 	}
 
-	skillsPath := cfg.Agent.SkillsPath
+	skillsPath := cfg.Skills.Path
 	if skillsPath == "" {
 		skillsPath = "./skills"
 	}
@@ -174,7 +174,7 @@ func buildAuthStores(ctx context.Context, cfg *config.Config, logger *slog.Logge
 			ClientID:     a.ClientID,
 			CallbackPath: a.CallbackPath,
 			LoginPath:    a.LoginPath,
-			BaseURL:      cfg.Agent.BaseURL,
+			BaseURL:      cfg.A2A.BaseURL,
 			AccessToken:  a.AccessToken,
 			TokenURL:     a.TokenURL,
 			DiscoverURL:  cfg.Hugr.URL,
@@ -231,11 +231,7 @@ func buildRuntime(
 		rt.engine = engine
 		querier = engine
 	} else {
-		url := cfg.Memory.HugrURL
-		if url == "" {
-			url = cfg.Hugr.URL
-		}
-		logger.Info("hub mode: connecting to", "url", url)
+		logger.Info("hub mode: connecting to", "url", cfg.Hugr.URL)
 		querier = components.hugrClient
 	}
 
@@ -279,7 +275,7 @@ func buildRuntime(
 		return nil, fmt.Errorf("build reviewer: %w", err)
 	}
 
-	threshold := cfg.Memory.CompactionThreshold
+	threshold := cfg.ChatContext.CompactionThreshold
 	compactor, err := chatcontext.NewCompactor(chatcontext.CompactorOptions{
 		Hub:             hub,
 		Router:          components.router,
@@ -314,7 +310,7 @@ func buildRuntime(
 		return nil, fmt.Errorf("build consolidator: %w", err)
 	}
 
-	sched, err := scheduler.New(scheduler.Config{
+	sched, err := scheduler.New(scheduler.Runtime{
 		Interval:        cfg.Memory.Scheduler.Interval,
 		ReviewDelay:     cfg.Memory.Scheduler.ReviewDelay,
 		ConsolidationAt: cfg.Memory.Scheduler.ConsolidationAt,
@@ -397,7 +393,7 @@ func buildRuntime(
 	instruction := memory.WrapInstruction(
 		hugen.BaseInstructionProvider(sessionMgr), hub)
 
-	a, err := hugen.NewAgent(hugen.Config{
+	a, err := hugen.NewAgent(hugen.Runtime{
 		Router:               components.router,
 		Sessions:             sessionMgr,
 		Tokens:               components.tokens,

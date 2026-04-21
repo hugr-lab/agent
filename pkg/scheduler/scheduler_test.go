@@ -75,7 +75,7 @@ func TestScheduler_PicksPendingReview(t *testing.T) {
 	hub.pending.Store([]store.SessionReview{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
 	rv := newStubReviewer()
 
-	s, err := New(Config{
+	s, err := New(Runtime{
 		Interval:    20 * time.Millisecond,
 		ReviewDelay: 5 * time.Millisecond,
 		Reviewer:    rv,
@@ -105,7 +105,7 @@ func TestScheduler_PicksPendingReview(t *testing.T) {
 func TestScheduler_QueueReviewWakes(t *testing.T) {
 	hub := &stubHub{}
 	rv := newStubReviewer()
-	s, err := New(Config{
+	s, err := New(Runtime{
 		Interval:    time.Hour, // so ticker doesn't fire
 		ReviewDelay: 5 * time.Millisecond,
 		Reviewer:    rv,
@@ -133,7 +133,7 @@ func TestScheduler_ReviewerErrorLogged(t *testing.T) {
 	hub.pending.Store([]store.SessionReview{{SessionID: "s1", Status: "pending"}})
 	rv := newStubReviewer()
 	rv.err = errors.New("boom")
-	s, err := New(Config{
+	s, err := New(Runtime{
 		Interval: 15 * time.Millisecond,
 		Reviewer: rv, Hub: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
@@ -159,7 +159,7 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 func TestScheduler_StopTimeout(t *testing.T) {
 	hub := &stubHub{}
 	rv := newStubReviewer()
-	s, err := New(Config{
+	s, err := New(Runtime{
 		Interval: time.Hour, Reviewer: rv, Hub: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
@@ -194,7 +194,7 @@ func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
 
 	// First run — picks the review, then "crashes" via ctx cancel.
 	rv1 := newStubReviewer()
-	s1, err := New(Config{
+	s1, err := New(Runtime{
 		Interval: 15 * time.Millisecond,
 		Reviewer: rv1, Hub: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
@@ -214,7 +214,7 @@ func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
 	// Second run — pending row is still there (hub not mutated because the
 	// stub reviewer never called CompleteReview). Resumes cleanly.
 	rv2 := newStubReviewer()
-	s2, err := New(Config{
+	s2, err := New(Runtime{
 		Interval: 15 * time.Millisecond,
 		Reviewer: rv2, Hub: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
