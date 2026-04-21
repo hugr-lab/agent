@@ -18,6 +18,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
+	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	qe "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
@@ -221,18 +222,14 @@ func buildRuntime(
 	}
 
 	var querier qetypes.Querier
-	if cfg.HugrLocal.Enabled {
-		engine, err := buildLocalEngine(ctx, cfg, logger)
+	if cfg.LocalDBEnabled {
+		engine, err := local.New(ctx, cfg.LocalDB, cfg.Identity, cfg.Embedding, logger)
 		if err != nil {
 			components.hugrClient.CloseSubscriptions()
 			return nil, fmt.Errorf("local engine: %w", err)
 		}
 		rt.engine = engine
 		querier = engine
-		if err := setupLocalSources(ctx, engine, cfg, logger); err != nil {
-			rt.close(logger)
-			return nil, fmt.Errorf("setup local sources: %w", err)
-		}
 	} else {
 		url := cfg.Memory.HugrURL
 		if url == "" {
@@ -249,7 +246,7 @@ func buildRuntime(
 	}
 	rt.hubDB = hub
 
-	if cfg.HugrLocal.Enabled {
+	if cfg.LocalDBEnabled {
 		if err := registerAgentInstance(ctx, cfg, hub, logger); err != nil {
 			rt.close(logger)
 			return nil, err

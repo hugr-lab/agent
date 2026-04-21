@@ -8,21 +8,29 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/hugr-lab/hugen/pkg/store/local"
 )
 
 // Config holds all application configuration.
+//
+// Identity and Embedding reuse types from pkg/store/local — defining
+// them there keeps the composition (Config → local.Config via
+// LocalDB) cycle-free. Semantically they are global (used by both
+// local and remote modes); the physical location is a cycle-
+// avoidance detail.
 type Config struct {
-	Hugr      HugrConfig
-	Agent     AgentConfig
-	Identity  AgentIdentity
-	HugrLocal HugrLocalConfig
-	Memory    MemoryConfig
-	LLM       LLMConfig
-	Embedding EmbeddingConfig
-	Models    []ModelDef
-	MCP       MCPConfig
-	Auth      []AuthConfig
-	Providers []ProviderConfig
+	Hugr           HugrConfig
+	Agent          AgentConfig
+	Identity       local.Identity
+	Embedding      local.EmbeddingConfig
+	LocalDBEnabled bool
+	LocalDB        local.Config
+	Memory         MemoryConfig
+	LLM            LLMConfig
+	MCP            MCPConfig
+	Auth           []AuthConfig
+	Providers      []ProviderConfig
 }
 
 // AuthConfig declares a named auth mechanism. Callers build a
@@ -103,40 +111,13 @@ type AgentConfig struct {
 	DevUIBaseURL string
 }
 
-// ── Agent identity (from config.yaml agent: ...) ────────────
-
-// AgentIdentity uniquely identifies a running agent instance.
-type AgentIdentity struct {
-	ID      string `mapstructure:"id"`
-	ShortID string `mapstructure:"short_id"`
-	Name    string `mapstructure:"name"`
-	Type    string `mapstructure:"type"`
-}
-
-// ── Embedded hugr engine ────────────────────────────────────
-
-type HugrLocalConfig struct {
-	Enabled bool        `mapstructure:"enabled"`
-	DB      HugrLocalDB `mapstructure:"db"`
-}
-
-type HugrLocalDB struct {
-	Path     string         `mapstructure:"path"`
-	Settings HugrLocalDBSet `mapstructure:"settings"`
-}
-
-type HugrLocalDBSet struct {
-	MaxMemory     int    `mapstructure:"max_memory"`
-	WorkerThreads int    `mapstructure:"worker_threads"`
-	HomeDirectory string `mapstructure:"home_directory"`
-	Timezone      string `mapstructure:"timezone"`
-}
-
 // ── Memory storage ──────────────────────────────────────────
 
+// MemoryConfig holds runtime memory-management tuning. The hub.db
+// file path has moved into local.Config.MemoryPath (populated via
+// LocalDB) since it is only relevant when the embedded engine runs.
 type MemoryConfig struct {
 	Mode                string                   `mapstructure:"mode"`
-	Path                string                   `mapstructure:"path"`
 	HugrURL             string                   `mapstructure:"hugr_url"`
 	VolatilityDuration  map[string]time.Duration `mapstructure:"volatility_duration"`
 	CompactionThreshold float64                  `mapstructure:"compaction_threshold"`
@@ -162,23 +143,6 @@ type LLMConfig struct {
 	Temperature float32           `mapstructure:"temperature"`
 	MaxTokens   int               `mapstructure:"max_tokens"`
 	Routes      map[string]string `mapstructure:"routes"`
-}
-
-// ── Embedding ───────────────────────────────────────────────
-
-type EmbeddingConfig struct {
-	Mode      string `mapstructure:"mode"`
-	Model     string `mapstructure:"model"`
-	Dimension int    `mapstructure:"dimension"`
-}
-
-// ── Data source definitions (models[]) ──────────────────────
-
-// ModelDef registers a single LLM/embedding data source in the local engine.
-type ModelDef struct {
-	Name string `mapstructure:"name"`
-	Type string `mapstructure:"type"` // llm-openai | llm-anthropic | llm-gemini | embedding
-	Path string `mapstructure:"path"` // URL + query params; ${ENV_VAR} expanded at attach time
 }
 
 // ── Loading ─────────────────────────────────────────────────
@@ -379,9 +343,10 @@ func applyYAML(cfg *Config, path string) error {
 		return fmt.Errorf("unmarshal agent: %w", err)
 	}
 
-	// Embedded engine
-	if err := y.UnmarshalKey("hugr_local", &cfg.HugrLocal); err != nil {
-		return fmt.Errorf("unmarshal hugr_local: %w", err)
+	// Local DB gate + section
+	cfg.LocalDBEnabled = y.GetBool("local_db_enabled")
+	if err := y.UnmarshalKey("local_db", &cfg.LocalDB); err != nil {
+		return fmt.Errorf("unmarshal local_db: %w", err)
 	}
 
 	// Memory
@@ -397,11 +362,6 @@ func applyYAML(cfg *Config, path string) error {
 	// Embedding
 	if err := y.UnmarshalKey("embedding", &cfg.Embedding); err != nil {
 		return fmt.Errorf("unmarshal embedding: %w", err)
-	}
-
-	// Models
-	if err := y.UnmarshalKey("models", &cfg.Models); err != nil {
-		return fmt.Errorf("unmarshal models: %w", err)
 	}
 
 	// MCP (optional; defaults applied below).

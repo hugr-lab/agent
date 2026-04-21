@@ -53,6 +53,6 @@ func TestHubDB_Dimension_WithModel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 768, h.Dimension())
 	// Available reports only config — the actual probe is done by
-	// setupLocalSources at startup and is not re-run per store.DB call.
+	// local.New at startup and is not re-run per store.DB call.
 	assert.True(t, h.Available())
 }

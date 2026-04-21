@@ -1,10 +1,16 @@
-// Package hubdb implements the HubDB interface and the "hub.db" RuntimeSource.
+// Package local brings up the embedded hugr engine for hub.db: runs the
+// driver-level migrations, constructs the engine, attaches hub.db as a
+// RuntimeSource, registers LLM/embedding data sources, and probes the
+// embedding dimension.
 //
-// This package only attaches an already-provisioned memory DB into the engine's
-// pool and renders the GraphQL SDL. Schema creation, seed data, and migrations
-// live in adapters/hubdb/migrate and run on a direct connection to the DB file
-// before the engine is initialised.
-package store
+// Only imported in local-DB mode. In remote-hub mode cmd/agent uses the
+// hugr client directly and pkg/store/local is never linked.
+//
+// This file declares the RuntimeSource that ATTACH-es the provisioned
+// memory DB into the engine's pool and renders the GraphQL SDL. The DB
+// file itself is provisioned by pkg/store/local/migrate before the
+// engine starts.
+package local
 
 import (
 	"context"
@@ -27,8 +33,8 @@ const SourceName = "hub.db"
 //go:embed schema.tmpl.graphql
 var schemaGraphQLTmpl string
 
-// Config configures the hub.db RuntimeSource.
-type Config struct {
+// SourceConfig configures the hub.db RuntimeSource.
+type SourceConfig struct {
 	// Path to the provisioned memory DB (must already exist — use
 	// migrate.Ensure before calling Attach).
 	// If prefixed with "postgres://", the source is treated as Postgres.
@@ -50,13 +56,13 @@ type Config struct {
 
 // Source implements sources.RuntimeSource.
 type Source struct {
-	cfg    Config
+	cfg    SourceConfig
 	dbType types.DataSourceType
 	engine engines.Engine
 }
 
 // NewSource returns a RuntimeSource for the given memory DB.
-func NewSource(cfg Config) *Source {
+func NewSource(cfg SourceConfig) *Source {
 	if strings.HasPrefix(cfg.Path, "postgres://") {
 		return &Source{
 			cfg:    cfg,
