@@ -3,7 +3,7 @@
 // SSE, and stdio transports. Tools() is TTL-cached; the cache is also
 // dropped on explicit Invalidate() and on an MCP
 // "notifications/tools/list_changed" push from the server.
-package mcp
+package tools
 
 import (
 	"context"
@@ -65,7 +65,7 @@ type Options struct {
 
 // Provider is a tools.Provider backed by an MCP endpoint.
 // Implements tools.CacheableProvider.
-type Provider struct {
+type mcpProvider struct {
 	name      string
 	transport Transport
 	endpoint  string // empty for stdio
@@ -83,7 +83,7 @@ type Provider struct {
 // New wires an MCP endpoint into a Provider. The MCP session is created
 // lazily on the first Tools() call; notifications/tools/list_changed
 // from the server drop the cache so the next call refetches.
-func New(name string, opts Options) (*Provider, error) {
+func newMCP(name string, opts Options) (*mcpProvider, error) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -101,7 +101,7 @@ func New(name string, opts Options) (*Provider, error) {
 		opts.TransportType = TransportStreamableHTTP
 	}
 
-	p := &Provider{
+	p := &mcpProvider{
 		name:      name,
 		transport: opts.TransportType,
 		endpoint:  opts.Endpoint,
@@ -188,19 +188,19 @@ func buildSDKTransport(name string, opts Options) (sdkmcp.Transport, error) {
 
 // Name returns the provider's unique key (typically the skill name or
 // a configured provider name).
-func (p *Provider) Name() string { return p.name }
+func (p *mcpProvider) Name() string { return p.name }
 
 // Endpoint returns the configured MCP endpoint URL (empty for stdio).
-func (p *Provider) Endpoint() string { return p.endpoint }
+func (p *mcpProvider) Endpoint() string { return p.endpoint }
 
 // TransportType returns the wire protocol this provider uses.
-func (p *Provider) TransportType() Transport { return p.transport }
+func (p *mcpProvider) TransportType() Transport { return p.transport }
 
 // Tools returns the cached tool list, refreshing when the TTL window
 // expires. On fetch error the previous cached list is kept (if any) —
 // a transient network blip shouldn't delete tools from a running
 // session.
-func (p *Provider) Tools() []tool.Tool {
+func (p *mcpProvider) Tools() []tool.Tool {
 	p.mu.Lock()
 	fresh := p.ttl > 0 && !p.fetched.IsZero() && time.Since(p.fetched) < p.ttl
 	if fresh {
@@ -229,7 +229,7 @@ func (p *Provider) Tools() []tool.Tool {
 }
 
 // Invalidate drops the cached tool list. Next Tools() call refetches.
-func (p *Provider) Invalidate() {
+func (p *mcpProvider) Invalidate() {
 	p.mu.Lock()
 	p.fetched = time.Time{}
 	p.mu.Unlock()

@@ -1,4 +1,4 @@
-package mcp
+package tools
 
 import (
 	"testing"
@@ -9,23 +9,23 @@ import (
 )
 
 func TestNew_RequiresEndpointForHTTP(t *testing.T) {
-	_, err := New("empty", Options{TransportType: TransportStreamableHTTP})
+	_, err := newMCP("empty", Options{TransportType: TransportStreamableHTTP})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "streamable-http needs endpoint")
 
-	_, err = New("empty", Options{TransportType: TransportSSE})
+	_, err = newMCP("empty", Options{TransportType: TransportSSE})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sse needs endpoint")
 }
 
 func TestNew_RequiresCommandForStdio(t *testing.T) {
-	_, err := New("empty", Options{TransportType: TransportStdio})
+	_, err := newMCP("empty", Options{TransportType: TransportStdio})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stdio needs command")
 }
 
 func TestNew_UnknownTransport(t *testing.T) {
-	_, err := New("empty", Options{TransportType: Transport("mystery")})
+	_, err := newMCP("empty", Options{TransportType: Transport("mystery")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported transport")
 }
@@ -33,13 +33,13 @@ func TestNew_UnknownTransport(t *testing.T) {
 func TestNew_DefaultsToStreamableHTTP(t *testing.T) {
 	// TransportType empty → defaults to streamable-http → requires
 	// endpoint, so this exercises the default-resolution branch.
-	_, err := New("empty", Options{})
+	_, err := newMCP("empty", Options{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "streamable-http needs endpoint")
 }
 
 func TestNew_StreamableHTTP_OK(t *testing.T) {
-	p, err := New("s", Options{
+	p, err := newMCP("s", Options{
 		TransportType: TransportStreamableHTTP,
 		Endpoint:      "http://localhost:0/mcp",
 	})
@@ -50,7 +50,7 @@ func TestNew_StreamableHTTP_OK(t *testing.T) {
 }
 
 func TestInvalidate_ClearsFetchedTimestamp(t *testing.T) {
-	p, err := New("s", Options{
+	p, err := newMCP("s", Options{
 		TransportType: TransportStreamableHTTP,
 		Endpoint:      "http://localhost:0/mcp",
 	})

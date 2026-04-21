@@ -131,4 +131,3 @@ func (t *contextIntroTool) Run(ctx tool.Context, _ any) (map[string]any, error) 
 	}
 	return out, nil
 }
-

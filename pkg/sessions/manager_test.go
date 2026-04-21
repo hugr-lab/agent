@@ -8,7 +8,6 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
-	"github.com/hugr-lab/hugen/pkg/tools/toolstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	adksession "google.golang.org/adk/session"
@@ -58,8 +57,8 @@ func newTestHarness(t *testing.T) *testHarness {
 	require.NoError(t, err)
 
 	tm := tools.New(nil)
-	tm.AddProvider(toolstest.Provider{N: "hugr-main", T: toolstest.Tools("demo_query", "demo_list")})
-	tm.AddProvider(toolstest.Provider{N: "_skills", T: toolstest.Tools("skill_list", "skill_load")})
+	tm.AddProvider(tools.FakeProvider{N: "hugr-main", T: tools.FakeTools("demo_query", "demo_list")})
+	tm.AddProvider(tools.FakeProvider{N: "_skills", T: tools.FakeTools("skill_list", "skill_load")})
 
 	m := New(Config{
 		Skills:       sk,

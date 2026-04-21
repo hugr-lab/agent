@@ -7,7 +7,6 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/tools/mcp"
 )
 
 // MCPSpec is the configuration an MCP-backed Provider is built from.
@@ -39,12 +38,12 @@ type MCPSpec struct {
 // NewMCPProvider constructs an MCP-backed Provider from spec. Returns
 // an error for unsupported transport or missing auth store.
 func NewMCPProvider(spec MCPSpec) (Provider, error) {
-	transport := mcp.Transport(spec.Transport)
+	transport := Transport(spec.Transport)
 	if transport == "" {
-		transport = mcp.TransportStreamableHTTP
+		transport = TransportStreamableHTTP
 	}
 
-	opts := mcp.Options{
+	opts := Options{
 		TransportType: transport,
 		Endpoint:      spec.Endpoint,
 		Command:       spec.Command,
@@ -56,14 +55,14 @@ func NewMCPProvider(spec MCPSpec) (Provider, error) {
 	}
 
 	switch transport {
-	case mcp.TransportStreamableHTTP, mcp.TransportSSE:
+	case TransportStreamableHTTP, TransportSSE:
 		httpTransport, err := mcpTransport(spec)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", spec.Name, err)
 		}
 		opts.HTTPTransport = httpTransport
 
-	case mcp.TransportStdio:
+	case TransportStdio:
 		if spec.Auth != "" && spec.Logger != nil {
 			spec.Logger.Warn("provider: auth ignored on stdio transport",
 				"provider", spec.Name, "auth", spec.Auth)
@@ -73,7 +72,7 @@ func NewMCPProvider(spec MCPSpec) (Provider, error) {
 		return nil, fmt.Errorf("provider %q: unsupported transport %q", spec.Name, spec.Transport)
 	}
 
-	return mcp.New(spec.Name, opts)
+	return newMCP(spec.Name, opts)
 }
 
 // mcpTransport resolves the HTTP round-tripper an MCP builder should
