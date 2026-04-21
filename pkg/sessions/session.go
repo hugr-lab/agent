@@ -562,13 +562,6 @@ func (s *Session) Touch() { s.touch() }
 
 // SkillDescriptorMeta is what skill_load needs to shape its response —
 // references with descriptions + the author-provided workflow hint.
-// Defined here so the (consumer-side) tools/system package can name the
-// type without sessions importing tools/system in return.
-type SkillDescriptorMeta struct {
-	Refs     []skills.SkillRefMeta
-	NextStep string
-}
-
 // ListSkills returns the current skill catalogue.
 func (s *Session) ListSkills(ctx context.Context) ([]skills.SkillMeta, error) {
 	return s.skills.List(ctx)
@@ -576,12 +569,12 @@ func (s *Session) ListSkills(ctx context.Context) ([]skills.SkillMeta, error) {
 
 // SkillMeta returns the reference-document metadata + next-step hint for
 // a skill. Empty struct if the skill is unknown.
-func (s *Session) SkillMeta(ctx context.Context, name string) SkillDescriptorMeta {
+func (s *Session) SkillMeta(ctx context.Context, name string) skills.DescriptorMeta {
 	sk, err := s.skills.Load(ctx, name)
 	if err != nil {
-		return SkillDescriptorMeta{}
+		return skills.DescriptorMeta{}
 	}
-	return SkillDescriptorMeta{
+	return skills.DescriptorMeta{
 		Refs:     append([]skills.SkillRefMeta(nil), sk.Refs...),
 		NextStep: sk.NextStep,
 	}

@@ -5,17 +5,18 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMerge_CategoriesFirstWins(t *testing.T) {
-	a := NamedConfig{Name: "hugr-data", Config: &SkillMemoryConfig{
-		Categories: map[string]CategoryConfig{
+	a := NamedConfig{Name: "hugr-data", Config: &skills.SkillMemoryConfig{
+		Categories: map[string]skills.CategoryConfig{
 			"schema": {Volatility: "stable", InitialScore: 0.8},
 		},
 	}}
-	b := NamedConfig{Name: "web", Config: &SkillMemoryConfig{
-		Categories: map[string]CategoryConfig{
+	b := NamedConfig{Name: "web", Config: &skills.SkillMemoryConfig{
+		Categories: map[string]skills.CategoryConfig{
 			"schema": {Volatility: "volatile", InitialScore: 0.2},
 			"extra":  {Volatility: "slow", InitialScore: 0.6},
 		},
@@ -29,11 +30,11 @@ func TestMergeWithLogger_EmitsCollisionWarning(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	a := NamedConfig{Name: "hugr-data", Config: &SkillMemoryConfig{
-		Categories: map[string]CategoryConfig{"schema": {Volatility: "stable"}},
+	a := NamedConfig{Name: "hugr-data", Config: &skills.SkillMemoryConfig{
+		Categories: map[string]skills.CategoryConfig{"schema": {Volatility: "stable"}},
 	}}
-	b := NamedConfig{Name: "web", Config: &SkillMemoryConfig{
-		Categories: map[string]CategoryConfig{"schema": {Volatility: "volatile"}},
+	b := NamedConfig{Name: "web", Config: &skills.SkillMemoryConfig{
+		Categories: map[string]skills.CategoryConfig{"schema": {Volatility: "volatile"}},
 	}}
 	MergeWithLogger([]NamedConfig{a, b}, logger)
 	out := buf.String()
@@ -43,11 +44,11 @@ func TestMergeWithLogger_EmitsCollisionWarning(t *testing.T) {
 }
 
 func TestMerge_ReviewPromptsConcatenated(t *testing.T) {
-	a := NamedConfig{Name: "hugr-data", Config: &SkillMemoryConfig{
-		Review: ReviewConfig{Enabled: true, Prompt: "Extract schema facts."},
+	a := NamedConfig{Name: "hugr-data", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{Enabled: true, Prompt: "Extract schema facts."},
 	}}
-	b := NamedConfig{Name: "web", Config: &SkillMemoryConfig{
-		Review: ReviewConfig{Enabled: true, Prompt: "Extract source credibility."},
+	b := NamedConfig{Name: "web", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{Enabled: true, Prompt: "Extract source credibility."},
 	}}
 	got := Merge([]NamedConfig{a, b})
 	assert.True(t, got.ReviewEnabled)
@@ -56,14 +57,14 @@ func TestMerge_ReviewPromptsConcatenated(t *testing.T) {
 }
 
 func TestMerge_CompactionHintsUnioned(t *testing.T) {
-	a := NamedConfig{Name: "hugr-data", Config: &SkillMemoryConfig{
-		Compaction: CompactionHints{
+	a := NamedConfig{Name: "hugr-data", Config: &skills.SkillMemoryConfig{
+		Compaction: skills.CompactionHints{
 			Preserve: []string{"schema", "numbers"},
 			Discard:  []string{"greetings"},
 		},
 	}}
-	b := NamedConfig{Name: "web", Config: &SkillMemoryConfig{
-		Compaction: CompactionHints{
+	b := NamedConfig{Name: "web", Config: &skills.SkillMemoryConfig{
+		Compaction: skills.CompactionHints{
 			Preserve: []string{"numbers", "citations"},
 			Discard:  []string{"greetings", "filler"},
 		},
@@ -74,11 +75,11 @@ func TestMerge_CompactionHintsUnioned(t *testing.T) {
 }
 
 func TestMerge_MinToolCallsMostRestrictive(t *testing.T) {
-	a := NamedConfig{Name: "a", Config: &SkillMemoryConfig{
-		Review: ReviewConfig{Enabled: true, MinToolCalls: 2},
+	a := NamedConfig{Name: "a", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{Enabled: true, MinToolCalls: 2},
 	}}
-	b := NamedConfig{Name: "b", Config: &SkillMemoryConfig{
-		Review: ReviewConfig{Enabled: true, MinToolCalls: 5},
+	b := NamedConfig{Name: "b", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{Enabled: true, MinToolCalls: 5},
 	}}
 	got := Merge([]NamedConfig{a, b})
 	assert.Equal(t, 5, got.MinToolCalls, "most-restrictive MinToolCalls wins")
@@ -86,8 +87,8 @@ func TestMerge_MinToolCallsMostRestrictive(t *testing.T) {
 
 func TestMerge_NilConfigSkipped(t *testing.T) {
 	a := NamedConfig{Name: "no-memory", Config: nil}
-	b := NamedConfig{Name: "has-memory", Config: &SkillMemoryConfig{
-		Categories: map[string]CategoryConfig{"schema": {Volatility: "stable"}},
+	b := NamedConfig{Name: "has-memory", Config: &skills.SkillMemoryConfig{
+		Categories: map[string]skills.CategoryConfig{"schema": {Volatility: "stable"}},
 	}}
 	got := Merge([]NamedConfig{a, b})
 	assert.Contains(t, got.Categories, "schema")

@@ -1,4 +1,4 @@
-package system
+package chatcontext
 
 import (
 	"encoding/json"
@@ -12,28 +12,45 @@ import (
 	"google.golang.org/genai"
 )
 
-// OnDemandCompactor is what context_compress calls to trigger a
-// manual compaction pass. Keeps pkg/tools/system free of a direct
-// pkg/learning import — the runtime wires whichever concrete
-// compactor it uses.
-type OnDemandCompactor interface {
-	Compact(ctx tool.Context) error
+// ServiceName is the provider name this service registers under in
+// tools.Manager. On-disk `_context/SKILL.md` references it via
+// providers: [{provider: _context}].
+const ServiceName = "_context"
+
+// Service is the tools.Provider that exposes context-window tools
+// (context_status, context_intro). Compaction is automatic via the
+// Compactor BeforeModelCallback — no context_compress tool is
+// exposed.
+type Service struct {
+	sm    *sessions.Manager
+	hub   store.DB
+	tools []tool.Tool
 }
 
-// NewContextSuite returns the context-management tools exposed
-// through the `_context` system provider: context_status,
-// context_intro, context_compress. compactor may be nil — in that
-// case context_compress returns an informative error when invoked.
-//
-// Each tool resolves its session from tool.Context and delegates
-// to SessionManager.Session(id) / HubDB. No state is held by the
-// suite.
-func NewContextSuite(sm *sessions.Manager, hub store.DB, compactor OnDemandCompactor) []tool.Tool {
-	return []tool.Tool{
+// NewService constructs the Service. hub may be nil — context_intro
+// then returns just prompt/tool counts without hub-level stats.
+func NewService(sm *sessions.Manager, hub store.DB) *Service {
+	s := &Service{sm: sm, hub: hub}
+	s.tools = []tool.Tool{
 		&contextStatusTool{sm: sm},
 		&contextIntroTool{sm: sm, hub: hub},
-		&contextCompressTool{sm: sm, compactor: compactor},
 	}
+	return s
+}
+
+// Name implements tools.Provider.
+func (s *Service) Name() string { return ServiceName }
+
+// Tools implements tools.Provider.
+func (s *Service) Tools() []tool.Tool { return s.tools }
+
+// sessionFor resolves the current session from the tool context.
+func sessionFor(ctx tool.Context, sm *sessions.Manager) (*sessions.Session, error) {
+	sid := ctx.SessionID()
+	if sid == "" {
+		return nil, fmt.Errorf("no session id in tool context")
+	}
+	return sm.Session(sid)
 }
 
 // ------------------------------------------------------------
@@ -115,36 +132,3 @@ func (t *contextIntroTool) Run(ctx tool.Context, _ any) (map[string]any, error) 
 	return out, nil
 }
 
-// ------------------------------------------------------------
-// context_compress
-// ------------------------------------------------------------
-
-type contextCompressTool struct {
-	sm        *sessions.Manager
-	compactor OnDemandCompactor
-}
-
-func (t *contextCompressTool) Name() string { return "context_compress" }
-func (t *contextCompressTool) Description() string {
-	return "Asks the system to compress the oldest turn groups now instead of waiting for the automatic threshold. Does not change your current task — the compacted turns remain accessible via post-session review."
-}
-func (t *contextCompressTool) IsLongRunning() bool { return false }
-
-func (t *contextCompressTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
-}
-
-func (t *contextCompressTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
-	tools.Pack(req, t)
-	return nil
-}
-
-func (t *contextCompressTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
-	if t.compactor == nil {
-		return map[string]any{"compressed": false, "reason": "compactor not wired"}, nil
-	}
-	if err := t.compactor.Compact(ctx); err != nil {
-		return nil, fmt.Errorf("context_compress: %w", err)
-	}
-	return map[string]any{"compressed": true}, nil
-}

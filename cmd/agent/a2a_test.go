@@ -18,8 +18,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
-	"github.com/hugr-lab/hugen/pkg/tools/system"
-	"github.com/hugr-lab/hugen/pkg/tools/toolstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/adk/agent/llmagent"
@@ -205,12 +203,9 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 		Logger:       logger,
 	})
 
-	// Register _skills provider with the real system suite — matches
-	// production wiring where providers.BuildAll does this from config.
-	toolsMgr.AddProvider(toolstest.Provider{
-		N: "_skills",
-		T: system.NewSkillsSuite(sessionMgr),
-	})
+	// Register the real skills.Service so the test exercises the same
+	// provider wiring as production.
+	toolsMgr.AddProvider(skills.NewService(skillsSessionAdapter{sm: sessionMgr}))
 
 	tokens := cfg.tokens
 	if tokens == nil {

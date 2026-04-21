@@ -8,6 +8,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -34,7 +35,7 @@ type Compactor struct {
 	threshold       float64
 	minTurns        int
 	logger          *slog.Logger
-	loadSkillMemory func(ctx context.Context, skillName string) (*memory.SkillMemoryConfig, error)
+	loadSkillMemory func(ctx context.Context, skillName string) (*skills.SkillMemoryConfig, error)
 }
 
 // CompactorOptions bundles compactor construction parameters.
@@ -50,7 +51,7 @@ type CompactorOptions struct {
 	// by name. When set, the compactor uses the session's active
 	// skills' compaction hints (preserve / discard). When nil, the
 	// summary prompt stays generic.
-	LoadSkillMemory func(ctx context.Context, skillName string) (*memory.SkillMemoryConfig, error)
+	LoadSkillMemory func(ctx context.Context, skillName string) (*skills.SkillMemoryConfig, error)
 }
 
 // NewCompactor constructs a Compactor.

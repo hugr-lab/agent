@@ -5,8 +5,6 @@
 // skill_load.
 package skills
 
-import "github.com/hugr-lab/hugen/pkg/memory"
-
 // SkillMeta is a compact catalog entry for prompt injection (~50 tokens per skill).
 type SkillMeta struct {
 	Name        string   `json:"name" yaml:"name"`
@@ -18,6 +16,14 @@ type SkillMeta struct {
 type SkillRefMeta struct {
 	Name        string `json:"name" yaml:"name"`
 	Description string `json:"description" yaml:"description"`
+}
+
+// DescriptorMeta bundles the reference list and workflow hint that
+// skill_load returns to the LLM. Populated from SKILL.md frontmatter
+// via Session.SkillMeta.
+type DescriptorMeta struct {
+	Refs     []SkillRefMeta
+	NextStep string
 }
 
 // Skill is a fully-loaded skill ready for the prompt + tool wiring.
@@ -43,7 +49,7 @@ type Skill struct {
 	// optional memory.yaml file adjacent to SKILL.md. Nil when the
 	// file is absent or malformed — the reviewer/compactor then
 	// fall back to agent-level defaults.
-	Memory *memory.SkillMemoryConfig
+	Memory *SkillMemoryConfig
 }
 
 // SkillProviderSpec is one tool-source binding declared by a skill.

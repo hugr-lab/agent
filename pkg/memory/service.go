@@ -1,4 +1,4 @@
-package system
+package memory
 
 import (
 	"encoding/json"
@@ -12,23 +12,51 @@ import (
 	"google.golang.org/genai"
 )
 
-// NewMemorySuite returns the LLM-facing tools exposed through the
-// `_memory` system provider: memory_search, memory_linked,
-// memory_stats, memory_note, memory_clear_note.
-//
-// Each tool resolves its session from tool.Context and delegates to
-// HubDB. The suite itself is stateless.
-func NewMemorySuite(sm *sessions.Manager, hub store.DB) []tool.Tool {
-	if hub == nil {
-		return nil
+// ServiceName is the provider name this service registers under in
+// tools.Manager. On-disk `_memory/SKILL.md` references it via
+// providers: [{provider: _memory}].
+const ServiceName = "_memory"
+
+// Service is the tools.Provider that exposes long-term memory tools
+// (memory_search / memory_linked / memory_stats / memory_note /
+// memory_clear_note). Stateless beyond the hub + session-manager
+// references it holds.
+type Service struct {
+	sm    *sessions.Manager
+	hub   store.DB
+	tools []tool.Tool
+}
+
+// NewService returns the memory tools provider. When hub is nil the
+// service exposes no tools (Tools() → empty slice); registering it
+// anyway keeps the provider catalogue consistent.
+func NewService(sm *sessions.Manager, hub store.DB) *Service {
+	s := &Service{sm: sm, hub: hub}
+	if hub != nil {
+		s.tools = []tool.Tool{
+			&memorySearchTool{sm: sm, hub: hub},
+			&memoryLinkedTool{sm: sm, hub: hub},
+			&memoryStatsTool{sm: sm, hub: hub},
+			&memoryNoteTool{sm: sm, hub: hub},
+			&memoryClearNoteTool{sm: sm, hub: hub},
+		}
 	}
-	return []tool.Tool{
-		&memorySearchTool{sm: sm, hub: hub},
-		&memoryLinkedTool{sm: sm, hub: hub},
-		&memoryStatsTool{sm: sm, hub: hub},
-		&memoryNoteTool{sm: sm, hub: hub},
-		&memoryClearNoteTool{sm: sm, hub: hub},
+	return s
+}
+
+// Name implements tools.Provider.
+func (s *Service) Name() string { return ServiceName }
+
+// Tools implements tools.Provider.
+func (s *Service) Tools() []tool.Tool { return s.tools }
+
+// sessionFor resolves the current session from the tool context.
+func sessionFor(ctx tool.Context, sm *sessions.Manager) (*sessions.Session, error) {
+	sid := ctx.SessionID()
+	if sid == "" {
+		return nil, fmt.Errorf("no session id in tool context")
 	}
+	return sm.Session(sid)
 }
 
 // ------------------------------------------------------------
@@ -323,13 +351,4 @@ func (t *memoryClearNoteTool) Run(ctx tool.Context, args any) (map[string]any, e
 		}
 	}
 	return map[string]any{"cleared": true, "id": id}, nil
-}
-
-// notesCacheInvalidator is a narrow extension interface that concrete
-// Session implementations may expose so memory tools can mark the
-// snapshot dirty after adding or clearing a note. Keeping it here
-// (rather than on *sessions.Session) avoids bloating the public
-// contract with per-feature cache plumbing.
-type notesCacheInvalidator interface {
-	InvalidateNotesCache()
 }

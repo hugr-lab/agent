@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hugr-lab/hugen/pkg/memory"
 	"gopkg.in/yaml.v3"
 )
 
@@ -151,12 +150,12 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 // fatal error; callers fall back to agent-level memory defaults. The
 // file is cheap enough to re-read on every Load since the manager
 // does not cache skill bodies.
-func loadSkillMemory(skillDir string) *memory.SkillMemoryConfig {
+func loadSkillMemory(skillDir string) *SkillMemoryConfig {
 	raw, err := os.ReadFile(filepath.Join(skillDir, "memory.yaml"))
 	if err != nil {
 		return nil
 	}
-	var cfg memory.SkillMemoryConfig
+	var cfg SkillMemoryConfig
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return nil
 	}

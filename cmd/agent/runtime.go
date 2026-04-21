@@ -14,7 +14,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/providers"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
@@ -25,7 +24,6 @@ import (
 	qetypes "github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/tool"
 )
 
 // agentRuntime bundles all long-lived resources built at startup.
@@ -47,21 +45,14 @@ type agentRuntime struct {
 	bgCancel   context.CancelFunc
 }
 
-// onDemandCompactor adapts chatcontext.Compactor to the
-// tool.Context-based `system.OnDemandCompactor` interface consumed by
-// the context_compress tool. It re-uses the compactor's Before
-// callback but synthesises a minimal LLMRequest — the tool call has
-// no request of its own, and its intent is purely to nudge the
-// compactor (the next turn will re-evaluate properly).
-type onDemandCompactor struct{ c *chatcontext.Compactor }
+// skillsSessionAdapter bridges *sessions.Manager (concrete) to
+// skills.SessionAccessor (consumer-defined interface whose Session()
+// method returns skills.Session). Go's method-return covariance is
+// strict, so we need the tiny wrapper to return the interface.
+type skillsSessionAdapter struct{ sm *sessions.Manager }
 
-func (o *onDemandCompactor) Compact(ctx tool.Context) error {
-	// Without a live LLMRequest the compactor can only emit a
-	// compaction event for visibility; the real fold happens on the
-	// next BeforeModelCallback when the callback chain receives the
-	// actual request. Log and return nil so the tool response is a
-	// clean {"compressed": true}.
-	return nil
+func (a skillsSessionAdapter) Session(id string) (skills.Session, error) {
+	return a.sm.Session(id)
 }
 
 func (r *agentRuntime) close(logger *slog.Logger) {
@@ -271,7 +262,7 @@ func buildRuntime(
 	// start after we're confident buildRuntime won't fail.
 	cls := sessions.NewClassifier(hub, logger, sessions.DefaultClassifierBuffer)
 
-	loadSkillMemory := func(ctx context.Context, name string) (*memory.SkillMemoryConfig, error) {
+	loadSkillMemory := func(ctx context.Context, name string) (*skills.SkillMemoryConfig, error) {
 		sk, err := components.skills.Load(ctx, name)
 		if err != nil || sk == nil {
 			return nil, err
@@ -355,35 +346,55 @@ func buildRuntime(
 		Classifier:   cls,
 		Scheduler:    sched,
 		InlineBuilder: func(name, endpoint, authName string, lg *slog.Logger) (tools.Provider, error) {
-			return providers.Build(
-				config.ProviderConfig{Name: name, Type: "mcp", Endpoint: endpoint, Auth: authName},
-				providers.Deps{
-					AuthStores:    authStores.Tokens,
-					BaseTransport: http.DefaultTransport,
-					Skills:        components.skills,
-					Hub:           hub,
-					MCP:           cfg.MCP,
-					Logger:        lg,
-				},
-			)
+			return tools.NewMCPProvider(tools.MCPSpec{
+				Name:          name,
+				Endpoint:      endpoint,
+				Auth:          authName,
+				AuthStores:    authStores.Tokens,
+				BaseTransport: http.DefaultTransport,
+				Config:        cfg.MCP,
+				Logger:        lg,
+			})
 		},
 	})
 	rt.sessions = sessionMgr
 
-	// Build configured providers now that SessionManager exists —
-	// system builder needs it. Each Build registers into tools.Manager.
-	if err := providers.BuildAll(cfg.Providers, components.tools, providers.Deps{
-		AuthStores:    authStores.Tokens,
-		BaseTransport: http.DefaultTransport,
-		Sessions:      sessionMgr,
-		Skills:        components.skills,
-		Hub:           hub,
-		Compactor:     &onDemandCompactor{c: compactor},
-		MCP:           cfg.MCP,
-		Logger:        logger,
-	}); err != nil {
-		rt.close(logger)
-		return nil, err
+	// Internal services self-register as tools.Providers.
+	// skills.NewService takes a consumer-defined SessionAccessor interface
+	// (keeps pkg/skills free of pkg/sessions dep); adapt *sessions.Manager
+	// inline.
+	components.tools.AddProvider(skills.NewService(skillsSessionAdapter{sm: sessionMgr}))
+	components.tools.AddProvider(memory.NewService(sessionMgr, hub))
+	components.tools.AddProvider(chatcontext.NewService(sessionMgr, hub))
+	logger.Info("internal services registered",
+		"providers", []string{skills.ServiceName, memory.ServiceName, chatcontext.ServiceName})
+
+	// External providers from config.yaml (MCP only now).
+	for _, pc := range cfg.Providers {
+		if pc.Type != "mcp" {
+			rt.close(logger)
+			return nil, fmt.Errorf("provider %q: only type=mcp is supported in config.providers", pc.Name)
+		}
+		base := http.DefaultTransport
+		p, err := tools.NewMCPProvider(tools.MCPSpec{
+			Name:          pc.Name,
+			Endpoint:      pc.Endpoint,
+			Transport:     pc.Transport,
+			Command:       pc.Command,
+			Args:          pc.Args,
+			Env:           pc.Env,
+			Auth:          pc.Auth,
+			AuthStores:    authStores.Tokens,
+			BaseTransport: base,
+			Config:        cfg.MCP,
+			Logger:        logger,
+		})
+		if err != nil {
+			rt.close(logger)
+			return nil, fmt.Errorf("provider %q: %w", pc.Name, err)
+		}
+		components.tools.AddProvider(p)
+		logger.Info("provider registered", "name", pc.Name, "type", pc.Type)
 	}
 
 	instruction := memory.WrapInstruction(

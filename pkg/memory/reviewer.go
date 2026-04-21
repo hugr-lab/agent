@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -36,7 +37,7 @@ type Reviewer struct {
 
 	// loadSkillMemory is the per-session skill-config fetcher. See
 	// ReviewerOptions.LoadSkillMemory.
-	loadSkillMemory func(ctx context.Context, skillName string) (*SkillMemoryConfig, error)
+	loadSkillMemory func(ctx context.Context, skillName string) (*skills.SkillMemoryConfig, error)
 
 	// dedupThreshold is the cosine-distance cutoff at which a newly
 	// extracted fact is treated as a reinforcement of an existing one.
@@ -60,7 +61,7 @@ type ReviewerOptions struct {
 	// transcript's skill_loaded / skill_unloaded events, loads each
 	// skill's memory config, and calls Merge. When nil, the reviewer
 	// uses its static Config.
-	LoadSkillMemory func(ctx context.Context, skillName string) (*SkillMemoryConfig, error)
+	LoadSkillMemory func(ctx context.Context, skillName string) (*skills.SkillMemoryConfig, error)
 }
 
 // NewReviewer builds a Reviewer. Router is optional — if nil the

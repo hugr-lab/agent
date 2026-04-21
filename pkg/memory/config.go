@@ -1,56 +1,30 @@
 package memory
 
-import "log/slog"
+import (
+	"log/slog"
 
-// Per-skill memory configuration types. Populated by
-// pkg/skills/file.go from an optional memory.yaml adjacent to each
-// skill's SKILL.md. Nil SkillMemoryConfig means the skill has no
-// memory-specific tailoring — the reviewer/compactor fall back to
-// the runtime defaults when that skill is active.
+	"github.com/hugr-lab/hugen/pkg/skills"
+)
 
-// SkillMemoryConfig is the full per-skill memory configuration.
-type SkillMemoryConfig struct {
-	Categories map[string]CategoryConfig `yaml:"categories"`
-	Review     ReviewConfig              `yaml:"review"`
-	Compaction CompactionHints           `yaml:"compaction"`
-}
-
-// CategoryConfig declares how the reviewer should treat facts of a
-// particular category — initial score, volatility bucket, and a short
-// hint for the LLM describing what tags to attach.
-type CategoryConfig struct {
-	Description  string  `yaml:"description"`
-	Volatility   string  `yaml:"volatility"` // stable|slow|moderate|fast|volatile
-	InitialScore float64 `yaml:"initial_score"`
-	TagsHint     string  `yaml:"tags_hint"`
-}
-
-// ReviewConfig controls the post-session review pipeline for sessions
-// running this skill.
-type ReviewConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	MinToolCalls int    `yaml:"min_tool_calls"`
-	Prompt       string `yaml:"prompt"`
-}
-
-// CompactionHints tell the rolling-window compactor what to keep vs.
-// discard when summarising old turn groups.
-type CompactionHints struct {
-	Preserve []string `yaml:"preserve"`
-	Discard  []string `yaml:"discard"`
-}
-
-// MergedConfig is the result of merging SkillMemoryConfig across all
-// active skills in a session. Consumed by the reviewer (category
+// MergedConfig is the result of merging skills.SkillMemoryConfig across
+// all active skills in a session. Consumed by the reviewer (category
 // selection + prompt assembly) and the compactor (preserve/discard
 // hints).
 type MergedConfig struct {
-	Categories      map[string]CategoryConfig
+	Categories      map[string]skills.CategoryConfig
 	ReviewEnabled   bool
 	MinToolCalls    int
 	ReviewPrompt    string
 	CompactPreserve []string
 	CompactDiscard  []string
+}
+
+// NamedConfig pairs a skill name with its optional memory config.
+// Consumers build a slice of these from the active skills of a
+// session and pass it to Merge.
+type NamedConfig struct {
+	Name   string
+	Config *skills.SkillMemoryConfig
 }
 
 // Merge combines memory configs from a set of active skill configs
@@ -65,9 +39,7 @@ type MergedConfig struct {
 //   - Compaction hint lists are unioned with de-duplication preserving
 //     first-seen order.
 func Merge(configs []NamedConfig) MergedConfig {
-	out := MergedConfig{
-		Categories: map[string]CategoryConfig{},
-	}
+	out := MergedConfig{Categories: map[string]skills.CategoryConfig{}}
 	seen := map[string]struct{}{}
 	for _, nc := range configs {
 		if nc.Config == nil {
@@ -109,22 +81,12 @@ func Merge(configs []NamedConfig) MergedConfig {
 	return out
 }
 
-// NamedConfig pairs a skill name with its optional memory config.
-// Consumers build a slice of these from the active skills of a
-// session and pass it to Merge.
-type NamedConfig struct {
-	Name   string
-	Config *SkillMemoryConfig
-}
-
 // MergeWithLogger is the logging variant of Merge: it emits a WARN
-// entry for every category collision between skills. Useful at
-// runtime (reviewer / compactor) so operators can spot conflicting
-// skill configs; not appropriate for pure-logic unit tests.
+// entry for every category collision between skills.
 func MergeWithLogger(configs []NamedConfig, logger *slog.Logger) MergedConfig {
-	out := MergedConfig{Categories: map[string]CategoryConfig{}}
+	out := MergedConfig{Categories: map[string]skills.CategoryConfig{}}
 	seen := map[string]struct{}{}
-	origin := map[string]string{} // category → winning skill
+	origin := map[string]string{}
 	for _, nc := range configs {
 		if nc.Config == nil {
 			continue
