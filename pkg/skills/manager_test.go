@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -150,7 +149,7 @@ func TestFileManager_RenderCatalog(t *testing.T) {
 	assert.Contains(t, text, "test-skill")
 	assert.Contains(t, text, "simple-skill")
 
-	assert.Empty(t, m.RenderCatalog([]interfaces.SkillMeta{}))
+	assert.Empty(t, m.RenderCatalog([]SkillMeta{}))
 }
 
 func TestFileManager_LoadMemoryYAML(t *testing.T) {

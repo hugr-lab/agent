@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
@@ -97,7 +96,7 @@ func (s *Session) LastUpdateTime() time.Time {
 // ------------------------------------------------------------
 
 // SetCatalog replaces the catalog shown in this session's prompt.
-func (s *Session) SetCatalog(list []interfaces.SkillMeta) error {
+func (s *Session) SetCatalog(list []skills.SkillMeta) error {
 	s.state.SetCatalog(list)
 	s.touch()
 	return nil
@@ -313,7 +312,7 @@ func (s *Session) buildPrompt(ctx context.Context) string {
 	refs := append([]string(nil), s.state.Refs...)
 	s.state.mu.RUnlock()
 
-	var catalog []interfaces.SkillMeta
+	var catalog []skills.SkillMeta
 	if catalogSet {
 		catalog = catalogOverride
 	} else if list, err := s.skills.List(ctx); err == nil {
@@ -566,12 +565,12 @@ func (s *Session) Touch() { s.touch() }
 // Defined here so the (consumer-side) tools/system package can name the
 // type without sessions importing tools/system in return.
 type SkillDescriptorMeta struct {
-	Refs     []interfaces.SkillRefMeta
+	Refs     []skills.SkillRefMeta
 	NextStep string
 }
 
 // ListSkills returns the current skill catalogue.
-func (s *Session) ListSkills(ctx context.Context) ([]interfaces.SkillMeta, error) {
+func (s *Session) ListSkills(ctx context.Context) ([]skills.SkillMeta, error) {
 	return s.skills.List(ctx)
 }
 
@@ -583,7 +582,7 @@ func (s *Session) SkillMeta(ctx context.Context, name string) SkillDescriptorMet
 		return SkillDescriptorMeta{}
 	}
 	return SkillDescriptorMeta{
-		Refs:     append([]interfaces.SkillRefMeta(nil), sk.Refs...),
+		Refs:     append([]skills.SkillRefMeta(nil), sk.Refs...),
 		NextStep: sk.NextStep,
 	}
 }

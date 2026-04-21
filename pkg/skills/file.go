@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/learning"
 	"gopkg.in/yaml.v3"
 )
@@ -23,7 +22,7 @@ type skillFrontmatter struct {
 	NextStep    string               `yaml:"next_step"`
 }
 
-// frontmatterRefMeta mirrors interfaces.SkillRefMeta with YAML tags so
+// frontmatterRefMeta mirrors SkillRefMeta with YAML tags so
 // skill authors can list references with human-written descriptions
 // instead of relying on filename-as-description fallback.
 type frontmatterRefMeta struct {
@@ -48,12 +47,12 @@ func NewFileManager(path string) (Manager, error) {
 
 // List scans the skills directory and returns compact metadata for every
 // valid skill found. Directories without a parseable SKILL.md are skipped.
-func (m *fileManager) List(_ context.Context) ([]interfaces.SkillMeta, error) {
+func (m *fileManager) List(_ context.Context) ([]SkillMeta, error) {
 	entries, err := os.ReadDir(m.path)
 	if err != nil {
 		return nil, fmt.Errorf("skills: read %q: %w", m.path, err)
 	}
-	var out []interfaces.SkillMeta
+	var out []SkillMeta
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -66,7 +65,7 @@ func (m *fileManager) List(_ context.Context) ([]interfaces.SkillMeta, error) {
 		if name == "" {
 			name = e.Name()
 		}
-		out = append(out, interfaces.SkillMeta{
+		out = append(out, SkillMeta{
 			Name:        name,
 			Description: fm.Description,
 			Categories:  append([]string(nil), fm.Categories...),
@@ -122,10 +121,10 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 		providers = append(providers, spec)
 	}
 
-	var refs []interfaces.SkillRefMeta
+	var refs []SkillRefMeta
 	if len(fm.References) > 0 {
 		for _, r := range fm.References {
-			refs = append(refs, interfaces.SkillRefMeta{
+			refs = append(refs, SkillRefMeta{
 				Name:        r.Name,
 				Description: r.Description,
 			})
@@ -175,7 +174,7 @@ func (m *fileManager) Reference(_ context.Context, skillName, refName string) (s
 }
 
 // RenderCatalog delegates to the package-level helper.
-func (m *fileManager) RenderCatalog(skills []interfaces.SkillMeta) string {
+func (m *fileManager) RenderCatalog(skills []SkillMeta) string {
 	return RenderCatalog(skills)
 }
 
@@ -192,18 +191,18 @@ func readFrontmatter(skillDir string) (skillFrontmatter, bool) {
 	return fm, true
 }
 
-func listRefs(refDir string) ([]interfaces.SkillRefMeta, error) {
+func listRefs(refDir string) ([]SkillRefMeta, error) {
 	entries, err := os.ReadDir(refDir)
 	if err != nil {
 		return nil, err
 	}
-	var refs []interfaces.SkillRefMeta
+	var refs []SkillRefMeta
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".md")
-		refs = append(refs, interfaces.SkillRefMeta{Name: name, Description: name})
+		refs = append(refs, SkillRefMeta{Name: name, Description: name})
 	}
 	return refs, nil
 }

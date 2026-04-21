@@ -5,10 +5,20 @@
 // skill_load.
 package skills
 
-import (
-	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/pkg/learning"
-)
+import "github.com/hugr-lab/hugen/pkg/learning"
+
+// SkillMeta is a compact catalog entry for prompt injection (~50 tokens per skill).
+type SkillMeta struct {
+	Name        string   `json:"name" yaml:"name"`
+	Description string   `json:"description" yaml:"description"`
+	Categories  []string `json:"categories" yaml:"categories"`
+}
+
+// SkillRefMeta describes an available reference document within a skill.
+type SkillRefMeta struct {
+	Name        string `json:"name" yaml:"name"`
+	Description string `json:"description" yaml:"description"`
+}
 
 // Skill is a fully-loaded skill ready for the prompt + tool wiring.
 type Skill struct {
@@ -24,7 +34,7 @@ type Skill struct {
 	// to a configured provider or an inline MCP endpoint. The
 	// optional Tools allowlist filters what subset is exposed.
 	Providers []SkillProviderSpec
-	Refs      []interfaces.SkillRefMeta
+	Refs      []SkillRefMeta
 	// NextStep is an optional workflow hint returned to the LLM from
 	// skill_load. When empty, skill_load falls back to a generic
 	// "read refs before data tools" phrase.

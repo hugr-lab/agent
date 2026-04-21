@@ -3,15 +3,15 @@ package system
 import (
 	"context"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/hugr-lab/hugen/pkg/sessions"
+	"github.com/hugr-lab/hugen/pkg/skills"
 )
 
 // catalogLister is the extension interface satisfied by *sessions.Session
 // so skill_list can fetch the skill catalogue without system holding a
 // direct reference to skills.Manager.
 type catalogLister interface {
-	ListSkills(ctx context.Context) ([]interfaces.SkillMeta, error)
+	ListSkills(ctx context.Context) ([]skills.SkillMeta, error)
 }
 
 // skillDescriptor exposes skill metadata that isn't in *sessions.Session

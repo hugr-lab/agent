@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hugr-lab/hugen/interfaces"
+	"github.com/hugr-lab/hugen/pkg/skills"
 	adksession "google.golang.org/adk/session"
 )
 
@@ -23,7 +23,7 @@ const (
 	KeyRefs         = "session.refs"
 	KeyMaxTokens    = "session.max_tokens"
 	KeyUsedTokens   = "session.used_tokens"
-	KeyCatalog      = "session.catalog" // []interfaces.SkillMeta
+	KeyCatalog      = "session.catalog" // []skills.SkillMeta
 	KeyCatalogIsSet = "session.catalog_set"
 )
 
@@ -42,7 +42,7 @@ type State struct {
 
 	// Catalog override: when CatalogSet is true, CatalogSkills is shown
 	// in the prompt; otherwise the manager's default catalog is used.
-	CatalogSkills []interfaces.SkillMeta
+	CatalogSkills []skills.SkillMeta
 	CatalogSet    bool
 
 	// Token budget (calibrateTokens callback updates these).
@@ -112,7 +112,7 @@ func (s *State) Get(key string) (any, error) {
 	case KeyUsedTokens:
 		return s.ContextUsed, nil
 	case KeyCatalog:
-		return append([]interfaces.SkillMeta(nil), s.CatalogSkills...), nil
+		return append([]skills.SkillMeta(nil), s.CatalogSkills...), nil
 	case KeyCatalogIsSet:
 		return s.CatalogSet, nil
 	}
@@ -141,8 +141,8 @@ func (s *State) Set(key string, value any) error {
 	case KeyUsedTokens:
 		s.ContextUsed = toInt(value)
 	case KeyCatalog:
-		if v, ok := value.([]interfaces.SkillMeta); ok {
-			s.CatalogSkills = append([]interfaces.SkillMeta(nil), v...)
+		if v, ok := value.([]skills.SkillMeta); ok {
+			s.CatalogSkills = append([]skills.SkillMeta(nil), v...)
 		}
 	case KeyCatalogIsSet:
 		if v, ok := value.(bool); ok {
@@ -157,21 +157,21 @@ func (s *State) Set(key string, value any) error {
 // All yields every key-value pair — typed fields first, then kv entries.
 func (s *State) All() iter.Seq2[string, any] {
 	s.mu.RLock()
-	skills := cloneStrings(s.Skills)
-	tools := cloneStrings(s.Tools)
+	skillNames := cloneStrings(s.Skills)
+	toolNames := cloneStrings(s.Tools)
 	refs := cloneStrings(s.Refs)
 	maxT := s.MaxContextTokens
 	used := s.ContextUsed
-	catalog := append([]interfaces.SkillMeta(nil), s.CatalogSkills...)
+	catalog := append([]skills.SkillMeta(nil), s.CatalogSkills...)
 	catSet := s.CatalogSet
 	kv := maps.Clone(s.kv)
 	s.mu.RUnlock()
 
 	return func(yield func(string, any) bool) {
-		if !yield(KeySkills, skills) {
+		if !yield(KeySkills, skillNames) {
 			return
 		}
-		if !yield(KeyTools, tools) {
+		if !yield(KeyTools, toolNames) {
 			return
 		}
 		if !yield(KeyRefs, refs) {
@@ -326,10 +326,10 @@ func (s *State) RemoveRefsForSkill(skill string) int {
 }
 
 // SetCatalog replaces the catalog and marks the session as override.
-func (s *State) SetCatalog(skills []interfaces.SkillMeta) {
+func (s *State) SetCatalog(list []skills.SkillMeta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.CatalogSkills = append([]interfaces.SkillMeta(nil), skills...)
+	s.CatalogSkills = append([]skills.SkillMeta(nil), list...)
 	s.CatalogSet = true
 	s.dirty = true
 }

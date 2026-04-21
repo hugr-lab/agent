@@ -3,12 +3,10 @@ package skills
 import (
 	"fmt"
 	"strings"
-
-	"github.com/hugr-lab/hugen/interfaces"
 )
 
 // RenderCatalog builds the "## Available Skills" prompt block.
-func RenderCatalog(skills []interfaces.SkillMeta) string {
+func RenderCatalog(skills []SkillMeta) string {
 	if len(skills) == 0 {
 		return ""
 	}

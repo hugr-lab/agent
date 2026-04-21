@@ -2,8 +2,6 @@ package skills
 
 import (
 	"context"
-
-	"github.com/hugr-lab/hugen/interfaces"
 )
 
 // Manager is the skill catalogue abstraction. Implementations must treat
@@ -13,7 +11,7 @@ import (
 type Manager interface {
 	// List returns compact metadata for every skill currently in the
 	// catalogue.
-	List(ctx context.Context) ([]interfaces.SkillMeta, error)
+	List(ctx context.Context) ([]SkillMeta, error)
 
 	// Load returns the fully-loaded Skill (instructions, refs, mcp endpoint)
 	// for the given name. Returns an error if the skill is unknown.
@@ -24,7 +22,7 @@ type Manager interface {
 
 	// RenderCatalog formats a skill slice as a prompt block — caller
 	// decides which skills to show.
-	RenderCatalog(skills []interfaces.SkillMeta) string
+	RenderCatalog(skills []SkillMeta) string
 
 	// AutoloadNames returns every skill whose frontmatter sets
 	// autoload: true. Called by SessionManager on session Create.
