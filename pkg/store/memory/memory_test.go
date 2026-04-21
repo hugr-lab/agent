@@ -1,34 +1,52 @@
 //go:build duckdb_arrow
 
-package store_test
+package memory_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hugr-lab/hugen/pkg/store/memory"
+	"github.com/hugr-lab/hugen/pkg/store/registry"
+	"github.com/hugr-lab/hugen/pkg/store/testenv"
 )
 
-// seedAgent registers the agent row used by memory tests. memory_items
-// rows FK onto agents, so this has to land before any Store call.
-func seedAgent(t *testing.T, h store.DB, id, short string) {
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// newClient returns a memory.Client + seeds the agent row (memory_items
+// FK onto agents).
+func newClient(t *testing.T, agentID, shortID string) *memory.Client {
 	t.Helper()
-	require.NoError(t, h.RegisterAgent(context.Background(), store.Agent{
-		ID: id, AgentTypeID: "hugr-data", ShortID: short,
+	service, _ := testenv.Engine(t)
+	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	reg, err := registry.New(service, registry.Options{
+		AgentID: agentID, AgentShort: shortID, Logger: logger,
+	})
+	require.NoError(t, err)
+	require.NoError(t, reg.RegisterAgent(context.Background(), registry.Agent{
+		ID: agentID, AgentTypeID: "hugr-data", ShortID: shortID,
 		Name: "test-agent", Status: "active",
 	}))
+	c, err := memory.New(service, memory.Options{
+		AgentID: agentID, AgentShort: shortID, Logger: logger,
+	})
+	require.NoError(t, err)
+	return c
 }
 
 func TestMemory_StoreGetDelete(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	seedAgent(t, h, "agt_ag01", "ag01")
 
 	now := time.Now().UTC()
-	fact := store.MemoryItem{
+	fact := memory.Item{
 		Content:    "tf2.incidents has 14 fields",
 		Category:   "schema",
 		Volatility: "stable",
@@ -38,7 +56,7 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 		ValidTo:    now.Add(24 * time.Hour),
 	}
 	id, err := h.Store(ctx, fact, []string{"tf", "incidents", "schema"},
-		[]store.MemoryLink{{TargetID: "other-fact", Relation: "uses"}})
+		[]memory.Link{{TargetID: "other-fact", Relation: "uses"}})
 	require.NoError(t, err)
 	require.NotEmpty(t, id)
 
@@ -51,23 +69,19 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 	assert.ElementsMatch(t, []string{"other-fact"}, got.Links)
 	assert.True(t, got.IsValid)
 
-	// Search by content substring (keyword path, no embedding).
-	res, err := h.Search(ctx, "incidents", nil, store.SearchOpts{Limit: 5})
+	res, err := h.Search(ctx, "incidents", nil, memory.SearchOpts{Limit: 5})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 	assert.Equal(t, id, res[0].ID)
 
-	// Filter by tags — should still match.
-	res, err = h.Search(ctx, "", nil, store.SearchOpts{Tags: []string{"tf"}, Limit: 5})
+	res, err = h.Search(ctx, "", nil, memory.SearchOpts{Tags: []string{"tf"}, Limit: 5})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 
-	// Wrong tag filter → no results.
-	res, err = h.Search(ctx, "", nil, store.SearchOpts{Tags: []string{"weather"}, Limit: 5})
+	res, err = h.Search(ctx, "", nil, memory.SearchOpts{Tags: []string{"weather"}, Limit: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res)
 
-	// Delete and verify.
 	require.NoError(t, h.Delete(ctx, id))
 	got, err = h.Get(ctx, id)
 	require.NoError(t, err)
@@ -75,21 +89,19 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 }
 
 func TestMemory_Reinforce(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	seedAgent(t, h, "agt_ag01", "ag01")
 	now := time.Now().UTC()
 
-	id, err := h.Store(ctx, store.MemoryItem{
+	id, err := h.Store(ctx, memory.Item{
 		Content: "query pattern: filter weather by region", Category: "query_template",
 		Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, []string{"weather"}, nil)
 	require.NoError(t, err)
 
-	// Reinforce: bump score by 0.3, add a tag, add a link.
 	require.NoError(t, h.Reinforce(ctx, id, 0.3, []string{"region"},
-		[]store.MemoryLink{{TargetID: "schema-weather", Relation: "uses"}}))
+		[]memory.Link{{TargetID: "schema-weather", Relation: "uses"}}))
 
 	got, err := h.Get(ctx, id)
 	require.NoError(t, err)
@@ -101,22 +113,21 @@ func TestMemory_Reinforce(t *testing.T) {
 }
 
 func TestMemory_Stats(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	seedAgent(t, h, "agt_ag01", "ag01")
 	now := time.Now().UTC()
 
-	_, err := h.Store(ctx, store.MemoryItem{
+	_, err := h.Store(ctx, memory.Item{
 		Content: "a", Category: "schema", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
 	require.NoError(t, err)
-	_, err = h.Store(ctx, store.MemoryItem{
+	_, err = h.Store(ctx, memory.Item{
 		Content: "b", Category: "schema", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
 	require.NoError(t, err)
-	_, err = h.Store(ctx, store.MemoryItem{
+	_, err = h.Store(ctx, memory.Item{
 		Content: "c", Category: "query_template", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
@@ -135,18 +146,16 @@ func TestMemory_Stats(t *testing.T) {
 }
 
 func TestMemory_DeleteExpired(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	seedAgent(t, h, "agt_ag01", "ag01")
 	now := time.Now().UTC()
 
-	// One expired, one fresh.
-	_, err := h.Store(ctx, store.MemoryItem{
+	_, err := h.Store(ctx, memory.Item{
 		Content: "expired", Category: "schema", Volatility: "volatile", Score: 0.5,
 		ValidFrom: now.Add(-48 * time.Hour), ValidTo: now.Add(-1 * time.Hour),
 	}, nil, nil)
 	require.NoError(t, err)
-	freshID, err := h.Store(ctx, store.MemoryItem{
+	freshID, err := h.Store(ctx, memory.Item{
 		Content: "fresh", Category: "schema", Volatility: "stable", Score: 0.5,
 		ValidFrom: now, ValidTo: now.Add(24 * time.Hour),
 	}, nil, nil)
@@ -155,13 +164,11 @@ func TestMemory_DeleteExpired(t *testing.T) {
 	_, err = h.DeleteExpired(ctx)
 	require.NoError(t, err)
 
-	// Fresh one survives.
 	got, err := h.Get(ctx, freshID)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	// Confirm expired is gone — search for "expired" returns nothing.
-	res, err := h.Search(ctx, "expired", nil, store.SearchOpts{Limit: 5})
+	res, err := h.Search(ctx, "expired", nil, memory.SearchOpts{Limit: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res)
 }

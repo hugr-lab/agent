@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/skills"
-	"github.com/hugr-lab/hugen/pkg/store"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -31,7 +31,7 @@ type Session struct {
 	manager *Manager
 	skills  skills.Manager
 	tools   *tools.Manager
-	hub     store.DB
+	hub     *sessdb.Client
 	logger  *slog.Logger
 
 	constitution string
@@ -54,7 +54,7 @@ type sessionConfig struct {
 	manager      *Manager
 	skills       skills.Manager
 	tools        *tools.Manager
-	hub          store.DB
+	hub          *sessdb.Client
 	logger       *slog.Logger
 	constitution string
 }
@@ -159,14 +159,14 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 				providerNames = append(providerNames, spec.Endpoint)
 			}
 		}
-		meta, _ := json.Marshal(store.SkillLoadedMeta{
+		meta, _ := json.Marshal(sessdb.SkillLoadedMeta{
 			Skill: sk.Name,
 			Tools: providerNames,
 		})
-		ev := store.SessionEvent{
+		ev := sessdb.Event{
 			SessionID: s.id,
 			AgentID:   s.hub.AgentID(),
-			EventType: store.EventTypeSkillLoaded,
+			EventType: sessdb.EventTypeSkillLoaded,
 			Author:    s.id,
 			Content:   sk.Name,
 			Metadata:  jsonToMap(meta),
@@ -189,11 +189,11 @@ func (s *Session) UnloadSkill(ctx context.Context, name string) error {
 	s.touch()
 
 	if s.hub != nil {
-		meta, _ := json.Marshal(store.SkillUnloadedMeta{Skill: name})
-		ev := store.SessionEvent{
+		meta, _ := json.Marshal(sessdb.SkillUnloadedMeta{Skill: name})
+		ev := sessdb.Event{
 			SessionID: s.id,
 			AgentID:   s.hub.AgentID(),
-			EventType: store.EventTypeSkillUnloaded,
+			EventType: sessdb.EventTypeSkillUnloaded,
 			Author:    s.id,
 			Content:   name,
 			Metadata:  jsonToMap(meta),

@@ -17,15 +17,15 @@ import (
 
 	"github.com/spf13/viper"
 
-	agentcfg "github.com/hugr-lab/hugen/pkg/agent"
-	a2acfg "github.com/hugr-lab/hugen/pkg/a2a"
-	chatcontextcfg "github.com/hugr-lab/hugen/pkg/chatcontext"
-	devuicfg "github.com/hugr-lab/hugen/pkg/devui"
-	memorycfg "github.com/hugr-lab/hugen/pkg/memory"
-	modelscfg "github.com/hugr-lab/hugen/pkg/models"
-	skillscfg "github.com/hugr-lab/hugen/pkg/skills"
+	"github.com/hugr-lab/hugen/pkg/a2a"
+	"github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/chatcontext"
+	"github.com/hugr-lab/hugen/pkg/devui"
+	"github.com/hugr-lab/hugen/pkg/memory"
+	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store/local"
-	toolscfg "github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/hugen/pkg/tools"
 )
 
 // Config is the application configuration: pure composition of
@@ -37,17 +37,17 @@ type Config struct {
 	LocalDBEnabled bool
 	LocalDB        local.Config
 
-	Agent       agentcfg.Config
-	Skills      skillscfg.Config
-	A2A         a2acfg.Config
-	DevUI       devuicfg.Config
-	LLM         modelscfg.Config
-	Memory      memorycfg.Config
-	ChatContext chatcontextcfg.Config
-	MCP         toolscfg.MCPConfig
+	Agent       agent.Config
+	Skills      skills.Config
+	A2A         a2a.Config
+	DevUI       devui.Config
+	LLM         models.Config
+	Memory      memory.Config
+	ChatContext chatcontext.Config
+	MCP         tools.MCPConfig
 
 	Auth      []AuthConfig
-	Providers []toolscfg.ProviderConfig
+	Providers []tools.ProviderConfig
 }
 
 // AuthConfig declares a named auth mechanism. Callers build a
@@ -127,21 +127,21 @@ func Load(yamlPath string) (*Config, error) {
 			URL:    hugrURL,
 			MCPUrl: hugrURL + "/mcp",
 		},
-		Agent: agentcfg.Config{
+		Agent: agent.Config{
 			Constitution: v.GetString("AGENT_CONSTITUTION"),
 		},
-		Skills: skillscfg.Config{
+		Skills: skills.Config{
 			Path: v.GetString("AGENT_SKILLS_PATH"),
 		},
-		LLM: modelscfg.Config{
+		LLM: models.Config{
 			Model:     v.GetString("AGENT_MODEL"),
 			MaxTokens: v.GetInt("AGENT_MAX_TOKENS"),
 		},
-		A2A: a2acfg.Config{
+		A2A: a2a.Config{
 			Port:    port,
 			BaseURL: baseURL(v.GetString("AGENT_BASE_URL"), port),
 		},
-		DevUI: devuicfg.Config{
+		DevUI: devui.Config{
 			Port:    devUIPort,
 			BaseURL: baseURL(v.GetString("AGENT_DEVUI_BASE_URL"), devUIPort),
 		},
@@ -181,7 +181,7 @@ func expandAuthEnv(list []AuthConfig) {
 
 // expandProvidersEnv does the same for tools.ProviderConfig fields
 // that accept ${VAR} in yaml.
-func expandProvidersEnv(list []toolscfg.ProviderConfig) {
+func expandProvidersEnv(list []tools.ProviderConfig) {
 	for i := range list {
 		p := &list[i]
 		p.Endpoint = os.ExpandEnv(p.Endpoint)
@@ -233,7 +233,7 @@ func validateAuth(list []AuthConfig) error {
 
 // validateProviders enforces unique provider names and that every
 // provider's `auth:` reference (when set) exists in the auth list.
-func validateProviders(list []toolscfg.ProviderConfig, auths []AuthConfig) error {
+func validateProviders(list []tools.ProviderConfig, auths []AuthConfig) error {
 	seen := map[string]struct{}{}
 	authNames := map[string]struct{}{}
 	for _, a := range auths {

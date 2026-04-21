@@ -1,6 +1,6 @@
 //go:build duckdb_arrow
 
-package store_test
+package registry_test
 
 import (
 	"context"
@@ -10,19 +10,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/pkg/store"
+	"github.com/hugr-lab/hugen/pkg/store/registry"
+	"github.com/hugr-lab/hugen/pkg/store/testenv"
 )
 
-func newTestHubDB(t *testing.T, agentID, shortID string) store.DB {
+func newClient(t *testing.T, agentID, shortID string) *registry.Client {
 	t.Helper()
-	service, _ := testEngine(t)
-	h, err := store.New(service, store.Options{
+	service, _ := testenv.Engine(t)
+	c, err := registry.New(service, registry.Options{
 		AgentID:    agentID,
 		AgentShort: shortID,
 		Logger:     slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)
-	return h
+	return c
 }
 
 type discardWriter struct{}
@@ -30,7 +31,7 @@ type discardWriter struct{}
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 func TestGetAgentType_Seeded(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 
 	got, err := h.GetAgentType(context.Background(), "hugr-data")
 	require.NoError(t, err)
@@ -40,17 +41,17 @@ func TestGetAgentType_Seeded(t *testing.T) {
 }
 
 func TestGetAgentType_NotFound(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	got, err := h.GetAgentType(context.Background(), "does-not-exist")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
 
 func TestRegisterAgent_FirstTime(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
 
-	err := h.RegisterAgent(ctx, store.Agent{
+	err := h.RegisterAgent(ctx, registry.Agent{
 		ID:          "agt_ag02",
 		AgentTypeID: "hugr-data",
 		ShortID:     "ag02",
@@ -66,7 +67,7 @@ func TestRegisterAgent_FirstTime(t *testing.T) {
 }
 
 func TestRegisterAgent_Idempotent(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
 
 	first, err := h.GetAgent(ctx, "agt_ag01")
@@ -74,8 +75,7 @@ func TestRegisterAgent_Idempotent(t *testing.T) {
 	require.NotNil(t, first)
 	originalCreatedAt := first.CreatedAt
 
-	// Second register refreshes config_override + last_active, keeps created_at.
-	require.NoError(t, h.RegisterAgent(ctx, store.Agent{
+	require.NoError(t, h.RegisterAgent(ctx, registry.Agent{
 		ID:             "agt_ag01",
 		AgentTypeID:    "hugr-data",
 		ShortID:        "ag01",
@@ -94,14 +94,14 @@ func TestRegisterAgent_Idempotent(t *testing.T) {
 }
 
 func TestGetAgent_NotFound(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	got, err := h.GetAgent(context.Background(), "nobody")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
 
 func TestUpdateAgentActivity(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
 
 	before, err := h.GetAgent(ctx, "agt_ag01")

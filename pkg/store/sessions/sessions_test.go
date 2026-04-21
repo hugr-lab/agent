@@ -1,37 +1,52 @@
 //go:build duckdb_arrow
 
-package store_test
+package sessions_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
-	"github.com/hugr-lab/hugen/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hugr-lab/hugen/pkg/store/registry"
+	"github.com/hugr-lab/hugen/pkg/store/sessions"
+	"github.com/hugr-lab/hugen/pkg/store/testenv"
 )
 
-// TestSessions_CRUD exercises the real GraphQL paths for CreateSession,
-// UpdateSessionStatus, ListActiveSessions, AppendEvent, GetEvents.
-// Runs against a fully-bootstrapped engine + seeded schema via the
-// existing testEngine helper.
-func TestSessions_CRUD(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
-	ctx := context.Background()
+type discardWriter struct{}
 
-	// Seed an agent instance so session rows FK-link correctly.
-	err := h.RegisterAgent(ctx, store.Agent{
-		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01",
-		Name: "test-agent", Status: "active",
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func newClient(t *testing.T, agentID, shortID string) *sessions.Client {
+	t.Helper()
+	service, _ := testenv.Engine(t)
+	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	reg, err := registry.New(service, registry.Options{
+		AgentID: agentID, AgentShort: shortID, Logger: logger,
 	})
 	require.NoError(t, err)
+	require.NoError(t, reg.RegisterAgent(context.Background(), registry.Agent{
+		ID: agentID, AgentTypeID: "hugr-data", ShortID: shortID,
+		Name: "test-agent", Status: "active",
+	}))
+	c, err := sessions.New(service, sessions.Options{
+		AgentID: agentID, AgentShort: shortID, Logger: logger,
+	})
+	require.NoError(t, err)
+	return c
+}
 
-	// Create two sessions, leave one closed, verify ListActive.
-	_, err = h.CreateSession(ctx, store.SessionRecord{
+func TestSessions_CRUD(t *testing.T) {
+	h := newClient(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+
+	_, err := h.CreateSession(ctx, sessions.Record{
 		ID: "sess-active", OwnerID: "u1", Status: "active", Mission: "active one",
 	})
 	require.NoError(t, err)
-	_, err = h.CreateSession(ctx, store.SessionRecord{
+	_, err = h.CreateSession(ctx, sessions.Record{
 		ID: "sess-closed", OwnerID: "u1", Status: "active",
 	})
 	require.NoError(t, err)
@@ -47,16 +62,15 @@ func TestSessions_CRUD(t *testing.T) {
 	assert.True(t, ids["sess-active"], "active session missing from ListActiveSessions")
 	assert.False(t, ids["sess-closed"], "closed session leaked into ListActiveSessions")
 
-	// AppendEvent: skill_loaded, skill_unloaded. Seq auto-increments.
-	_, err = h.AppendEvent(ctx, store.SessionEvent{
-		SessionID: "sess-active", EventType: store.EventTypeSkillLoaded,
+	_, err = h.AppendEvent(ctx, sessions.Event{
+		SessionID: "sess-active", EventType: sessions.EventTypeSkillLoaded,
 		Author: "sess-active", Content: "hugr-data",
 		Metadata: map[string]any{"skill": "hugr-data"},
 	})
 	require.NoError(t, err)
 
-	_, err = h.AppendEvent(ctx, store.SessionEvent{
-		SessionID: "sess-active", EventType: store.EventTypeSkillUnloaded,
+	_, err = h.AppendEvent(ctx, sessions.Event{
+		SessionID: "sess-active", EventType: sessions.EventTypeSkillUnloaded,
 		Author: "sess-active", Content: "hugr-data",
 		Metadata: map[string]any{"skill": "hugr-data"},
 	})
@@ -65,30 +79,27 @@ func TestSessions_CRUD(t *testing.T) {
 	evs, err := h.GetEvents(ctx, "sess-active")
 	require.NoError(t, err)
 	require.Len(t, evs, 2)
-	assert.Equal(t, store.EventTypeSkillLoaded, evs[0].EventType)
-	assert.Equal(t, store.EventTypeSkillUnloaded, evs[1].EventType)
+	assert.Equal(t, sessions.EventTypeSkillLoaded, evs[0].EventType)
+	assert.Equal(t, sessions.EventTypeSkillUnloaded, evs[1].EventType)
 	assert.Equal(t, 1, evs[0].Seq)
 	assert.Equal(t, 2, evs[1].Seq)
 	assert.Equal(t, "hugr-data", evs[0].Content)
 }
 
 func TestSessions_Notes(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	require.NoError(t, h.RegisterAgent(ctx, store.Agent{
-		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01", Name: "test",
-	}))
-	_, err := h.CreateSession(ctx, store.SessionRecord{
+	_, err := h.CreateSession(ctx, sessions.Record{
 		ID: "sess-notes", OwnerID: "u1", Status: "active",
 	})
 	require.NoError(t, err)
 
-	id1, err := h.AddNote(ctx, store.SessionNote{
+	id1, err := h.AddNote(ctx, sessions.Note{
 		SessionID: "sess-notes", Content: "found 14 fields",
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, id1)
-	_, err = h.AddNote(ctx, store.SessionNote{
+	_, err = h.AddNote(ctx, sessions.Note{
 		SessionID: "sess-notes", Content: "severity 1-3",
 	})
 	require.NoError(t, err)
@@ -114,20 +125,17 @@ func TestSessions_Notes(t *testing.T) {
 }
 
 func TestSessions_Participants(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag01", "ag01")
+	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	require.NoError(t, h.RegisterAgent(ctx, store.Agent{
-		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01", Name: "test",
-	}))
-	_, err := h.CreateSession(ctx, store.SessionRecord{
+	_, err := h.CreateSession(ctx, sessions.Record{
 		ID: "sess-p", OwnerID: "u1", Status: "active",
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, h.AddParticipant(ctx, store.SessionParticipant{
+	require.NoError(t, h.AddParticipant(ctx, sessions.Participant{
 		SessionID: "sess-p", UserID: "u1", Role: "owner",
 	}))
-	require.NoError(t, h.AddParticipant(ctx, store.SessionParticipant{
+	require.NoError(t, h.AddParticipant(ctx, sessions.Participant{
 		SessionID: "sess-p", UserID: "u2", Role: "observer",
 	}))
 
@@ -143,12 +151,8 @@ func TestSessions_Participants(t *testing.T) {
 }
 
 func TestSessions_EmptyListActive(t *testing.T) {
-	h := newTestHubDB(t, "agt_ag02", "ag02")
+	h := newClient(t, "agt_ag02", "ag02")
 	ctx := context.Background()
-	require.NoError(t, h.RegisterAgent(ctx, store.Agent{
-		ID: "agt_ag02", AgentTypeID: "hugr-data", ShortID: "ag02", Name: "t2",
-	}))
-
 	active, err := h.ListActiveSessions(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, active)

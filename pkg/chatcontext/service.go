@@ -5,7 +5,8 @@ import (
 	"fmt"
 
 	"github.com/hugr-lab/hugen/pkg/sessions"
-	"github.com/hugr-lab/hugen/pkg/store"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -22,18 +23,20 @@ const ServiceName = "_context"
 // Compactor BeforeModelCallback — no context_compress tool is
 // exposed.
 type Service struct {
-	sm    *sessions.Manager
-	hub   store.DB
-	tools []tool.Tool
+	sm       *sessions.Manager
+	memory   *memdb.Client
+	sessions *sessdb.Client
+	tools    []tool.Tool
 }
 
-// NewService constructs the Service. hub may be nil — context_intro
-// then returns just prompt/tool counts without hub-level stats.
-func NewService(sm *sessions.Manager, hub store.DB) *Service {
-	s := &Service{sm: sm, hub: hub}
+// NewService constructs the Service. memory/sessions may be nil —
+// context_intro then returns just prompt/tool counts without
+// hub-level stats.
+func NewService(sm *sessions.Manager, memory *memdb.Client, sessClient *sessdb.Client) *Service {
+	s := &Service{sm: sm, memory: memory, sessions: sessClient}
 	s.tools = []tool.Tool{
 		&contextStatusTool{sm: sm},
-		&contextIntroTool{sm: sm, hub: hub},
+		&contextIntroTool{sm: sm, memory: memory, sessions: sessClient},
 	}
 	return s
 }
@@ -91,8 +94,9 @@ func (t *contextStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error)
 // ------------------------------------------------------------
 
 type contextIntroTool struct {
-	sm  *sessions.Manager
-	hub store.DB
+	sm       *sessions.Manager
+	memory   *memdb.Client
+	sessions *sessdb.Client
 }
 
 func (t *contextIntroTool) Name() string { return "context_intro" }
@@ -120,11 +124,13 @@ func (t *contextIntroTool) Run(ctx tool.Context, _ any) (map[string]any, error) 
 		"system_prompt_chars": len(snap.Prompt),
 		"loaded_tools":        len(snap.Tools),
 	}
-	if t.hub != nil {
-		if notes, err := t.hub.ListNotes(ctx, ctx.SessionID()); err == nil {
+	if t.sessions != nil {
+		if notes, err := t.sessions.ListNotes(ctx, ctx.SessionID()); err == nil {
 			out["session_notes"] = len(notes)
 		}
-		if stats, err := t.hub.Stats(ctx); err == nil {
+	}
+	if t.memory != nil {
+		if stats, err := t.memory.Stats(ctx); err == nil {
 			data, _ := json.Marshal(stats)
 			out["memory"] = json.RawMessage(data)
 		}

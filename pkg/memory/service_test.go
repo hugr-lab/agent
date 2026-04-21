@@ -3,20 +3,23 @@ package memory
 import (
 	"testing"
 
-	"github.com/hugr-lab/hugen/pkg/store"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestService_ToolNames — the service exposes the expected tools when
-// hub is provided; returns an empty tool list when hub is missing.
+// memory+sessions are provided; returns an empty tool list otherwise.
 func TestService_ToolNames(t *testing.T) {
-	// Nil hub → no tools (provider registers but exposes empty list).
-	svc := NewService(nil, nil)
+	// Nil clients → no tools (provider registers but exposes empty list).
+	svc := NewService(nil, nil, nil, nil)
 	assert.Empty(t, svc.Tools())
 
-	// Real hub → five tools by name.
-	svc = NewService(nil, stubHub{})
+	// Real clients → five tools by name. We use zero-value Client
+	// structs; the tools only need a pointer for wiring, not a working
+	// querier, since this test never invokes Run.
+	svc = NewService(nil, &memdb.Client{}, &sessdb.Client{}, nil)
 	tools := svc.Tools()
 	require.Len(t, tools, 5)
 	names := make([]string, 0, len(tools))
@@ -30,10 +33,5 @@ func TestService_ToolNames(t *testing.T) {
 }
 
 func TestService_Name(t *testing.T) {
-	assert.Equal(t, "_memory", NewService(nil, nil).Name())
+	assert.Equal(t, "_memory", NewService(nil, nil, nil, nil).Name())
 }
-
-// stubHub is a zero-value HubDB that returns empty results for every
-// method. The real adapter is exercised by pkg/store/*_test.go; this
-// package only verifies wiring.
-type stubHub struct{ store.DB }

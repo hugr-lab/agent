@@ -11,7 +11,9 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	"github.com/hugr-lab/hugen/pkg/store"
+	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -21,9 +23,11 @@ import (
 // calls Review). Review is idempotent: re-running on a completed
 // session is a no-op.
 type Reviewer struct {
-	hub    store.DB
-	router *models.Router
-	logger *slog.Logger
+	memory   *memdb.Client
+	learning *learndb.Client
+	sessions *sessdb.Client
+	router   *models.Router
+	logger   *slog.Logger
 
 	// Injected merged memory config — reviewer needs it to know which
 	// categories are valid and what prompt to send. Defaults to
@@ -49,7 +53,9 @@ type Reviewer struct {
 
 // ReviewerOptions bundle reviewer construction parameters.
 type ReviewerOptions struct {
-	Hub        store.DB
+	Memory     *memdb.Client
+	Learning   *learndb.Client
+	Sessions   *sessdb.Client
 	Router     *models.Router
 	Logger     *slog.Logger
 	Config     MergedConfig
@@ -67,14 +73,22 @@ type ReviewerOptions struct {
 // NewReviewer builds a Reviewer. Router is optional — if nil the
 // reviewer refuses to run (returns ErrNoModel). Hub is required.
 func NewReviewer(opts ReviewerOptions) (*Reviewer, error) {
-	if opts.Hub == nil {
-		return nil, fmt.Errorf("learning: Reviewer requires Hub")
+	if opts.Memory == nil {
+		return nil, fmt.Errorf("learning: Reviewer requires Memory")
+	}
+	if opts.Learning == nil {
+		return nil, fmt.Errorf("learning: Reviewer requires Learning")
+	}
+	if opts.Sessions == nil {
+		return nil, fmt.Errorf("learning: Reviewer requires Sessions")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
 	return &Reviewer{
-		hub:             opts.Hub,
+		memory:          opts.Memory,
+		learning:        opts.Learning,
+		sessions:        opts.Sessions,
 		router:          opts.Router,
 		logger:          opts.Logger,
 		config:          opts.Config,
@@ -92,7 +106,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if sessionID == "" {
 		return fmt.Errorf("learning: Reviewer: empty sessionID")
 	}
-	existing, err := r.hub.GetReview(ctx, sessionID)
+	existing, err := r.learning.GetReview(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("learning: GetReview: %w", err)
 	}
@@ -103,7 +117,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if existing != nil {
 		reviewID = existing.ID
 	} else {
-		id, err := r.hub.CreateReview(ctx, store.SessionReview{
+		id, err := r.learning.CreateReview(ctx, learndb.Review{
 			SessionID: sessionID, Status: "pending",
 		})
 		if err != nil {
@@ -112,7 +126,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 		reviewID = id
 	}
 
-	events, err := r.hub.GetEventsFull(ctx, sessionID)
+	events, err := r.sessions.GetEventsFull(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("learning: GetEventsFull: %w", err)
 	}
@@ -135,33 +149,33 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if toolCalls < minCalls {
 		r.logger.Info("reviewer: skipping session below min_tool_calls",
 			"session", sessionID, "tool_calls", toolCalls, "min", minCalls)
-		return r.hub.CompleteReview(ctx, reviewID, store.ReviewResult{
+		return r.learning.CompleteReview(ctx, reviewID, learndb.ReviewResult{
 			ModelUsed: "skipped",
 		})
 	}
 
 	if r.router == nil {
-		_ = r.hub.FailReview(ctx, reviewID, "no router configured")
+		_ = r.learning.FailReview(ctx, reviewID, "no router configured")
 		return fmt.Errorf("learning: Reviewer: no router")
 	}
 
-	notes, _ := r.hub.ListNotes(ctx, sessionID) // best-effort; notes are optional
+	notes, _ := r.sessions.ListNotes(ctx, sessionID) // best-effort; notes are optional
 	prompt := r.buildPrompt(events, notes, merged)
 
 	llm := r.router.ModelFor(models.IntentSummarization)
 	rawOutput, usage, err := RunOnce(ctx, llm, prompt)
 	if err != nil {
-		_ = r.hub.FailReview(ctx, reviewID, err.Error())
+		_ = r.learning.FailReview(ctx, reviewID, err.Error())
 		return fmt.Errorf("learning: LLM: %w", err)
 	}
 
 	parsed, err := parseReviewOutput(rawOutput)
 	if err != nil {
-		_ = r.hub.FailReview(ctx, reviewID, "parse: "+err.Error())
+		_ = r.learning.FailReview(ctx, reviewID, "parse: "+err.Error())
 		return fmt.Errorf("learning: parse: %w", err)
 	}
 
-	result := store.ReviewResult{
+	result := learndb.ReviewResult{
 		ModelUsed:  llm.Name(),
 		TokensUsed: usage,
 	}
@@ -182,7 +196,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	}
 
 	for _, hy := range parsed.Hypotheses {
-		if _, err := r.hub.CreateHypothesis(ctx, store.Hypothesis{
+		if _, err := r.learning.CreateHypothesis(ctx, learndb.Hypothesis{
 			Content:        hy.Content,
 			Category:       hy.Category,
 			Priority:       defaultStr(hy.Priority, "medium"),
@@ -197,7 +211,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 		result.HypothesesAdded++
 	}
 
-	return r.hub.CompleteReview(ctx, reviewID, result)
+	return r.learning.CompleteReview(ctx, reviewID, result)
 }
 
 // upsertFact stores a new fact or reinforces a close duplicate.
@@ -206,7 +220,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 // reviewer — keeps the path testable without an embedding model.
 func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact, merged MergedConfig) (bool, error) {
 	// Look for near-duplicates by category + keyword.
-	existing, _ := r.hub.Search(ctx, f.Content, nil, store.SearchOpts{
+	existing, _ := r.memory.Search(ctx, f.Content, nil, memdb.SearchOpts{
 		Category: f.Category,
 		Limit:    5,
 	})
@@ -214,7 +228,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 		if equalEnough(cand.Content, f.Content) {
 			// Reinforce with modest score bonus.
 			bonus := 0.15
-			if err := r.hub.Reinforce(ctx, cand.ID, bonus, f.Tags, linkList(f.Links)); err != nil {
+			if err := r.memory.Reinforce(ctx, cand.ID, bonus, f.Tags, linkList(f.Links)); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -224,7 +238,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 	vol := defaultStr(f.Volatility, "stable")
 	dur := r.durationFor(vol)
 	now := r.now()
-	item := store.MemoryItem{
+	item := memdb.Item{
 		Content:    f.Content,
 		Category:   f.Category,
 		Volatility: vol,
@@ -233,14 +247,14 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 		ValidFrom:  now,
 		ValidTo:    now.Add(dur),
 	}
-	_, err := r.hub.Store(ctx, item, f.Tags, linkList(f.Links))
+	_, err := r.memory.Store(ctx, item, f.Tags, linkList(f.Links))
 	return false, err
 }
 
 // buildPrompt assembles the summarisation prompt from transcript +
 // notes + merged review prompt. The format is intentionally small —
 // the cheap model sees: instruction + transcript window + notes.
-func (r *Reviewer) buildPrompt(events []store.SessionEventFull, notes []store.SessionNote, merged MergedConfig) string {
+func (r *Reviewer) buildPrompt(events []sessdb.EventFull, notes []sessdb.Note, merged MergedConfig) string {
 	var sb strings.Builder
 	sb.WriteString(r.reviewPrompt(merged))
 	sb.WriteString("\n\n## Transcript\n")
@@ -302,18 +316,18 @@ func (r *Reviewer) reviewPrompt(merged MergedConfig) string {
 // skill_loaded / skill_unloaded events, then asking loadSkillMemory
 // for each active skill's memory.yaml. Falls back to the reviewer's
 // static config when no loader is wired.
-func (r *Reviewer) mergedConfigFor(ctx context.Context, events []store.SessionEventFull) MergedConfig {
+func (r *Reviewer) mergedConfigFor(ctx context.Context, events []sessdb.EventFull) MergedConfig {
 	if r.loadSkillMemory == nil {
 		return r.config
 	}
 	active := map[string]struct{}{}
 	for _, ev := range events {
 		switch ev.EventType {
-		case store.EventTypeSkillLoaded:
+		case sessdb.EventTypeSkillLoaded:
 			if name := skillNameFromEvent(ev); name != "" {
 				active[name] = struct{}{}
 			}
-		case store.EventTypeSkillUnloaded:
+		case sessdb.EventTypeSkillUnloaded:
 			delete(active, skillNameFromEvent(ev))
 		}
 	}
@@ -332,7 +346,7 @@ func (r *Reviewer) mergedConfigFor(ctx context.Context, events []store.SessionEv
 	return MergeWithLogger(configs, r.logger)
 }
 
-func skillNameFromEvent(ev store.SessionEventFull) string {
+func skillNameFromEvent(ev sessdb.EventFull) string {
 	if ev.Metadata != nil {
 		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
 			return name
@@ -494,13 +508,13 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func linkList(targetIDs []string) []store.MemoryLink {
+func linkList(targetIDs []string) []memdb.Link {
 	if len(targetIDs) == 0 {
 		return nil
 	}
-	links := make([]store.MemoryLink, 0, len(targetIDs))
+	links := make([]memdb.Link, 0, len(targetIDs))
 	for _, id := range targetIDs {
-		links = append(links, store.MemoryLink{TargetID: id, Relation: "related"})
+		links = append(links, memdb.Link{TargetID: id, Relation: "related"})
 	}
 	return links
 }

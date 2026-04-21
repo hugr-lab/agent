@@ -1,4 +1,7 @@
-package store
+// Package qh (query-helper) is the shared GraphQL runner used by every
+// pkg/store/<domain> subpackage. Internal so only those subpackages
+// can import it — external callers construct typed clients instead.
+package qh
 
 import (
 	"context"
@@ -10,9 +13,9 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 )
 
-// dbTime unmarshals both RFC3339 and DuckDB's bare-timestamp format
+// DBTime unmarshals both RFC3339 and DuckDB's bare-timestamp format
 // ("2026-04-17 15:45:48.900887") from the GraphQL Timestamp scalar.
-type dbTime struct{ time.Time }
+type DBTime struct{ time.Time }
 
 var dbTimeLayouts = []string{
 	time.RFC3339Nano,
@@ -21,7 +24,8 @@ var dbTimeLayouts = []string{
 	"2006-01-02 15:04:05",
 }
 
-func (t *dbTime) UnmarshalJSON(b []byte) error {
+// UnmarshalJSON accepts a JSON string and tries each layout in order.
+func (t *DBTime) UnmarshalJSON(b []byte) error {
 	s := strings.Trim(string(b), `"`)
 	if s == "" || s == "null" {
 		return nil
@@ -35,10 +39,11 @@ func (t *dbTime) UnmarshalJSON(b []byte) error {
 	return fmt.Errorf("hubdb: unparseable timestamp %q", s)
 }
 
-// runQuery executes a GraphQL query, auto-closes the response (releases Arrow
-// buffers), checks for GraphQL errors, and scans the leaf at `path` into T.
-// Returns a zero T and types.ErrWrongDataPath when the path does not exist.
-func runQuery[T any](ctx context.Context, q types.Querier, query string, vars map[string]any, path string) (T, error) {
+// RunQuery executes a GraphQL query, auto-closes the response (releases
+// Arrow buffers), checks for GraphQL errors, and scans the leaf at
+// `path` into T. Returns the zero T and types.ErrWrongDataPath when
+// the path does not exist.
+func RunQuery[T any](ctx context.Context, q types.Querier, query string, vars map[string]any, path string) (T, error) {
 	var zero T
 	resp, err := q.Query(ctx, query, vars)
 	if err != nil {
@@ -58,9 +63,10 @@ func runQuery[T any](ctx context.Context, q types.Querier, query string, vars ma
 	return out, nil
 }
 
-// runMutation executes a GraphQL mutation and discards the payload — callers
-// use it for writes whose return value is OperationResult.affected_rows.
-func runMutation(ctx context.Context, q types.Querier, mutation string, vars map[string]any) error {
+// RunMutation executes a GraphQL mutation and discards the payload —
+// callers use it for writes whose return value is
+// OperationResult.affected_rows.
+func RunMutation(ctx context.Context, q types.Querier, mutation string, vars map[string]any) error {
 	resp, err := q.Query(ctx, mutation, vars)
 	if err != nil {
 		return fmt.Errorf("hubdb mutation: %w", err)

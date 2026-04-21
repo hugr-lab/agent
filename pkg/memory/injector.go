@@ -5,7 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/store"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 )
@@ -29,8 +30,8 @@ type InstructionProvider = llmagent.InstructionProvider
 // instructions (spec 005 research Decision 4). `Session.Snapshot`
 // continues to return the state-only base prompt — the hint sits on
 // top.
-func WrapInstruction(base InstructionProvider, hub store.DB) InstructionProvider {
-	if hub == nil {
+func WrapInstruction(base InstructionProvider, memory *memdb.Client, sessions *sessdb.Client) InstructionProvider {
+	if memory == nil {
 		return base
 	}
 	cache := &injectorCache{entries: map[string]injectorEntry{}}
@@ -45,7 +46,7 @@ func WrapInstruction(base InstructionProvider, hub store.DB) InstructionProvider
 		}
 		hint := cache.get(sid)
 		if hint == "" {
-			hint = renderStatus(ctx, sid, hub)
+			hint = renderStatus(ctx, sid, memory, sessions)
 			cache.put(sid, hint)
 		}
 		if hint == "" {
@@ -56,15 +57,17 @@ func WrapInstruction(base InstructionProvider, hub store.DB) InstructionProvider
 }
 
 // renderStatus builds a single "## Memory Status" line from
-// HubDB.Memory.Hint + HubDB.Sessions.ListNotes count.
-func renderStatus(ctx agent.ReadonlyContext, sid string, hub store.DB) string {
-	h, err := hub.Hint(ctx, "", nil)
+// memory.Hint + sessions.ListNotes count.
+func renderStatus(ctx agent.ReadonlyContext, sid string, memory *memdb.Client, sessions *sessdb.Client) string {
+	h, err := memory.Hint(ctx, "", nil)
 	if err != nil || h == "" {
 		return ""
 	}
 	out := "## Memory Status\n" + h
-	if notes, err := hub.ListNotes(ctx, sid); err == nil && len(notes) > 0 {
-		out += fmt.Sprintf(". Session notes: %d.", len(notes))
+	if sessions != nil {
+		if notes, err := sessions.ListNotes(ctx, sid); err == nil && len(notes) > 0 {
+			out += fmt.Sprintf(". Session notes: %d.", len(notes))
+		}
 	}
 	out += "\nUse memory_search(query, tags?) to retrieve. Use memory_note(content) to save."
 	return out

@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/store"
+	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
 )
 
 // Verifier runs one hypothesis check per VerifyNext invocation. The
@@ -19,9 +20,10 @@ import (
 // standalone mode; Hub-mode can later route verification through a
 // sub-agent with richer tool access.
 type Verifier struct {
-	hub    store.DB
-	router *models.Router
-	logger *slog.Logger
+	memory   *memdb.Client
+	learning *learndb.Client
+	router   *models.Router
+	logger   *slog.Logger
 
 	// volatility maps a volatility label to duration used when storing
 	// confirmed/rejected facts. Falls back to defaults when empty.
@@ -33,7 +35,8 @@ type Verifier struct {
 
 // VerifierOptions bundles verifier construction parameters.
 type VerifierOptions struct {
-	Hub        store.DB
+	Memory     *memdb.Client
+	Learning   *learndb.Client
 	Router     *models.Router
 	Logger     *slog.Logger
 	Volatility map[string]time.Duration
@@ -41,8 +44,11 @@ type VerifierOptions struct {
 
 // NewVerifier builds a Verifier.
 func NewVerifier(opts VerifierOptions) (*Verifier, error) {
-	if opts.Hub == nil {
-		return nil, fmt.Errorf("learning: Verifier requires Hub")
+	if opts.Memory == nil {
+		return nil, fmt.Errorf("learning: Verifier requires Memory")
+	}
+	if opts.Learning == nil {
+		return nil, fmt.Errorf("learning: Verifier requires Learning")
 	}
 	if opts.Router == nil {
 		return nil, fmt.Errorf("learning: Verifier requires Router")
@@ -51,7 +57,8 @@ func NewVerifier(opts VerifierOptions) (*Verifier, error) {
 		opts.Logger = slog.Default()
 	}
 	return &Verifier{
-		hub:        opts.Hub,
+		memory:     opts.Memory,
+		learning:   opts.Learning,
 		router:     opts.Router,
 		logger:     opts.Logger,
 		volatility: opts.Volatility,
@@ -64,7 +71,7 @@ func NewVerifier(opts VerifierOptions) (*Verifier, error) {
 // is nothing to verify.
 func (v *Verifier) VerifyNext(ctx context.Context) error {
 	for _, priority := range []string{"high", "medium", "low"} {
-		pending, err := v.hub.ListPendingHypotheses(ctx, priority, 1)
+		pending, err := v.learning.ListPendingHypotheses(ctx, priority, 1)
 		if err != nil {
 			return fmt.Errorf("learning: ListPendingHypotheses: %w", err)
 		}
@@ -80,8 +87,8 @@ func (v *Verifier) VerifyNext(ctx context.Context) error {
 // → parse verdict → Confirm / Reject / Defer. Failures mid-flight
 // leave the row in `checking` — a subsequent Consolidator run can
 // reset stuck rows, or the operator can inspect the hypothesis.
-func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
-	if err := v.hub.MarkHypothesisChecking(ctx, h.ID); err != nil {
+func (v *Verifier) verify(ctx context.Context, h learndb.Hypothesis) error {
+	if err := v.learning.MarkHypothesisChecking(ctx, h.ID); err != nil {
 		return fmt.Errorf("learning: MarkChecking %q: %w", h.ID, err)
 	}
 
@@ -89,7 +96,7 @@ func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
 	llm := v.router.ModelFor(models.IntentToolCalling)
 	raw, _, err := RunOnce(ctx, llm, prompt)
 	if err != nil {
-		_ = v.hub.DeferHypothesis(ctx, h.ID)
+		_ = v.learning.DeferHypothesis(ctx, h.ID)
 		return fmt.Errorf("learning: LLM: %w", err)
 	}
 
@@ -97,7 +104,7 @@ func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
 	if err != nil {
 		v.logger.Warn("verifier: unparseable verdict; deferring",
 			"hypothesis", h.ID, "err", err)
-		return v.hub.DeferHypothesis(ctx, h.ID)
+		return v.learning.DeferHypothesis(ctx, h.ID)
 	}
 
 	switch verdict.Verdict {
@@ -108,14 +115,14 @@ func (v *Verifier) verify(ctx context.Context, h store.Hypothesis) error {
 	default:
 		v.logger.Info("verifier: inconclusive; deferring",
 			"hypothesis", h.ID, "verdict", verdict.Verdict)
-		return v.hub.DeferHypothesis(ctx, h.ID)
+		return v.learning.DeferHypothesis(ctx, h.ID)
 	}
 }
 
-func (v *Verifier) confirmHypothesis(ctx context.Context, h store.Hypothesis, verdict verifierVerdict) error {
+func (v *Verifier) confirmHypothesis(ctx context.Context, h learndb.Hypothesis, verdict verifierVerdict) error {
 	now := v.now()
 	dur := v.durationFor(defaultStr(verdict.Volatility, "stable"))
-	factID, err := v.hub.Store(ctx, store.MemoryItem{
+	factID, err := v.memory.Store(ctx, memdb.Item{
 		Content:    h.Content + "\nEvidence: " + verdict.Evidence,
 		Category:   defaultStr(h.Category, "data_insight"),
 		Volatility: defaultStr(verdict.Volatility, "stable"),
@@ -127,13 +134,13 @@ func (v *Verifier) confirmHypothesis(ctx context.Context, h store.Hypothesis, ve
 	if err != nil {
 		return fmt.Errorf("learning: Store confirmed fact: %w", err)
 	}
-	return v.hub.ConfirmHypothesis(ctx, h.ID, verdict.Evidence, factID)
+	return v.learning.ConfirmHypothesis(ctx, h.ID, verdict.Evidence, factID)
 }
 
-func (v *Verifier) rejectHypothesis(ctx context.Context, h store.Hypothesis, verdict verifierVerdict) error {
+func (v *Verifier) rejectHypothesis(ctx context.Context, h learndb.Hypothesis, verdict verifierVerdict) error {
 	now := v.now()
 	dur := v.durationFor("moderate")
-	_, err := v.hub.Store(ctx, store.MemoryItem{
+	_, err := v.memory.Store(ctx, memdb.Item{
 		Content:    "Rejected hypothesis: " + h.Content + "\nReality: " + verdict.Evidence,
 		Category:   "anti_pattern",
 		Volatility: "moderate",
@@ -145,10 +152,10 @@ func (v *Verifier) rejectHypothesis(ctx context.Context, h store.Hypothesis, ver
 	if err != nil {
 		return fmt.Errorf("learning: Store anti-pattern: %w", err)
 	}
-	return v.hub.RejectHypothesis(ctx, h.ID, verdict.Evidence)
+	return v.learning.RejectHypothesis(ctx, h.ID, verdict.Evidence)
 }
 
-func (v *Verifier) buildPrompt(h store.Hypothesis) string {
+func (v *Verifier) buildPrompt(h learndb.Hypothesis) string {
 	var b strings.Builder
 	b.WriteString("You are verifying a hypothesis derived from a prior agent session. Respond with a single JSON object describing your verdict — do not use tools.\n\n")
 	b.WriteString("Hypothesis: ")

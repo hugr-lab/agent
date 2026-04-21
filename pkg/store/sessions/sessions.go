@@ -1,4 +1,4 @@
-package store
+package sessions
 
 import (
 	"context"
@@ -8,17 +8,19 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
+	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+
 	"github.com/hugr-lab/hugen/pkg/id"
 )
 
 // CreateSession inserts a new row into hub.db.agent.sessions. Idempotent:
 // if a row with the same ID already exists, returns that ID.
-func (h *hubDB) CreateSession(ctx context.Context, s SessionRecord) (string, error) {
+func (c *Client) CreateSession(ctx context.Context, s Record) (string, error) {
 	if s.ID == "" {
 		return "", fmt.Errorf("hubdb: CreateSession requires ID")
 	}
 	if s.AgentID == "" {
-		s.AgentID = h.agentID
+		s.AgentID = c.agentID
 	}
 	status := s.Status
 	if status == "" {
@@ -44,7 +46,7 @@ func (h *hubDB) CreateSession(ctx context.Context, s SessionRecord) (string, err
 	if s.Metadata != nil {
 		data["metadata"] = s.Metadata
 	}
-	err := runMutation(ctx, h.querier,
+	err := qh.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_sessions_mut_input_data!) {
 			hub { db { agent {
 				insert_sessions(data: $data) { id }
@@ -59,8 +61,8 @@ func (h *hubDB) CreateSession(ctx context.Context, s SessionRecord) (string, err
 }
 
 // UpdateSessionStatus updates a session row's status column.
-func (h *hubDB) UpdateSessionStatus(ctx context.Context, id, status string) error {
-	return runMutation(ctx, h.querier,
+func (c *Client) UpdateSessionStatus(ctx context.Context, id, status string) error {
+	return qh.RunMutation(ctx, c.querier,
 		`mutation ($id: String!, $data: hub_db_sessions_mut_data!) {
 			hub { db { agent {
 				update_sessions(filter: {id: {eq: $id}}, data: $data) { affected_rows }
@@ -75,7 +77,7 @@ func (h *hubDB) UpdateSessionStatus(ctx context.Context, id, status string) erro
 
 // ListActiveSessions returns all sessions owned by this agent with
 // status="active". Used by SessionManager.RestoreOpen on startup.
-func (h *hubDB) ListActiveSessions(ctx context.Context) ([]SessionRecord, error) {
+func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 	type row struct {
 		ID              string         `json:"id"`
 		AgentID         string         `json:"agent_id"`
@@ -85,10 +87,10 @@ func (h *hubDB) ListActiveSessions(ctx context.Context) ([]SessionRecord, error)
 		Status          string         `json:"status"`
 		Mission         string         `json:"mission"`
 		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       dbTime         `json:"created_at"`
-		UpdatedAt       dbTime         `json:"updated_at"`
+		CreatedAt       qh.DBTime         `json:"created_at"`
+		UpdatedAt       qh.DBTime         `json:"updated_at"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, status: {eq: "active"}}) {
@@ -96,7 +98,7 @@ func (h *hubDB) ListActiveSessions(ctx context.Context) ([]SessionRecord, error)
 				}
 			}}}
 		}`,
-		map[string]any{"agent": h.agentID},
+		map[string]any{"agent": c.agentID},
 		"hub.db.agent.sessions",
 	)
 	if err != nil {
@@ -105,9 +107,9 @@ func (h *hubDB) ListActiveSessions(ctx context.Context) ([]SessionRecord, error)
 		}
 		return nil, err
 	}
-	out := make([]SessionRecord, 0, len(rows))
+	out := make([]Record, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, SessionRecord{
+		out = append(out, Record{
 			ID:              r.ID,
 			AgentID:         r.AgentID,
 			OwnerID:         r.OwnerID,
@@ -126,7 +128,7 @@ func (h *hubDB) ListActiveSessions(ctx context.Context) ([]SessionRecord, error)
 // AppendEvent inserts a row into hub.db.agent.session_events. Computes seq
 // as max(seq)+1 within the session (not transactionally atomic; fine for
 // single-writer-per-session which is how ADK drives sessions).
-func (h *hubDB) AppendEvent(ctx context.Context, ev SessionEvent) (string, error) {
+func (c *Client) AppendEvent(ctx context.Context, ev Event) (string, error) {
 	if ev.SessionID == "" {
 		return "", fmt.Errorf("hubdb: AppendEvent requires SessionID")
 	}
@@ -134,11 +136,11 @@ func (h *hubDB) AppendEvent(ctx context.Context, ev SessionEvent) (string, error
 		return "", fmt.Errorf("hubdb: AppendEvent requires EventType")
 	}
 	if ev.AgentID == "" {
-		ev.AgentID = h.agentID
+		ev.AgentID = c.agentID
 	}
 	seq := ev.Seq
 	if seq == 0 {
-		next, err := h.nextSeq(ctx, ev.SessionID)
+		next, err := c.nextSeq(ctx, ev.SessionID)
 		if err != nil {
 			return "", err
 		}
@@ -146,7 +148,7 @@ func (h *hubDB) AppendEvent(ctx context.Context, ev SessionEvent) (string, error
 	}
 	eventID := ev.ID
 	if eventID == "" {
-		eventID = id.New(id.PrefixEvent, h.agentShort)
+		eventID = id.New(id.PrefixEvent, c.agentShort)
 	}
 	data := map[string]any{
 		"id":         eventID,
@@ -171,7 +173,7 @@ func (h *hubDB) AppendEvent(ctx context.Context, ev SessionEvent) (string, error
 	if ev.Metadata != nil {
 		data["metadata"] = ev.Metadata
 	}
-	if err := runMutation(ctx, h.querier,
+	if err := qh.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_events_mut_input_data!) {
 			hub { db { agent {
 				insert_session_events(data: $data) { id }
@@ -185,7 +187,7 @@ func (h *hubDB) AppendEvent(ctx context.Context, ev SessionEvent) (string, error
 }
 
 // GetEvents returns every event in a session ordered by seq ASC.
-func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]SessionEvent, error) {
+func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, error) {
 	type row struct {
 		ID         string          `json:"id"`
 		SessionID  string          `json:"session_id"`
@@ -198,9 +200,9 @@ func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]SessionEvent
 		ToolArgs   json.RawMessage `json:"tool_args"`
 		ToolResult string          `json:"tool_result"`
 		Metadata   map[string]any  `json:"metadata"`
-		CreatedAt  dbTime          `json:"created_at"`
+		CreatedAt  qh.DBTime          `json:"created_at"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(filter: {session_id: {eq: $sid}}, order_by: [{field: "seq", direction: ASC}]) {
@@ -217,13 +219,13 @@ func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]SessionEvent
 		}
 		return nil, err
 	}
-	out := make([]SessionEvent, 0, len(rows))
+	out := make([]Event, 0, len(rows))
 	for _, r := range rows {
 		var toolArgs map[string]any
 		if len(r.ToolArgs) > 0 {
 			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
 		}
-		out = append(out, SessionEvent{
+		out = append(out, Event{
 			ID:         r.ID,
 			SessionID:  r.SessionID,
 			AgentID:    r.AgentID,
@@ -243,7 +245,7 @@ func (h *hubDB) GetEvents(ctx context.Context, sessionID string) ([]SessionEvent
 
 // GetSession fetches a single session row. Returns (nil, nil) when
 // the session is not found.
-func (h *hubDB) GetSession(ctx context.Context, id string) (*SessionRecord, error) {
+func (c *Client) GetSession(ctx context.Context, id string) (*Record, error) {
 	type row struct {
 		ID              string         `json:"id"`
 		AgentID         string         `json:"agent_id"`
@@ -253,10 +255,10 @@ func (h *hubDB) GetSession(ctx context.Context, id string) (*SessionRecord, erro
 		Status          string         `json:"status"`
 		Mission         string         `json:"mission"`
 		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       dbTime         `json:"created_at"`
-		UpdatedAt       dbTime         `json:"updated_at"`
+		CreatedAt       qh.DBTime         `json:"created_at"`
+		UpdatedAt       qh.DBTime         `json:"updated_at"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
@@ -264,7 +266,7 @@ func (h *hubDB) GetSession(ctx context.Context, id string) (*SessionRecord, erro
 				}
 			}}}
 		}`,
-		map[string]any{"agent": h.agentID, "id": id},
+		map[string]any{"agent": c.agentID, "id": id},
 		"hub.db.agent.sessions",
 	)
 	if err != nil {
@@ -277,7 +279,7 @@ func (h *hubDB) GetSession(ctx context.Context, id string) (*SessionRecord, erro
 		return nil, nil
 	}
 	r := rows[0]
-	return &SessionRecord{
+	return &Record{
 		ID:              r.ID,
 		AgentID:         r.AgentID,
 		OwnerID:         r.OwnerID,
@@ -293,7 +295,7 @@ func (h *hubDB) GetSession(ctx context.Context, id string) (*SessionRecord, erro
 
 // ListChildSessions returns every session whose parent_session_id
 // matches parentSessionID. Empty slice when none exist.
-func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) ([]SessionRecord, error) {
+func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) ([]Record, error) {
 	type row struct {
 		ID              string         `json:"id"`
 		AgentID         string         `json:"agent_id"`
@@ -303,10 +305,10 @@ func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) (
 		Status          string         `json:"status"`
 		Mission         string         `json:"mission"`
 		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       dbTime         `json:"created_at"`
-		UpdatedAt       dbTime         `json:"updated_at"`
+		CreatedAt       qh.DBTime         `json:"created_at"`
+		UpdatedAt       qh.DBTime         `json:"updated_at"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $parent: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, parent_session_id: {eq: $parent}}) {
@@ -314,7 +316,7 @@ func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) (
 				}
 			}}}
 		}`,
-		map[string]any{"agent": h.agentID, "parent": parentSessionID},
+		map[string]any{"agent": c.agentID, "parent": parentSessionID},
 		"hub.db.agent.sessions",
 	)
 	if err != nil {
@@ -323,9 +325,9 @@ func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) (
 		}
 		return nil, err
 	}
-	out := make([]SessionRecord, 0, len(rows))
+	out := make([]Record, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, SessionRecord{
+		out = append(out, Record{
 			ID:              r.ID,
 			AgentID:         r.AgentID,
 			OwnerID:         r.OwnerID,
@@ -345,7 +347,7 @@ func (h *hubDB) ListChildSessions(ctx context.Context, parentSessionID string) (
 // the session_events_full view, which recursively includes inherited
 // events from the parent chain for forked sessions. Sub-agents (no
 // fork_after_seq) see only their own events.
-func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]SessionEventFull, error) {
+func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFull, error) {
 	type row struct {
 		ID         string          `json:"id"`
 		SessionID  string          `json:"session_id"`
@@ -358,10 +360,10 @@ func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]SessionE
 		ToolArgs   json.RawMessage `json:"tool_args"`
 		ToolResult string          `json:"tool_result"`
 		Metadata   map[string]any  `json:"metadata"`
-		CreatedAt  dbTime          `json:"created_at"`
+		CreatedAt  qh.DBTime          `json:"created_at"`
 		ChainDepth int             `json:"chain_depth"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($input: session_events_full_input!) {
 			hub { db { agent {
 				session_events_full(session_events_full_input: $input) {
@@ -379,14 +381,14 @@ func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]SessionE
 		}
 		return nil, err
 	}
-	out := make([]SessionEventFull, 0, len(rows))
+	out := make([]EventFull, 0, len(rows))
 	for _, r := range rows {
 		var toolArgs map[string]any
 		if len(r.ToolArgs) > 0 {
 			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
 		}
-		out = append(out, SessionEventFull{
-			SessionEvent: SessionEvent{
+		out = append(out, EventFull{
+			Event: Event{
 				ID:         r.ID,
 				SessionID:  r.SessionID,
 				AgentID:    r.AgentID,
@@ -407,14 +409,14 @@ func (h *hubDB) GetEventsFull(ctx context.Context, sessionID string) ([]SessionE
 }
 
 // CountToolCalls counts the tool_call rows in a session's transcript.
-func (h *hubDB) CountToolCalls(ctx context.Context, sessionID string) (int, error) {
+func (c *Client) CountToolCalls(ctx context.Context, sessionID string) (int, error) {
 	type row struct {
 		Seq int `json:"seq"`
 	}
 	// query-engine may not expose aggregate(count) across all deployments;
 	// fetch IDs with limit and count client-side. Cheap at session scale
 	// (<1k rows per session).
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}) { seq }
@@ -440,7 +442,7 @@ func (h *hubDB) CountToolCalls(ctx context.Context, sessionID string) (int, erro
 // Caller may supply note.ID; otherwise pkg/id.New(PrefixNote, short)
 // generates one. Session notes are the LLM's scratchpad — they live
 // in the system prompt's fixed part and survive context compaction.
-func (h *hubDB) AddNote(ctx context.Context, note SessionNote) (string, error) {
+func (c *Client) AddNote(ctx context.Context, note Note) (string, error) {
 	if note.SessionID == "" {
 		return "", fmt.Errorf("hubdb: AddNote requires SessionID")
 	}
@@ -448,10 +450,10 @@ func (h *hubDB) AddNote(ctx context.Context, note SessionNote) (string, error) {
 		return "", fmt.Errorf("hubdb: AddNote requires Content")
 	}
 	if note.ID == "" {
-		note.ID = id.New(id.PrefixNote, h.agentShort)
+		note.ID = id.New(id.PrefixNote, c.agentShort)
 	}
 	if note.AgentID == "" {
-		note.AgentID = h.agentID
+		note.AgentID = c.agentID
 	}
 	data := map[string]any{
 		"id":         note.ID,
@@ -459,7 +461,7 @@ func (h *hubDB) AddNote(ctx context.Context, note SessionNote) (string, error) {
 		"session_id": note.SessionID,
 		"content":    note.Content,
 	}
-	if err := runMutation(ctx, h.querier,
+	if err := qh.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_notes_mut_input_data!) {
 			hub { db { agent {
 				insert_session_notes(data: $data) { id }
@@ -473,15 +475,15 @@ func (h *hubDB) AddNote(ctx context.Context, note SessionNote) (string, error) {
 }
 
 // ListNotes returns every note in a session ordered by created_at ASC.
-func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]SessionNote, error) {
+func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error) {
 	type row struct {
 		ID        string `json:"id"`
 		AgentID   string `json:"agent_id"`
 		SessionID string `json:"session_id"`
 		Content   string `json:"content"`
-		CreatedAt dbTime `json:"created_at"`
+		CreatedAt qh.DBTime `json:"created_at"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_notes(filter: {session_id: {eq: $sid}}, order_by: [{field: "created_at", direction: ASC}]) {
@@ -498,9 +500,9 @@ func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]SessionNote,
 		}
 		return nil, err
 	}
-	out := make([]SessionNote, 0, len(rows))
+	out := make([]Note, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, SessionNote{
+		out = append(out, Note{
 			ID:        r.ID,
 			AgentID:   r.AgentID,
 			SessionID: r.SessionID,
@@ -512,8 +514,8 @@ func (h *hubDB) ListNotes(ctx context.Context, sessionID string) ([]SessionNote,
 }
 
 // DeleteNote removes a single note by ID.
-func (h *hubDB) DeleteNote(ctx context.Context, noteID string) error {
-	return runMutation(ctx, h.querier,
+func (c *Client) DeleteNote(ctx context.Context, noteID string) error {
+	return qh.RunMutation(ctx, c.querier,
 		`mutation ($id: String!) {
 			hub { db { agent {
 				delete_session_notes(filter: {id: {eq: $id}}) { affected_rows }
@@ -526,11 +528,11 @@ func (h *hubDB) DeleteNote(ctx context.Context, noteID string) error {
 // DeleteSessionNotes removes every note in a session. Returns the
 // affected_rows count reported by the mutation (best-effort; 0 on
 // parse failure is not treated as an error).
-func (h *hubDB) DeleteSessionNotes(ctx context.Context, sessionID string) (int, error) {
+func (c *Client) DeleteSessionNotes(ctx context.Context, sessionID string) (int, error) {
 	type result struct {
 		Affected int `json:"affected_rows"`
 	}
-	resp, err := h.querier.Query(ctx,
+	resp, err := c.querier.Query(ctx,
 		`mutation ($sid: String!) {
 			hub { db { agent {
 				delete_session_notes(filter: {session_id: {eq: $sid}}) { affected_rows }
@@ -559,7 +561,7 @@ func (h *hubDB) DeleteSessionNotes(ctx context.Context, sessionID string) (int, 
 // ------------------------------------------------------------
 
 // AddParticipant inserts a session_participants row.
-func (h *hubDB) AddParticipant(ctx context.Context, p SessionParticipant) error {
+func (c *Client) AddParticipant(ctx context.Context, p Participant) error {
 	if p.SessionID == "" || p.UserID == "" {
 		return fmt.Errorf("hubdb: AddParticipant requires SessionID + UserID")
 	}
@@ -572,7 +574,7 @@ func (h *hubDB) AddParticipant(ctx context.Context, p SessionParticipant) error 
 		"user_id":    p.UserID,
 		"role":       role,
 	}
-	return runMutation(ctx, h.querier,
+	return qh.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_participants_mut_input_data!) {
 			hub { db { agent {
 				insert_session_participants(data: $data) { session_id user_id }
@@ -584,8 +586,8 @@ func (h *hubDB) AddParticipant(ctx context.Context, p SessionParticipant) error 
 
 // RemoveParticipant hard-deletes a participant row. An audit-preserving
 // variant (set left_at=now) can land later if a need arises.
-func (h *hubDB) RemoveParticipant(ctx context.Context, sessionID, userID string) error {
-	return runMutation(ctx, h.querier,
+func (c *Client) RemoveParticipant(ctx context.Context, sessionID, userID string) error {
+	return qh.RunMutation(ctx, c.querier,
 		`mutation ($sid: String!, $uid: String!) {
 			hub { db { agent {
 				delete_session_participants(filter: {session_id: {eq: $sid}, user_id: {eq: $uid}}) {
@@ -598,15 +600,15 @@ func (h *hubDB) RemoveParticipant(ctx context.Context, sessionID, userID string)
 }
 
 // ListParticipants returns every participant row for a session.
-func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]SessionParticipant, error) {
+func (c *Client) ListParticipants(ctx context.Context, sessionID string) ([]Participant, error) {
 	type row struct {
 		SessionID string  `json:"session_id"`
 		UserID    string  `json:"user_id"`
 		Role      string  `json:"role"`
-		JoinedAt  dbTime  `json:"joined_at"`
-		LeftAt    *dbTime `json:"left_at"`
+		JoinedAt  qh.DBTime  `json:"joined_at"`
+		LeftAt    *qh.DBTime `json:"left_at"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_participants(filter: {session_id: {eq: $sid}}) {
@@ -623,9 +625,9 @@ func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]Sessi
 		}
 		return nil, err
 	}
-	out := make([]SessionParticipant, 0, len(rows))
+	out := make([]Participant, 0, len(rows))
 	for _, r := range rows {
-		p := SessionParticipant{
+		p := Participant{
 			SessionID: r.SessionID,
 			UserID:    r.UserID,
 			Role:      r.Role,
@@ -644,11 +646,11 @@ func (h *hubDB) ListParticipants(ctx context.Context, sessionID string) ([]Sessi
 // internal
 // ------------------------------------------------------------
 
-func (h *hubDB) nextSeq(ctx context.Context, sessionID string) (int, error) {
+func (c *Client) nextSeq(ctx context.Context, sessionID string) (int, error) {
 	type row struct {
 		Seq int `json:"seq"`
 	}
-	rows, err := runQuery[[]row](ctx, h.querier,
+	rows, err := qh.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(

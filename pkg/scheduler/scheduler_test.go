@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/store"
+	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,14 +39,14 @@ func TestSchedule_NextMatches(t *testing.T) {
 }
 
 // stubHub lets us fake ListPendingReviews without a real engine.
+// It satisfies the narrow LearningStore interface the scheduler uses.
 type stubHub struct {
-	store.DB
-	pending atomic.Value // []store.SessionReview
+	pending atomic.Value // []learndb.Review
 }
 
-func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]store.SessionReview, error) {
+func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]learndb.Review, error) {
 	if v := s.pending.Load(); v != nil {
-		return v.([]store.SessionReview), nil
+		return v.([]learndb.Review), nil
 	}
 	return nil, nil
 }
@@ -72,14 +72,14 @@ func (r *stubReviewer) Review(ctx context.Context, sessionID string) error {
 
 func TestScheduler_PicksPendingReview(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]store.SessionReview{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
+	hub.pending.Store([]learndb.Review{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
 	rv := newStubReviewer()
 
 	s, err := New(Runtime{
 		Interval:    20 * time.Millisecond,
 		ReviewDelay: 5 * time.Millisecond,
 		Reviewer:    rv,
-		Hub:         hub,
+		Learning:    hub,
 		Logger:      slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 		Interval:    time.Hour, // so ticker doesn't fire
 		ReviewDelay: 5 * time.Millisecond,
 		Reviewer:    rv,
-		Hub:         hub,
+		Learning:    hub,
 		Logger:      slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)
@@ -118,7 +118,7 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 	s.Start(ctx)
 
 	// Populate pending list then nudge.
-	hub.pending.Store([]store.SessionReview{{ID: "r1", SessionID: "sX", Status: "pending"}})
+	hub.pending.Store([]learndb.Review{{ID: "r1", SessionID: "sX", Status: "pending"}})
 	s.QueueReview("sX")
 
 	select {
@@ -130,12 +130,12 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 
 func TestScheduler_ReviewerErrorLogged(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]store.SessionReview{{SessionID: "s1", Status: "pending"}})
+	hub.pending.Store([]learndb.Review{{SessionID: "s1", Status: "pending"}})
 	rv := newStubReviewer()
 	rv.err = errors.New("boom")
 	s, err := New(Runtime{
 		Interval: 15 * time.Millisecond,
-		Reviewer: rv, Hub: hub,
+		Reviewer: rv, Learning: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)
@@ -160,7 +160,7 @@ func TestScheduler_StopTimeout(t *testing.T) {
 	hub := &stubHub{}
 	rv := newStubReviewer()
 	s, err := New(Runtime{
-		Interval: time.Hour, Reviewer: rv, Hub: hub,
+		Interval: time.Hour, Reviewer: rv, Learning: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)
@@ -190,13 +190,13 @@ func TestScheduler_StopTimeout(t *testing.T) {
 // twice across two separate Scheduler lifetimes.
 func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]store.SessionReview{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
+	hub.pending.Store([]learndb.Review{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
 
 	// First run — picks the review, then "crashes" via ctx cancel.
 	rv1 := newStubReviewer()
 	s1, err := New(Runtime{
 		Interval: 15 * time.Millisecond,
-		Reviewer: rv1, Hub: hub,
+		Reviewer: rv1, Learning: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)
@@ -216,7 +216,7 @@ func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
 	rv2 := newStubReviewer()
 	s2, err := New(Runtime{
 		Interval: 15 * time.Millisecond,
-		Reviewer: rv2, Hub: hub,
+		Reviewer: rv2, Learning: hub,
 		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
 	})
 	require.NoError(t, err)

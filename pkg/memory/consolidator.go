@@ -6,21 +6,24 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/store"
+	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
 )
 
 // Consolidator performs idempotent background maintenance: deletes
 // expired memory items and expires stale hypotheses. Runs under the
 // scheduler's priority-30 cron lane (ADR v7.2 §8).
 type Consolidator struct {
-	hub              store.DB
+	memory           *memdb.Client
+	learning         *learndb.Client
 	hypothesisExpiry time.Duration
 	logger           *slog.Logger
 }
 
 // ConsolidatorOptions bundles consolidator construction parameters.
 type ConsolidatorOptions struct {
-	Hub              store.DB
+	Memory           *memdb.Client
+	Learning         *learndb.Client
 	HypothesisExpiry time.Duration
 	Logger           *slog.Logger
 }
@@ -28,8 +31,11 @@ type ConsolidatorOptions struct {
 // NewConsolidator builds a Consolidator. HypothesisExpiry defaults to
 // 30 days when zero.
 func NewConsolidator(opts ConsolidatorOptions) (*Consolidator, error) {
-	if opts.Hub == nil {
-		return nil, fmt.Errorf("learning: Consolidator requires Hub")
+	if opts.Memory == nil {
+		return nil, fmt.Errorf("learning: Consolidator requires Memory")
+	}
+	if opts.Learning == nil {
+		return nil, fmt.Errorf("learning: Consolidator requires Learning")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -38,7 +44,8 @@ func NewConsolidator(opts ConsolidatorOptions) (*Consolidator, error) {
 		opts.HypothesisExpiry = 30 * 24 * time.Hour
 	}
 	return &Consolidator{
-		hub:              opts.Hub,
+		memory:           opts.Memory,
+		learning:         opts.Learning,
 		hypothesisExpiry: opts.HypothesisExpiry,
 		logger:           opts.Logger,
 	}, nil
@@ -48,11 +55,11 @@ func NewConsolidator(opts ConsolidatorOptions) (*Consolidator, error) {
 // expire old hypotheses. Both operations are idempotent — re-running
 // immediately after a previous pass is safe (affects 0 rows).
 func (c *Consolidator) Run(ctx context.Context) error {
-	factsDeleted, err := c.hub.DeleteExpired(ctx)
+	factsDeleted, err := c.memory.DeleteExpired(ctx)
 	if err != nil {
 		c.logger.Warn("consolidator: DeleteExpired", "err", err)
 	}
-	hypsExpired, err := c.hub.ExpireOldHypotheses(ctx, c.hypothesisExpiry)
+	hypsExpired, err := c.learning.ExpireOldHypotheses(ctx, c.hypothesisExpiry)
 	if err != nil {
 		c.logger.Warn("consolidator: ExpireOldHypotheses", "err", err)
 	}

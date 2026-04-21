@@ -9,7 +9,8 @@ import (
 	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	"github.com/hugr-lab/hugen/pkg/store"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -29,7 +30,8 @@ import (
 //     describing the fold so the post-session reviewer can still see
 //     how many turns were summarised.
 type Compactor struct {
-	hub             store.DB
+	memory          *memdb.Client
+	sessions        *sessdb.Client
 	router          *models.Router
 	tokens          *models.TokenEstimator
 	threshold       float64
@@ -40,7 +42,8 @@ type Compactor struct {
 
 // CompactorOptions bundles compactor construction parameters.
 type CompactorOptions struct {
-	Hub       store.DB
+	Memory    *memdb.Client
+	Sessions  *sessdb.Client
 	Router    *models.Router
 	Tokens    *models.TokenEstimator
 	Threshold float64 // default 0.70
@@ -56,8 +59,8 @@ type CompactorOptions struct {
 
 // NewCompactor constructs a Compactor.
 func NewCompactor(opts CompactorOptions) (*Compactor, error) {
-	if opts.Hub == nil {
-		return nil, fmt.Errorf("learning: Compactor requires Hub")
+	if opts.Sessions == nil {
+		return nil, fmt.Errorf("learning: Compactor requires Sessions")
 	}
 	if opts.Router == nil {
 		return nil, fmt.Errorf("learning: Compactor requires Router")
@@ -75,7 +78,8 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 		opts.MinTurns = 4
 	}
 	return &Compactor{
-		hub:             opts.Hub,
+		memory:          opts.Memory,
+		sessions:        opts.Sessions,
 		router:          opts.Router,
 		tokens:          opts.Tokens,
 		threshold:       opts.Threshold,
@@ -126,8 +130,8 @@ func (c *Compactor) Before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 	newContents = append(newContents, tail...)
 	req.Contents = newContents
 
-	if sid != "" && c.hub != nil {
-		_, _ = c.hub.AppendEvent(ctx, store.SessionEvent{
+	if sid != "" && c.sessions != nil {
+		_, _ = c.sessions.AppendEvent(ctx, sessdb.Event{
 			SessionID: sid,
 			EventType: "compaction",
 			Author:    "system",
@@ -274,21 +278,21 @@ func (c *Compactor) Callback() llmagent.BeforeModelCallback {
 // the session has no transcript, returns a zero-value memory.MergedConfig so
 // summarise uses its built-in defaults.
 func (c *Compactor) mergedHints(ctx context.Context, sid string) memory.MergedConfig {
-	if c.loadSkillMemory == nil || c.hub == nil || sid == "" {
+	if c.loadSkillMemory == nil || c.sessions == nil || sid == "" {
 		return memory.MergedConfig{}
 	}
-	events, err := c.hub.GetEvents(ctx, sid)
+	events, err := c.sessions.GetEvents(ctx, sid)
 	if err != nil {
 		return memory.MergedConfig{}
 	}
 	active := map[string]struct{}{}
 	for _, ev := range events {
 		switch ev.EventType {
-		case store.EventTypeSkillLoaded:
+		case sessdb.EventTypeSkillLoaded:
 			if name := skillNameFromSessionEvent(ev); name != "" {
 				active[name] = struct{}{}
 			}
-		case store.EventTypeSkillUnloaded:
+		case sessdb.EventTypeSkillUnloaded:
 			delete(active, skillNameFromSessionEvent(ev))
 		}
 	}
@@ -309,7 +313,7 @@ func (c *Compactor) mergedHints(ctx context.Context, sid string) memory.MergedCo
 // skillNameFromSessionEvent is the SessionEvent counterpart to
 // skillNameFromEvent — shares the Metadata["skill"] fallback to
 // SessionEvent.Content.
-func skillNameFromSessionEvent(ev store.SessionEvent) string {
+func skillNameFromSessionEvent(ev sessdb.Event) string {
 	if ev.Metadata != nil {
 		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
 			return name

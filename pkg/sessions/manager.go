@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	"github.com/hugr-lab/hugen/pkg/store"
+	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	adksession "google.golang.org/adk/session"
 )
@@ -28,7 +28,7 @@ type Config struct {
 
 	// Hub persists session rows and skill lifecycle events. May be nil
 	// for tests.
-	Hub store.DB
+	Hub *sessdb.Client
 
 	// Constitution is the base system prompt text.
 	Constitution string
@@ -79,7 +79,7 @@ type Manager struct {
 
 	skills        skills.Manager
 	tools         *tools.Manager
-	hub           store.DB
+	hub           *sessdb.Client
 	constitution  string
 	logger        *slog.Logger
 	inlineBuilder InlineProviderFactory
@@ -171,10 +171,10 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 		active := map[string]struct{}{}
 		for _, ev := range events {
 			switch ev.EventType {
-			case store.EventTypeSkillLoaded:
+			case sessdb.EventTypeSkillLoaded:
 				name := ev.Content
 				if name == "" {
-					var meta store.SkillLoadedMeta
+					var meta sessdb.SkillLoadedMeta
 					raw, _ := json.Marshal(ev.Metadata)
 					_ = json.Unmarshal(raw, &meta)
 					name = meta.Skill
@@ -182,7 +182,7 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 				if name != "" {
 					active[name] = struct{}{}
 				}
-			case store.EventTypeSkillUnloaded:
+			case sessdb.EventTypeSkillUnloaded:
 				delete(active, ev.Content)
 			}
 		}
@@ -251,7 +251,7 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 	}
 
 	if m.hub != nil {
-		row := store.SessionRecord{
+		row := sessdb.Record{
 			ID:      id,
 			AgentID: m.hub.AgentID(),
 			OwnerID: req.UserID,

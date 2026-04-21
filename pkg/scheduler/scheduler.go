@@ -7,7 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/store"
+	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
+	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
 )
 
 // Reviewer, Verifier, and Consolidator are the contracts the scheduler
@@ -24,6 +25,13 @@ type (
 	}
 	Consolidator interface {
 		Run(ctx context.Context) error
+	}
+
+	// LearningStore is the narrow slice of the learning client the
+	// scheduler needs. Declared locally so tests can substitute stubs
+	// without building a full *learndb.Client.
+	LearningStore interface {
+		ListPendingReviews(ctx context.Context, limit int) ([]learndb.Review, error)
 	}
 )
 
@@ -46,7 +54,8 @@ type Runtime struct {
 	Reviewer     Reviewer
 	Verifier     Verifier
 	Consolidator Consolidator
-	Hub          store.DB
+	Memory       *memdb.Client
+	Learning     LearningStore
 	Logger       *slog.Logger
 }
 
@@ -62,8 +71,8 @@ type Scheduler struct {
 // New constructs a Scheduler. Fills in defaults but does not start
 // any goroutine. Start(ctx) kicks the loop off.
 func New(cfg Runtime) (*Scheduler, error) {
-	if cfg.Hub == nil {
-		return nil, fmt.Errorf("scheduler: Hub required")
+	if cfg.Learning == nil {
+		return nil, fmt.Errorf("scheduler: Learning required")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -178,10 +187,10 @@ func (s *Scheduler) tick(ctx context.Context) {
 // pickReview runs the oldest pending review in one tick. Returns true
 // if work was picked (so other lanes sit out the tick).
 func (s *Scheduler) pickReview(ctx context.Context) bool {
-	if s.cfg.Reviewer == nil || s.cfg.Hub == nil {
+	if s.cfg.Reviewer == nil || s.cfg.Learning == nil {
 		return false
 	}
-	pending, err := s.cfg.Hub.ListPendingReviews(ctx, 1)
+	pending, err := s.cfg.Learning.ListPendingReviews(ctx, 1)
 	if err != nil {
 		s.cfg.Logger.Warn("scheduler: ListPendingReviews", "err", err)
 		return false
