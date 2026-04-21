@@ -13,6 +13,7 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/hugr-lab/hugen/pkg/a2a"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
@@ -63,7 +64,7 @@ func startTestA2AServer(t *testing.T, llmResponse string) *a2aclient.Client {
 	sessionSvc := adksession.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, sessionSvc, artifactSvc, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -139,7 +140,7 @@ func TestA2A_AgentCard(t *testing.T) {
 	defer listener.Close()
 
 	baseURL := "http://" + listener.Addr().String()
-	cardH, invokeH := a2aHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -227,7 +228,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 	baseURL := "http://" + listener.Addr().String()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2aHandlers(a, sessionMgr, artifactSvc, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, sessionMgr, artifactSvc, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)

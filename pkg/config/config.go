@@ -93,8 +93,14 @@ type AgentConfig struct {
 	SkillsPath   string
 	MaxTokens    int
 	Temperature  float32
-	Port         int
+	Port         int // A2A listener (and auth callbacks) — default 10000
 	BaseURL      string
+	// DevUIPort is the separate listener for the ADK devui + REST +
+	// /dev/* helpers. Only consumed in `devui` mode; A2A and auth
+	// callbacks stay on Port so redirect_uri configuration is
+	// independent of the run mode.
+	DevUIPort    int
+	DevUIBaseURL string
 }
 
 // ── Agent identity (from config.yaml agent: ...) ────────────
@@ -198,6 +204,7 @@ func Load(yamlPath string) (*Config, error) {
 	v.SetDefault("AGENT_SKILLS_PATH", "./skills")
 	v.SetDefault("AGENT_MAX_TOKENS", 0)
 	v.SetDefault("AGENT_PORT", 10000)
+	v.SetDefault("AGENT_DEVUI_PORT", 10001)
 
 	_ = v.ReadInConfig()
 
@@ -213,6 +220,7 @@ func Load(yamlPath string) (*Config, error) {
 
 	hugrURL := strings.TrimRight(v.GetString("HUGR_URL"), "/")
 	port := v.GetInt("AGENT_PORT")
+	devUIPort := v.GetInt("AGENT_DEVUI_PORT")
 
 	// Default HUGR_MCP_URL before yaml expansion so ${HUGR_MCP_URL}
 	// in providers:/auth: resolves even when the operator didn't set
@@ -233,6 +241,8 @@ func Load(yamlPath string) (*Config, error) {
 			MaxTokens:    v.GetInt("AGENT_MAX_TOKENS"),
 			Port:         port,
 			BaseURL:      baseURL(v.GetString("AGENT_BASE_URL"), port),
+			DevUIPort:    devUIPort,
+			DevUIBaseURL: baseURL(v.GetString("AGENT_DEVUI_BASE_URL"), devUIPort),
 		},
 	}
 
