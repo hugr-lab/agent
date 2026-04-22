@@ -203,8 +203,7 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 		Metadata   map[string]any  `json:"metadata"`
 		CreatedAt  time.Time          `json:"created_at"`
 	}
-	var rows []row
-	if err := queries.RunQueryJSON(ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(filter: {session_id: {eq: $sid}}, order_by: [{field: "seq", direction: ASC}]) {
@@ -214,8 +213,8 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 		}`,
 		map[string]any{"sid": sessionID},
 		"hub.db.agent.session_events",
-		&rows,
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
@@ -365,8 +364,7 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 		CreatedAt  time.Time          `json:"created_at"`
 		ChainDepth int             `json:"chain_depth"`
 	}
-	var rows []row
-	if err := queries.RunQueryJSON(ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($input: session_events_full_input!) {
 			hub { db { agent {
 				session_events_full(session_events_full_input: $input) {
@@ -377,8 +375,8 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 		}`,
 		map[string]any{"input": map[string]any{"session_id": sessionID}},
 		"hub.db.agent.session_events_full",
-		&rows,
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}

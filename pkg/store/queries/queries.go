@@ -10,10 +10,12 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 )
 
-// RunQuery executes a GraphQL query against q, closes the response,
-// and returns the payload at path scanned as T. Delegates to
-// types.Scan[T] which picks between slice (ScanTable) and object
-// (ScanObject) destinations by reflect.
+// RunQuery executes a GraphQL query, closes the response, and scans
+// the payload at path into T. Uses ScanData under the hood — the
+// unified scan path that honours Arrow extension types (geometry,
+// timestamps) and handles embedded row structs / json.RawMessage
+// fields through stdlib json.Unmarshal. Fast-path: when Response.Data
+// at path is a *types.JsonValue, raw bytes go straight to unmarshal.
 func RunQuery[T any](ctx context.Context, q types.Querier, query string, vars map[string]any, path string) (T, error) {
 	var zero T
 	resp, err := q.Query(ctx, query, vars)
@@ -24,24 +26,11 @@ func RunQuery[T any](ctx context.Context, q types.Querier, query string, vars ma
 	if err := resp.Err(); err != nil {
 		return zero, fmt.Errorf("hubdb graphql: %w", err)
 	}
-	return types.Scan[T](resp, path)
-}
-
-// RunQueryJSON is the JSON-shaped variant of RunQuery: the response is
-// first marshalled to JSON and then unmarshalled into dest. Needed for
-// row types that contain `json.RawMessage` fields — ScanTable/Arrow
-// path cannot decode Arrow utf8 into RawMessage, while ScanData goes
-// through JSON and handles it naturally.
-func RunQueryJSON(ctx context.Context, q types.Querier, query string, vars map[string]any, path string, dest any) error {
-	resp, err := q.Query(ctx, query, vars)
-	if err != nil {
-		return fmt.Errorf("hubdb query: %w", err)
+	var dest T
+	if err := resp.ScanData(path, &dest); err != nil {
+		return zero, err
 	}
-	defer resp.Close()
-	if err := resp.Err(); err != nil {
-		return fmt.Errorf("hubdb graphql: %w", err)
-	}
-	return resp.ScanData(path, dest)
+	return dest, nil
 }
 
 // RunMutation executes a GraphQL mutation and discards the payload —

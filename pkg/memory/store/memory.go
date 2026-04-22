@@ -163,8 +163,8 @@ func (c *Client) Search(ctx context.Context, query string, embedding []float32, 
 		// Naive ILIKE fallback; a richer FTS setup can replace this later.
 		filter["content"] = map[string]any{"ilike": "%" + query + "%"}
 	}
-	var rows []row
-	if err := queries.RunQueryJSON(ctx, c.querier, q, vars, "hub.db.agent.memory_items", &rows); err != nil {
+	rows, err := queries.RunQuery[[]row](ctx, c.querier, q, vars, "hub.db.agent.memory_items")
+	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
@@ -209,8 +209,7 @@ func (c *Client) Get(ctx context.Context, memID string) (*SearchResult, error) {
 		Tags  []memoryTagRow  `json:"tags"`
 		Links []memoryLinkRow `json:"outgoing_links"`
 	}
-	var rows []row
-	err := queries.RunQueryJSON(ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
 			hub { db { agent {
 				memory_items(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
@@ -224,7 +223,6 @@ func (c *Client) Get(ctx context.Context, memID string) (*SearchResult, error) {
 		}`,
 		map[string]any{"agent": c.agentID, "id": memID},
 		"hub.db.agent.memory_items",
-		&rows,
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {

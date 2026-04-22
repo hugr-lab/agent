@@ -75,8 +75,7 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 		AgentID      string          `json:"agent_id"`
 		Details      json.RawMessage `json:"details"`
 	}
-	var rows []row
-	if err := queries.RunQueryJSON(ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $mid: String!, $limit: Int!) {
 			hub { db { agent {
 				memory_log(
@@ -90,8 +89,8 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 		}`,
 		map[string]any{"agent": c.agentID, "mid": memoryItemID, "limit": limit},
 		"hub.db.agent.memory_log",
-		&rows,
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
