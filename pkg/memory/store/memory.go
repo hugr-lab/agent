@@ -41,23 +41,9 @@ func offsetMicro(base time.Time, idx int) time.Time {
 // Read path
 // ------------------------------------------------------------
 
-type memoryRow struct {
-	ID         string  `json:"id"`
-	AgentID    string  `json:"agent_id"`
-	Content    string  `json:"content"`
-	Category   string  `json:"category"`
-	Volatility string  `json:"volatility"`
-	Score      float64 `json:"score"`
-	Source     string  `json:"source"`
-	ValidFrom  time.Time  `json:"valid_from"`
-	ValidTo    time.Time  `json:"valid_to"`
-	CreatedAt  time.Time  `json:"created_at"`
-	IsValid    bool    `json:"is_valid"`
-	AgeDays    int     `json:"age_days"`
-	ExpiresIn  int     `json:"expires_in_days"`
-	Distance   float64 `json:"_embedding_distance"`
-}
-
+// memoryTagRow / memoryLinkRow mirror the nested `tags { tag }` and
+// `outgoing_links { target_id relation }` arrays selected alongside
+// memory_items in Search / Get.
 type memoryTagRow struct {
 	Tag string `json:"tag"`
 }
@@ -67,43 +53,28 @@ type memoryLinkRow struct {
 	Relation string `json:"relation"`
 }
 
-func toSearchResult(r memoryRow, tags []memoryTagRow, links []memoryLinkRow) SearchResult {
-	res := SearchResult{
-		Item: Item{
-			ID:         r.ID,
-			AgentID:    r.AgentID,
-			Content:    r.Content,
-			Category:   r.Category,
-			Volatility: r.Volatility,
-			Score:      r.Score,
-			Source:     r.Source,
-			ValidFrom:  r.ValidFrom,
-			ValidTo:    r.ValidTo,
-			CreatedAt:  r.CreatedAt,
-		},
-		IsValid:       r.IsValid,
-		AgeDays:       r.AgeDays,
-		ExpiresInDays: r.ExpiresIn,
-		Distance:      r.Distance,
-	}
-	for _, t := range tags {
-		res.Tags = append(res.Tags, t.Tag)
-	}
-	for _, l := range links {
-		res.Links = append(res.Links, l.TargetID)
-	}
-	return res
-}
-
 // Search returns memory items matching the query. Applies the agent
 // scope + valid_to > now by default. When embedding is provided and the
 // engine exposes similarity, results are ordered by cosine distance;
 // otherwise the query-string is used as an ILIKE pattern.
 func (c *Client) Search(ctx context.Context, query string, embedding []float32, opts SearchOpts) ([]SearchResult, error) {
 	type row struct {
-		memoryRow
-		Tags  []memoryTagRow  `json:"tags"`
-		Links []memoryLinkRow `json:"outgoing_links"`
+		ID         string          `json:"id"`
+		AgentID    string          `json:"agent_id"`
+		Content    string          `json:"content"`
+		Category   string          `json:"category"`
+		Volatility string          `json:"volatility"`
+		Score      float64         `json:"score"`
+		Source     string          `json:"source"`
+		ValidFrom  time.Time       `json:"valid_from"`
+		ValidTo    time.Time       `json:"valid_to"`
+		CreatedAt  time.Time       `json:"created_at"`
+		IsValid    bool            `json:"is_valid"`
+		AgeDays    int             `json:"age_days"`
+		ExpiresIn  int             `json:"expires_in_days"`
+		Distance   float64         `json:"_embedding_distance"`
+		Tags       []memoryTagRow  `json:"tags"`
+		Links      []memoryLinkRow `json:"outgoing_links"`
 	}
 	limit := opts.Limit
 	if limit <= 0 {
@@ -190,7 +161,23 @@ func (c *Client) Search(ctx context.Context, query string, embedding []float32, 
 				continue
 			}
 		}
-		results = append(results, toSearchResult(r.memoryRow, r.Tags, r.Links))
+		sr := SearchResult{
+			Item: Item{
+				ID: r.ID, AgentID: r.AgentID, Content: r.Content,
+				Category: r.Category, Volatility: r.Volatility,
+				Score: r.Score, Source: r.Source,
+				ValidFrom: r.ValidFrom, ValidTo: r.ValidTo, CreatedAt: r.CreatedAt,
+			},
+			IsValid: r.IsValid, AgeDays: r.AgeDays, ExpiresInDays: r.ExpiresIn,
+			Distance: r.Distance,
+		}
+		for _, t := range r.Tags {
+			sr.Tags = append(sr.Tags, t.Tag)
+		}
+		for _, l := range r.Links {
+			sr.Links = append(sr.Links, l.TargetID)
+		}
+		results = append(results, sr)
 	}
 
 	// Retrieve log entries for every hit (used by used_count / last_used
@@ -205,9 +192,21 @@ func (c *Client) Search(ctx context.Context, query string, embedding []float32, 
 // the item does not exist.
 func (c *Client) Get(ctx context.Context, memID string) (*SearchResult, error) {
 	type row struct {
-		memoryRow
-		Tags  []memoryTagRow  `json:"tags"`
-		Links []memoryLinkRow `json:"outgoing_links"`
+		ID         string          `json:"id"`
+		AgentID    string          `json:"agent_id"`
+		Content    string          `json:"content"`
+		Category   string          `json:"category"`
+		Volatility string          `json:"volatility"`
+		Score      float64         `json:"score"`
+		Source     string          `json:"source"`
+		ValidFrom  time.Time       `json:"valid_from"`
+		ValidTo    time.Time       `json:"valid_to"`
+		CreatedAt  time.Time       `json:"created_at"`
+		IsValid    bool            `json:"is_valid"`
+		AgeDays    int             `json:"age_days"`
+		ExpiresIn  int             `json:"expires_in_days"`
+		Tags       []memoryTagRow  `json:"tags"`
+		Links      []memoryLinkRow `json:"outgoing_links"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
@@ -233,7 +232,22 @@ func (c *Client) Get(ctx context.Context, memID string) (*SearchResult, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	res := toSearchResult(rows[0].memoryRow, rows[0].Tags, rows[0].Links)
+	r := rows[0]
+	res := SearchResult{
+		Item: Item{
+			ID: r.ID, AgentID: r.AgentID, Content: r.Content,
+			Category: r.Category, Volatility: r.Volatility,
+			Score: r.Score, Source: r.Source,
+			ValidFrom: r.ValidFrom, ValidTo: r.ValidTo, CreatedAt: r.CreatedAt,
+		},
+		IsValid: r.IsValid, AgeDays: r.AgeDays, ExpiresInDays: r.ExpiresIn,
+	}
+	for _, t := range r.Tags {
+		res.Tags = append(res.Tags, t.Tag)
+	}
+	for _, l := range r.Links {
+		res.Links = append(res.Links, l.TargetID)
+	}
 	return &res, nil
 }
 

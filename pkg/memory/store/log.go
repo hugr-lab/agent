@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -68,12 +67,12 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 		limit = 20
 	}
 	type row struct {
-		EventTime    time.Time       `json:"event_time"`
-		EventType    string          `json:"event_type"`
-		MemoryItemID string          `json:"memory_item_id"`
-		SessionID    string          `json:"session_id"`
-		AgentID      string          `json:"agent_id"`
-		Details      json.RawMessage `json:"details"`
+		EventTime    time.Time      `json:"event_time"`
+		EventType    string         `json:"event_type"`
+		MemoryItemID string         `json:"memory_item_id"`
+		SessionID    string         `json:"session_id"`
+		AgentID      string         `json:"agent_id"`
+		Details      map[string]any `json:"details"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $mid: String!, $limit: Int!) {
@@ -98,17 +97,13 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 	}
 	out := make([]LogEntry, 0, len(rows))
 	for _, r := range rows {
-		var details map[string]any
-		if len(r.Details) > 0 {
-			_ = json.Unmarshal(r.Details, &details)
-		}
 		out = append(out, LogEntry{
 			EventTime:    r.EventTime,
 			EventType:    r.EventType,
 			MemoryItemID: r.MemoryItemID,
 			SessionID:    r.SessionID,
 			AgentID:      r.AgentID,
-			Details:      details,
+			Details:      r.Details,
 		})
 	}
 	return out, nil

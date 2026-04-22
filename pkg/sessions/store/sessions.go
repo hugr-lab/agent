@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -192,16 +191,16 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 	type row struct {
 		ID         string          `json:"id"`
 		SessionID  string          `json:"session_id"`
-		AgentID    string          `json:"agent_id"`
-		Seq        int             `json:"seq"`
-		EventType  string          `json:"event_type"`
-		Author     string          `json:"author"`
-		Content    string          `json:"content"`
-		ToolName   string          `json:"tool_name"`
-		ToolArgs   json.RawMessage `json:"tool_args"`
-		ToolResult string          `json:"tool_result"`
-		Metadata   map[string]any  `json:"metadata"`
-		CreatedAt  time.Time          `json:"created_at"`
+		AgentID    string         `json:"agent_id"`
+		Seq        int            `json:"seq"`
+		EventType  string         `json:"event_type"`
+		Author     string         `json:"author"`
+		Content    string         `json:"content"`
+		ToolName   string         `json:"tool_name"`
+		ToolArgs   map[string]any `json:"tool_args"`
+		ToolResult string         `json:"tool_result"`
+		Metadata   map[string]any `json:"metadata"`
+		CreatedAt  time.Time      `json:"created_at"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
@@ -222,10 +221,6 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 	}
 	out := make([]Event, 0, len(rows))
 	for _, r := range rows {
-		var toolArgs map[string]any
-		if len(r.ToolArgs) > 0 {
-			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
-		}
 		out = append(out, Event{
 			ID:         r.ID,
 			SessionID:  r.SessionID,
@@ -235,7 +230,7 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 			Author:     r.Author,
 			Content:    r.Content,
 			ToolName:   r.ToolName,
-			ToolArgs:   toolArgs,
+			ToolArgs:   r.ToolArgs,
 			ToolResult: r.ToolResult,
 			Metadata:   r.Metadata,
 			CreatedAt:  r.CreatedAt,
@@ -350,19 +345,19 @@ func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) 
 // fork_after_seq) see only their own events.
 func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFull, error) {
 	type row struct {
-		ID         string          `json:"id"`
-		SessionID  string          `json:"session_id"`
-		AgentID    string          `json:"agent_id"`
-		Seq        int             `json:"seq"`
-		EventType  string          `json:"event_type"`
-		Author     string          `json:"author"`
-		Content    string          `json:"content"`
-		ToolName   string          `json:"tool_name"`
-		ToolArgs   json.RawMessage `json:"tool_args"`
-		ToolResult string          `json:"tool_result"`
-		Metadata   map[string]any  `json:"metadata"`
-		CreatedAt  time.Time          `json:"created_at"`
-		ChainDepth int             `json:"chain_depth"`
+		ID         string         `json:"id"`
+		SessionID  string         `json:"session_id"`
+		AgentID    string         `json:"agent_id"`
+		Seq        int            `json:"seq"`
+		EventType  string         `json:"event_type"`
+		Author     string         `json:"author"`
+		Content    string         `json:"content"`
+		ToolName   string         `json:"tool_name"`
+		ToolArgs   map[string]any `json:"tool_args"`
+		ToolResult string         `json:"tool_result"`
+		Metadata   map[string]any `json:"metadata"`
+		CreatedAt  time.Time      `json:"created_at"`
+		ChainDepth int            `json:"chain_depth"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($input: session_events_full_input!) {
@@ -384,10 +379,6 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 	}
 	out := make([]EventFull, 0, len(rows))
 	for _, r := range rows {
-		var toolArgs map[string]any
-		if len(r.ToolArgs) > 0 {
-			_ = json.Unmarshal(r.ToolArgs, &toolArgs)
-		}
 		out = append(out, EventFull{
 			Event: Event{
 				ID:         r.ID,
@@ -398,7 +389,7 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 				Author:     r.Author,
 				Content:    r.Content,
 				ToolName:   r.ToolName,
-				ToolArgs:   toolArgs,
+				ToolArgs:   r.ToolArgs,
 				ToolResult: r.ToolResult,
 				Metadata:   r.Metadata,
 				CreatedAt:  r.CreatedAt,
