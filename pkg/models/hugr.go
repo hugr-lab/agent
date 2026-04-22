@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/hugr-lab/query-engine/client"
 	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -46,7 +45,7 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 type HugrModel struct {
 	name           string
 	hugrModel      string
-	client         *client.Client
+	querier        types.Querier
 	logger         *slog.Logger
 	maxTokens      int           // default max completion tokens (0 = provider default)
 	temperature    *float32      // default temperature (nil = provider default)
@@ -84,14 +83,14 @@ func WithToolChoiceFunc(f func() string) Option {
 	return func(m *HugrModel) { m.toolChoiceFunc = f }
 }
 
-// New creates a new HugrModel.
-//   - c: Hugr Go client connection
+// NewHugr creates a new HugrModel.
+//   - q: Hugr querier (embedded engine or remote client — both satisfy types.Querier)
 //   - hugrModel: Hugr data source name (e.g. "gemma4-26b")
-func NewHugr(c *client.Client, hugrModel string, opts ...Option) *HugrModel {
+func NewHugr(q types.Querier, hugrModel string, opts ...Option) *HugrModel {
 	m := &HugrModel{
 		name:      "hugr-model",
 		hugrModel: hugrModel,
-		client:    c,
+		querier:   q,
 		logger:    slog.Default(),
 	}
 	for _, opt := range opts {
@@ -164,7 +163,7 @@ func (m *HugrModel) GenerateContent(
 			"messages_count", len(messages),
 		)
 
-		sub, err := m.client.Subscribe(ctx, chatCompletionSubscription, vars)
+		sub, err := m.querier.Subscribe(ctx, chatCompletionSubscription, vars)
 		if err != nil {
 			yield(nil, fmt.Errorf("hugrmodel: subscribe: %w", err))
 			return

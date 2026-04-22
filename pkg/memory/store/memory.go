@@ -8,7 +8,7 @@
 // baseTime and offsets each row by idx*1µs so the composite PK
 // (event_time, event_type, memory_item_id, session_id) never
 // collides within the batch.
-package memory
+package store
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 
 	"github.com/hugr-lab/hugen/pkg/id"
 )
@@ -49,9 +49,9 @@ type memoryRow struct {
 	Volatility string  `json:"volatility"`
 	Score      float64 `json:"score"`
 	Source     string  `json:"source"`
-	ValidFrom  qh.DBTime  `json:"valid_from"`
-	ValidTo    qh.DBTime  `json:"valid_to"`
-	CreatedAt  qh.DBTime  `json:"created_at"`
+	ValidFrom  time.Time  `json:"valid_from"`
+	ValidTo    time.Time  `json:"valid_to"`
+	CreatedAt  time.Time  `json:"created_at"`
 	IsValid    bool    `json:"is_valid"`
 	AgeDays    int     `json:"age_days"`
 	ExpiresIn  int     `json:"expires_in_days"`
@@ -77,9 +77,9 @@ func toSearchResult(r memoryRow, tags []memoryTagRow, links []memoryLinkRow) Sea
 			Volatility: r.Volatility,
 			Score:      r.Score,
 			Source:     r.Source,
-			ValidFrom:  r.ValidFrom.Time,
-			ValidTo:    r.ValidTo.Time,
-			CreatedAt:  r.CreatedAt.Time,
+			ValidFrom:  r.ValidFrom,
+			ValidTo:    r.ValidTo,
+			CreatedAt:  r.CreatedAt,
 		},
 		IsValid:       r.IsValid,
 		AgeDays:       r.AgeDays,
@@ -163,8 +163,8 @@ func (c *Client) Search(ctx context.Context, query string, embedding []float32, 
 		// Naive ILIKE fallback; a richer FTS setup can replace this later.
 		filter["content"] = map[string]any{"ilike": "%" + query + "%"}
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier, q, vars, "hub.db.agent.memory_items")
-	if err != nil {
+	var rows []row
+	if err := queries.RunQueryJSON(ctx, c.querier, q, vars, "hub.db.agent.memory_items", &rows); err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
@@ -209,7 +209,8 @@ func (c *Client) Get(ctx context.Context, memID string) (*SearchResult, error) {
 		Tags  []memoryTagRow  `json:"tags"`
 		Links []memoryLinkRow `json:"outgoing_links"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	var rows []row
+	err := queries.RunQueryJSON(ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
 			hub { db { agent {
 				memory_items(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
@@ -223,6 +224,7 @@ func (c *Client) Get(ctx context.Context, memID string) (*SearchResult, error) {
 		}`,
 		map[string]any{"agent": c.agentID, "id": memID},
 		"hub.db.agent.memory_items",
+		&rows,
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -280,12 +282,12 @@ func (c *Client) Stats(ctx context.Context) (Stats, error) {
 	type row struct {
 		ID        string  `json:"id"`
 		Category  string  `json:"category"`
-		ValidTo   qh.DBTime  `json:"valid_to"`
-		ValidFrom qh.DBTime  `json:"valid_from"`
+		ValidTo   time.Time  `json:"valid_to"`
+		ValidFrom time.Time  `json:"valid_from"`
 		IsValid   bool    `json:"is_valid"`
 		_         float64 `json:"-"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!) {
 			hub { db { agent {
 				memory_items(filter: {agent_id: {eq: $agent}}) {
@@ -306,12 +308,12 @@ func (c *Client) Stats(ctx context.Context) (Stats, error) {
 			stats.ActiveItems++
 		}
 		stats.ByCategory[r.Category]++
-		if !r.ValidFrom.Time.IsZero() {
-			if stats.OldestFact.IsZero() || r.ValidFrom.Time.Before(stats.OldestFact) {
-				stats.OldestFact = r.ValidFrom.Time
+		if !r.ValidFrom.IsZero() {
+			if stats.OldestFact.IsZero() || r.ValidFrom.Before(stats.OldestFact) {
+				stats.OldestFact = r.ValidFrom
 			}
-			if stats.NewestFact.IsZero() || r.ValidFrom.Time.After(stats.NewestFact) {
-				stats.NewestFact = r.ValidFrom.Time
+			if stats.NewestFact.IsZero() || r.ValidFrom.After(stats.NewestFact) {
+				stats.NewestFact = r.ValidFrom
 			}
 		}
 	}
@@ -320,7 +322,7 @@ func (c *Client) Stats(ctx context.Context) (Stats, error) {
 	type rev struct {
 		ID string `json:"id"`
 	}
-	revs, err := qh.RunQuery[[]rev](ctx, c.querier,
+	revs, err := queries.RunQuery[[]rev](ctx, c.querier,
 		`query ($agent: String!) {
 			hub { db { agent {
 				session_reviews(filter: {agent_id: {eq: $agent}, status: {eq: "pending"}}) { id }
@@ -408,7 +410,7 @@ func (c *Client) Store(ctx context.Context, item Item, tags []string, links []Li
 		"valid_from": item.ValidFrom.UTC().Format(time.RFC3339),
 		"valid_to":   item.ValidTo.UTC().Format(time.RFC3339),
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_memory_items_mut_input_data!) {
 			hub { db { agent {
 				insert_memory_items(data: $data) { id }
@@ -520,7 +522,7 @@ func (c *Client) Reinforce(ctx context.Context, memID string, scoreBonus float64
 		"valid_from": item.ValidFrom.UTC().Format(time.RFC3339),
 		"valid_to":   item.ValidTo.UTC().Format(time.RFC3339),
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_memory_items_mut_input_data!) {
 			hub { db { agent {
 				insert_memory_items(data: $data) { id }
@@ -667,7 +669,7 @@ func (c *Client) AddTags(ctx context.Context, memID string, tags []string) error
 // RemoveTags deletes memory_tags rows and logs the operation.
 func (c *Client) RemoveTags(ctx context.Context, memID string, tags []string) error {
 	for _, t := range tags {
-		if err := qh.RunMutation(ctx, c.querier,
+		if err := queries.RunMutation(ctx, c.querier,
 			`mutation ($mid: String!, $tag: String!) {
 				hub { db { agent {
 					delete_memory_tags(filter: {memory_item_id: {eq: $mid}, tag: {eq: $tag}}) {
@@ -700,7 +702,7 @@ func (c *Client) AddLink(ctx context.Context, link Link) error {
 		"target_id": link.TargetID,
 		"relation":  link.Relation,
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_memory_links_mut_input_data!) {
 			hub { db { agent {
 				insert_memory_links(data: $data) { source_id target_id }
@@ -719,7 +721,7 @@ func (c *Client) AddLink(ctx context.Context, link Link) error {
 
 // RemoveLink deletes a memory_links row + audit entry.
 func (c *Client) RemoveLink(ctx context.Context, sourceID, targetID string) error {
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($src: String!, $tgt: String!) {
 			hub { db { agent {
 				delete_memory_links(filter: {source_id: {eq: $src}, target_id: {eq: $tgt}}) { affected_rows }
@@ -745,7 +747,7 @@ func (c *Client) insertTags(ctx context.Context, memID string, tags []string) er
 		if t == "" {
 			continue
 		}
-		if err := qh.RunMutation(ctx, c.querier,
+		if err := queries.RunMutation(ctx, c.querier,
 			`mutation ($data: hub_db_memory_tags_mut_input_data!) {
 				hub { db { agent {
 					insert_memory_tags(data: $data) { memory_item_id tag }
@@ -764,7 +766,7 @@ func (c *Client) insertLinks(ctx context.Context, sourceID string, links []Link)
 		if l.TargetID == "" {
 			continue
 		}
-		if err := qh.RunMutation(ctx, c.querier,
+		if err := queries.RunMutation(ctx, c.querier,
 			`mutation ($data: hub_db_memory_links_mut_input_data!) {
 				hub { db { agent {
 					insert_memory_links(data: $data) { source_id target_id }
@@ -783,7 +785,7 @@ func (c *Client) insertLinks(ctx context.Context, sourceID string, links []Link)
 }
 
 func (c *Client) deleteItem(ctx context.Context, memID string) error {
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($mid: String!) {
 			hub { db { agent {
 				delete_memory_tags(filter: {memory_item_id: {eq: $mid}}) { affected_rows }
@@ -793,7 +795,7 @@ func (c *Client) deleteItem(ctx context.Context, memID string) error {
 	); err != nil {
 		return err
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($mid: String!) {
 			hub { db { agent {
 				delete_memory_links(filter: {source_id: {eq: $mid}}) { affected_rows }
@@ -803,7 +805,7 @@ func (c *Client) deleteItem(ctx context.Context, memID string) error {
 	); err != nil {
 		return err
 	}
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($mid: String!) {
 			hub { db { agent {
 				delete_memory_items(filter: {id: {eq: $mid}}) { affected_rows }

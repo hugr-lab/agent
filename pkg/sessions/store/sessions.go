@@ -1,14 +1,15 @@
-package sessions
+package store
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 
 	"github.com/hugr-lab/hugen/pkg/id"
 )
@@ -46,7 +47,7 @@ func (c *Client) CreateSession(ctx context.Context, s Record) (string, error) {
 	if s.Metadata != nil {
 		data["metadata"] = s.Metadata
 	}
-	err := qh.RunMutation(ctx, c.querier,
+	err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_sessions_mut_input_data!) {
 			hub { db { agent {
 				insert_sessions(data: $data) { id }
@@ -62,7 +63,7 @@ func (c *Client) CreateSession(ctx context.Context, s Record) (string, error) {
 
 // UpdateSessionStatus updates a session row's status column.
 func (c *Client) UpdateSessionStatus(ctx context.Context, id, status string) error {
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($id: String!, $data: hub_db_sessions_mut_data!) {
 			hub { db { agent {
 				update_sessions(filter: {id: {eq: $id}}, data: $data) { affected_rows }
@@ -87,10 +88,10 @@ func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 		Status          string         `json:"status"`
 		Mission         string         `json:"mission"`
 		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       qh.DBTime         `json:"created_at"`
-		UpdatedAt       qh.DBTime         `json:"updated_at"`
+		CreatedAt       time.Time         `json:"created_at"`
+		UpdatedAt       time.Time         `json:"updated_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, status: {eq: "active"}}) {
@@ -118,8 +119,8 @@ func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 			Status:          r.Status,
 			Mission:         r.Mission,
 			Metadata:        r.Metadata,
-			CreatedAt:       r.CreatedAt.Time,
-			UpdatedAt:       r.UpdatedAt.Time,
+			CreatedAt:       r.CreatedAt,
+			UpdatedAt:       r.UpdatedAt,
 		})
 	}
 	return out, nil
@@ -173,7 +174,7 @@ func (c *Client) AppendEvent(ctx context.Context, ev Event) (string, error) {
 	if ev.Metadata != nil {
 		data["metadata"] = ev.Metadata
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_events_mut_input_data!) {
 			hub { db { agent {
 				insert_session_events(data: $data) { id }
@@ -200,9 +201,10 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 		ToolArgs   json.RawMessage `json:"tool_args"`
 		ToolResult string          `json:"tool_result"`
 		Metadata   map[string]any  `json:"metadata"`
-		CreatedAt  qh.DBTime          `json:"created_at"`
+		CreatedAt  time.Time          `json:"created_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	var rows []row
+	if err := queries.RunQueryJSON(ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(filter: {session_id: {eq: $sid}}, order_by: [{field: "seq", direction: ASC}]) {
@@ -212,8 +214,8 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 		}`,
 		map[string]any{"sid": sessionID},
 		"hub.db.agent.session_events",
-	)
-	if err != nil {
+		&rows,
+	); err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
@@ -237,7 +239,7 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 			ToolArgs:   toolArgs,
 			ToolResult: r.ToolResult,
 			Metadata:   r.Metadata,
-			CreatedAt:  r.CreatedAt.Time,
+			CreatedAt:  r.CreatedAt,
 		})
 	}
 	return out, nil
@@ -255,10 +257,10 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Record, error) {
 		Status          string         `json:"status"`
 		Mission         string         `json:"mission"`
 		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       qh.DBTime         `json:"created_at"`
-		UpdatedAt       qh.DBTime         `json:"updated_at"`
+		CreatedAt       time.Time         `json:"created_at"`
+		UpdatedAt       time.Time         `json:"updated_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
@@ -288,8 +290,8 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Record, error) {
 		Status:          r.Status,
 		Mission:         r.Mission,
 		Metadata:        r.Metadata,
-		CreatedAt:       r.CreatedAt.Time,
-		UpdatedAt:       r.UpdatedAt.Time,
+		CreatedAt:       r.CreatedAt,
+		UpdatedAt:       r.UpdatedAt,
 	}, nil
 }
 
@@ -305,10 +307,10 @@ func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) 
 		Status          string         `json:"status"`
 		Mission         string         `json:"mission"`
 		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       qh.DBTime         `json:"created_at"`
-		UpdatedAt       qh.DBTime         `json:"updated_at"`
+		CreatedAt       time.Time         `json:"created_at"`
+		UpdatedAt       time.Time         `json:"updated_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $parent: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, parent_session_id: {eq: $parent}}) {
@@ -336,8 +338,8 @@ func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) 
 			Status:          r.Status,
 			Mission:         r.Mission,
 			Metadata:        r.Metadata,
-			CreatedAt:       r.CreatedAt.Time,
-			UpdatedAt:       r.UpdatedAt.Time,
+			CreatedAt:       r.CreatedAt,
+			UpdatedAt:       r.UpdatedAt,
 		})
 	}
 	return out, nil
@@ -360,10 +362,11 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 		ToolArgs   json.RawMessage `json:"tool_args"`
 		ToolResult string          `json:"tool_result"`
 		Metadata   map[string]any  `json:"metadata"`
-		CreatedAt  qh.DBTime          `json:"created_at"`
+		CreatedAt  time.Time          `json:"created_at"`
 		ChainDepth int             `json:"chain_depth"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	var rows []row
+	if err := queries.RunQueryJSON(ctx, c.querier,
 		`query ($input: session_events_full_input!) {
 			hub { db { agent {
 				session_events_full(session_events_full_input: $input) {
@@ -374,8 +377,8 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 		}`,
 		map[string]any{"input": map[string]any{"session_id": sessionID}},
 		"hub.db.agent.session_events_full",
-	)
-	if err != nil {
+		&rows,
+	); err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
@@ -400,7 +403,7 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 				ToolArgs:   toolArgs,
 				ToolResult: r.ToolResult,
 				Metadata:   r.Metadata,
-				CreatedAt:  r.CreatedAt.Time,
+				CreatedAt:  r.CreatedAt,
 			},
 			ChainDepth: r.ChainDepth,
 		})
@@ -416,7 +419,7 @@ func (c *Client) CountToolCalls(ctx context.Context, sessionID string) (int, err
 	// query-engine may not expose aggregate(count) across all deployments;
 	// fetch IDs with limit and count client-side. Cheap at session scale
 	// (<1k rows per session).
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}) { seq }
@@ -461,7 +464,7 @@ func (c *Client) AddNote(ctx context.Context, note Note) (string, error) {
 		"session_id": note.SessionID,
 		"content":    note.Content,
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_notes_mut_input_data!) {
 			hub { db { agent {
 				insert_session_notes(data: $data) { id }
@@ -481,9 +484,9 @@ func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error
 		AgentID   string `json:"agent_id"`
 		SessionID string `json:"session_id"`
 		Content   string `json:"content"`
-		CreatedAt qh.DBTime `json:"created_at"`
+		CreatedAt time.Time `json:"created_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_notes(filter: {session_id: {eq: $sid}}, order_by: [{field: "created_at", direction: ASC}]) {
@@ -507,7 +510,7 @@ func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error
 			AgentID:   r.AgentID,
 			SessionID: r.SessionID,
 			Content:   r.Content,
-			CreatedAt: r.CreatedAt.Time,
+			CreatedAt: r.CreatedAt,
 		})
 	}
 	return out, nil
@@ -515,7 +518,7 @@ func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error
 
 // DeleteNote removes a single note by ID.
 func (c *Client) DeleteNote(ctx context.Context, noteID string) error {
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($id: String!) {
 			hub { db { agent {
 				delete_session_notes(filter: {id: {eq: $id}}) { affected_rows }
@@ -574,7 +577,7 @@ func (c *Client) AddParticipant(ctx context.Context, p Participant) error {
 		"user_id":    p.UserID,
 		"role":       role,
 	}
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_participants_mut_input_data!) {
 			hub { db { agent {
 				insert_session_participants(data: $data) { session_id user_id }
@@ -587,7 +590,7 @@ func (c *Client) AddParticipant(ctx context.Context, p Participant) error {
 // RemoveParticipant hard-deletes a participant row. An audit-preserving
 // variant (set left_at=now) can land later if a need arises.
 func (c *Client) RemoveParticipant(ctx context.Context, sessionID, userID string) error {
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($sid: String!, $uid: String!) {
 			hub { db { agent {
 				delete_session_participants(filter: {session_id: {eq: $sid}, user_id: {eq: $uid}}) {
@@ -605,10 +608,10 @@ func (c *Client) ListParticipants(ctx context.Context, sessionID string) ([]Part
 		SessionID string  `json:"session_id"`
 		UserID    string  `json:"user_id"`
 		Role      string  `json:"role"`
-		JoinedAt  qh.DBTime  `json:"joined_at"`
-		LeftAt    *qh.DBTime `json:"left_at"`
+		JoinedAt  time.Time  `json:"joined_at"`
+		LeftAt    *time.Time `json:"left_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_participants(filter: {session_id: {eq: $sid}}) {
@@ -631,11 +634,10 @@ func (c *Client) ListParticipants(ctx context.Context, sessionID string) ([]Part
 			SessionID: r.SessionID,
 			UserID:    r.UserID,
 			Role:      r.Role,
-			JoinedAt:  r.JoinedAt.Time,
+			JoinedAt:  r.JoinedAt,
 		}
-		if r.LeftAt != nil && !r.LeftAt.Time.IsZero() {
-			t := r.LeftAt.Time
-			p.LeftAt = &t
+		if r.LeftAt != nil && !r.LeftAt.IsZero() {
+			p.LeftAt = r.LeftAt
 		}
 		out = append(out, p)
 	}
@@ -650,7 +652,7 @@ func (c *Client) nextSeq(ctx context.Context, sessionID string) (int, error) {
 	type row struct {
 		Seq int `json:"seq"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_events(

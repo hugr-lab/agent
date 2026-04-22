@@ -1,10 +1,10 @@
-package embeddings
+package embedding
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // Embed returns a vector for text via the configured embedding data
@@ -17,7 +17,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	type result struct {
 		Vector []float64 `json:"vector"`
 	}
-	r, err := qh.RunQuery[result](ctx, c.querier,
+	r, err := queries.RunQuery[result](ctx, c.querier,
 		`query ($model: String!, $input: String!) {
 			function { core { models { embedding(model: $model, input: $input) {
 				vector

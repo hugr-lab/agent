@@ -8,7 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
+	"github.com/hugr-lab/query-engine/types"
 	adksession "google.golang.org/adk/session"
 )
 
@@ -37,7 +38,7 @@ const DefaultClassifierBuffer = 1024
 // invoked from any goroutine (including the producer Session), never
 // blocks, and drops events silently when the channel is full.
 type Classifier struct {
-	hub    *sessdb.Client
+	hub    *sessstore.Client
 	logger *slog.Logger
 
 	ch      chan Envelope
@@ -48,14 +49,28 @@ type Classifier struct {
 	closed  bool
 }
 
-// New constructs a Classifier with the given channel capacity. Pass 0
-// for DefaultClassifierBuffer.
-func NewClassifier(hub *sessdb.Client, logger *slog.Logger, bufSize int) *Classifier {
+// NewClassifier constructs a Classifier with the given channel capacity.
+// Pass 0 for DefaultClassifierBuffer. The classifier builds its own
+// sessstore client internally from the given querier + identity. A nil
+// querier yields a no-op classifier (Run() drains the channel without
+// hub writes) — useful for tests.
+func NewClassifier(querier types.Querier, agentID, agentShort string, logger *slog.Logger, bufSize int) *Classifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if bufSize <= 0 {
 		bufSize = DefaultClassifierBuffer
+	}
+	var hub *sessstore.Client
+	if querier != nil {
+		c, err := sessstore.New(querier, sessstore.Options{
+			AgentID: agentID, AgentShort: agentShort, Logger: logger,
+		})
+		if err == nil {
+			hub = c
+		} else {
+			logger.Warn("classifier: build sessions store failed, running without hub persistence", "err", err)
+		}
 	}
 	return &Classifier{
 		hub:     hub,
@@ -121,6 +136,9 @@ func (c *Classifier) Run(ctx context.Context) {
 // consumer loop is best-effort.
 func (c *Classifier) handle(ctx context.Context, env Envelope) {
 	rows := Classify(env)
+	if c.hub == nil {
+		return
+	}
 	for _, row := range rows {
 		row.SessionID = env.SessionID
 		if _, err := c.hub.AppendEvent(ctx, row); err != nil {
@@ -143,7 +161,7 @@ func (c *Classifier) handle(ctx context.Context, env Envelope) {
 //   - Every Part carrying a FunctionCall → 1 tool_call row.
 //   - Every Part carrying a FunctionResponse → 1 tool_result row,
 //     with tool_result capped at maxToolResultBytes.
-func Classify(env Envelope) []sessdb.Event {
+func Classify(env Envelope) []sessstore.Event {
 	ev := env.Event
 	if ev == nil {
 		return nil
@@ -151,7 +169,7 @@ func Classify(env Envelope) []sessdb.Event {
 	if ev.Partial {
 		return nil
 	}
-	var rows []sessdb.Event
+	var rows []sessstore.Event
 
 	// Function calls / responses first — ADK emits them on both the
 	// user and the agent side of a tool invocation.
@@ -161,8 +179,8 @@ func Classify(env Envelope) []sessdb.Event {
 				continue
 			}
 			if fc := part.FunctionCall; fc != nil {
-				row := sessdb.Event{
-					EventType: sessdb.EventTypeToolCall,
+				row := sessstore.Event{
+					EventType: sessstore.EventTypeToolCall,
 					Author:    nonEmpty(ev.Author, "agent"),
 					ToolName:  fc.Name,
 					ToolArgs:  fc.Args,
@@ -180,8 +198,8 @@ func Classify(env Envelope) []sessdb.Event {
 				if truncated {
 					meta["truncated"] = true
 				}
-				rows = append(rows, sessdb.Event{
-					EventType:  sessdb.EventTypeToolResult,
+				rows = append(rows, sessstore.Event{
+					EventType:  sessstore.EventTypeToolResult,
 					Author:     "tool",
 					ToolName:   fr.Name,
 					ToolResult: body,
@@ -200,8 +218,8 @@ func Classify(env Envelope) []sessdb.Event {
 	switch {
 	case role == "user" || author == "user":
 		if text != "" {
-			rows = append(rows, sessdb.Event{
-				EventType: sessdb.EventTypeUserMessage,
+			rows = append(rows, sessstore.Event{
+				EventType: sessstore.EventTypeUserMessage,
 				Author:    "user",
 				Content:   text,
 			})
@@ -224,8 +242,8 @@ func Classify(env Envelope) []sessdb.Event {
 			meta["prompt_tokens"] = int(ev.UsageMetadata.PromptTokenCount)
 			meta["completion_tokens"] = int(ev.UsageMetadata.CandidatesTokenCount)
 		}
-		rows = append(rows, sessdb.Event{
-			EventType: sessdb.EventTypeLLMResponse,
+		rows = append(rows, sessstore.Event{
+			EventType: sessstore.EventTypeLLMResponse,
 			Author:    nonEmpty(author, "agent"),
 			Content:   text,
 			Metadata:  meta,
@@ -304,6 +322,6 @@ func (c *Classifier) Drain(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
-// notes keeps a reference to sessdb.Event so we don't lose
+// notes keeps a reference to sessstore.Event so we don't lose
 // the import (will be used when classification lands).
-var _ = sessdb.Event{}
+var _ = sessstore.Event{}

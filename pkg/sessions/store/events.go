@@ -1,4 +1,4 @@
-package sessions
+package store
 
 // Event type constants written to hub.db session_events.event_type.
 const (

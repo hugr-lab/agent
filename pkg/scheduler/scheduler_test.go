@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
+	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,12 +41,12 @@ func TestSchedule_NextMatches(t *testing.T) {
 // stubHub lets us fake ListPendingReviews without a real engine.
 // It satisfies the narrow LearningStore interface the scheduler uses.
 type stubHub struct {
-	pending atomic.Value // []learndb.Review
+	pending atomic.Value // []learnstore.Review
 }
 
-func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]learndb.Review, error) {
+func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]learnstore.Review, error) {
 	if v := s.pending.Load(); v != nil {
-		return v.([]learndb.Review), nil
+		return v.([]learnstore.Review), nil
 	}
 	return nil, nil
 }
@@ -72,7 +72,7 @@ func (r *stubReviewer) Review(ctx context.Context, sessionID string) error {
 
 func TestScheduler_PicksPendingReview(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]learndb.Review{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
+	hub.pending.Store([]learnstore.Review{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
 	rv := newStubReviewer()
 
 	s, err := New(Runtime{
@@ -118,7 +118,7 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 	s.Start(ctx)
 
 	// Populate pending list then nudge.
-	hub.pending.Store([]learndb.Review{{ID: "r1", SessionID: "sX", Status: "pending"}})
+	hub.pending.Store([]learnstore.Review{{ID: "r1", SessionID: "sX", Status: "pending"}})
 	s.QueueReview("sX")
 
 	select {
@@ -130,7 +130,7 @@ func TestScheduler_QueueReviewWakes(t *testing.T) {
 
 func TestScheduler_ReviewerErrorLogged(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]learndb.Review{{SessionID: "s1", Status: "pending"}})
+	hub.pending.Store([]learnstore.Review{{SessionID: "s1", Status: "pending"}})
 	rv := newStubReviewer()
 	rv.err = errors.New("boom")
 	s, err := New(Runtime{
@@ -190,7 +190,7 @@ func TestScheduler_StopTimeout(t *testing.T) {
 // twice across two separate Scheduler lifetimes.
 func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
 	hub := &stubHub{}
-	hub.pending.Store([]learndb.Review{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
+	hub.pending.Store([]learnstore.Review{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
 
 	// First run — picks the review, then "crashes" via ctx cancel.
 	rv1 := newStubReviewer()

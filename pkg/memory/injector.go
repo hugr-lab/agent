@@ -2,11 +2,13 @@ package memory
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
+	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 )
@@ -21,6 +23,14 @@ const injectorTTL = 10 * time.Second
 // composing instruction providers.
 type InstructionProvider = llmagent.InstructionProvider
 
+// InjectorOptions bundles the injector's non-store runtime deps. The
+// injector builds its own memstore + sessstore clients internally.
+type InjectorOptions struct {
+	AgentID    string
+	AgentShort string
+	Logger     *slog.Logger
+}
+
 // WrapInstruction returns a new InstructionProvider that appends a
 // runtime-computed "## Memory Status" block to the base provider's
 // output. The block summarises long-term memory + session notes for
@@ -30,9 +40,25 @@ type InstructionProvider = llmagent.InstructionProvider
 // instructions (spec 005 research Decision 4). `Session.Snapshot`
 // continues to return the state-only base prompt — the hint sits on
 // top.
-func WrapInstruction(base InstructionProvider, memory *memdb.Client, sessions *sessdb.Client) InstructionProvider {
-	if memory == nil {
+//
+// When querier is nil (or the store clients fail to build) the wrapper
+// degrades to the base provider — the memory-status block is simply
+// omitted.
+func WrapInstruction(base InstructionProvider, querier types.Querier, opts InjectorOptions) InstructionProvider {
+	if querier == nil {
 		return base
+	}
+	memory, err := memstore.New(querier, memstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return base
+	}
+	sessionsC, err := sessstore.New(querier, sessstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		sessionsC = nil
 	}
 	cache := &injectorCache{entries: map[string]injectorEntry{}}
 	return func(ctx agent.ReadonlyContext) (string, error) {
@@ -46,7 +72,7 @@ func WrapInstruction(base InstructionProvider, memory *memdb.Client, sessions *s
 		}
 		hint := cache.get(sid)
 		if hint == "" {
-			hint = renderStatus(ctx, sid, memory, sessions)
+			hint = renderStatus(ctx, sid, memory, sessionsC)
 			cache.put(sid, hint)
 		}
 		if hint == "" {
@@ -58,7 +84,7 @@ func WrapInstruction(base InstructionProvider, memory *memdb.Client, sessions *s
 
 // renderStatus builds a single "## Memory Status" line from
 // memory.Hint + sessions.ListNotes count.
-func renderStatus(ctx agent.ReadonlyContext, sid string, memory *memdb.Client, sessions *sessdb.Client) string {
+func renderStatus(ctx agent.ReadonlyContext, sid string, memory *memstore.Client, sessions *sessstore.Client) string {
 	h, err := memory.Hint(ctx, "", nil)
 	if err != nil || h == "" {
 		return ""

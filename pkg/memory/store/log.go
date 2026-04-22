@@ -1,4 +1,4 @@
-package memory
+package store
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // Log inserts a single memory_log row.
@@ -48,7 +48,7 @@ func (c *Client) logBatch(ctx context.Context, entries []LogEntry) error {
 		if e.Details != nil {
 			row["details"] = e.Details
 		}
-		if err := qh.RunMutation(ctx, c.querier,
+		if err := queries.RunMutation(ctx, c.querier,
 			`mutation ($data: hub_db_memory_log_mut_input_data!) {
 				hub { db { agent {
 					insert_memory_log(data: $data) { event_time }
@@ -68,14 +68,15 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 		limit = 20
 	}
 	type row struct {
-		EventTime    qh.DBTime       `json:"event_time"`
+		EventTime    time.Time       `json:"event_time"`
 		EventType    string          `json:"event_type"`
 		MemoryItemID string          `json:"memory_item_id"`
 		SessionID    string          `json:"session_id"`
 		AgentID      string          `json:"agent_id"`
 		Details      json.RawMessage `json:"details"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	var rows []row
+	if err := queries.RunQueryJSON(ctx, c.querier,
 		`query ($agent: String!, $mid: String!, $limit: Int!) {
 			hub { db { agent {
 				memory_log(
@@ -89,8 +90,8 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 		}`,
 		map[string]any{"agent": c.agentID, "mid": memoryItemID, "limit": limit},
 		"hub.db.agent.memory_log",
-	)
-	if err != nil {
+		&rows,
+	); err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
 			return nil, nil
 		}
@@ -103,7 +104,7 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 			_ = json.Unmarshal(r.Details, &details)
 		}
 		out = append(out, LogEntry{
-			EventTime:    r.EventTime.Time,
+			EventTime:    r.EventTime,
 			EventType:    r.EventType,
 			MemoryItemID: r.MemoryItemID,
 			SessionID:    r.SessionID,

@@ -9,20 +9,17 @@ import (
 	"time"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/chatcontext"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/models/embedding"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/store/local"
-	embdb "github.com/hugr-lab/hugen/pkg/store/embeddings"
-	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
-	regdb "github.com/hugr-lab/hugen/pkg/store/registry"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	qe "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
@@ -32,18 +29,11 @@ import (
 )
 
 // agentRuntime bundles all long-lived resources built at startup.
-// Shutdown closes them in the correct order:
-// server → HubDB → engine → hugrClient.
+// Shutdown cancels background contexts and closes the engine/client.
 type agentRuntime struct {
 	agent      agent.Agent
 	hugrClient *client.Client
 	engine     *qe.Service // nil in hub mode
-
-	hubMemory     *memdb.Client
-	hubSessions   *sessdb.Client
-	hubLearning   *learndb.Client
-	hubRegistry   *regdb.Client
-	hubEmbeddings *embdb.Client
 
 	sessions *sessions.Manager
 	tools    *tools.Manager
@@ -86,8 +76,6 @@ func (r *agentRuntime) close(logger *slog.Logger) {
 		}
 		cancel()
 	}
-	// hub clients are stateless wrappers around types.Querier — nothing
-	// to close; the engine + hugrClient own the underlying transports.
 	if r.engine != nil {
 		logger.Info("shutting down: closing engine")
 		if err := r.engine.Close(); err != nil {
@@ -100,11 +88,11 @@ func (r *agentRuntime) close(logger *slog.Logger) {
 	}
 }
 
-// buildComponents bundles the non-hub pieces built during startup: the
-// hugr LLM client, router, skills/tools managers, constitution.
+// buildComponents bundles the non-hub pieces built during startup:
+// hugr client, skills/tools managers, constitution, token estimator.
+// The router is built separately because it needs both queriers.
 type buildComponents struct {
 	hugrClient   *client.Client
-	router       *models.Router
 	skills       skills.Manager
 	tools        *tools.Manager
 	constitution string
@@ -124,25 +112,6 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
 	}
 
-	llmOpts := []models.Option{
-		models.WithLogger(logger),
-		models.WithMaxTokens(cfg.LLM.MaxTokens),
-		models.WithToolChoiceFunc(func() string { return "auto" }),
-	}
-	if cfg.LLM.Temperature > 0 {
-		llmOpts = append(llmOpts, models.WithTemperature(cfg.LLM.Temperature))
-	}
-	llm := models.NewHugr(hugrClient, cfg.LLM.Model, llmOpts...)
-
-	router := models.NewRouter(llm).WithLogger(logger)
-	for intentName, modelName := range cfg.LLM.Routes {
-		router.SetRoute(models.Intent(intentName), models.NewHugr(hugrClient, modelName,
-			models.WithLogger(logger),
-			models.WithMaxTokens(cfg.LLM.MaxTokens),
-		))
-		logger.Info("intent route configured", "intent", intentName, "model", modelName)
-	}
-
 	constitution, err := os.ReadFile(cfg.Agent.Constitution)
 	if err != nil {
 		return nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
@@ -160,7 +129,6 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 
 	return &buildComponents{
 		hugrClient:   hugrClient,
-		router:       router,
 		skills:       skillsMgr,
 		tools:        toolsMgr,
 		constitution: string(constitution),
@@ -207,9 +175,9 @@ func resolveHugrTransport(cfg *config.Config, stores *auth.Stores, logger *slog.
 	return auth.Transport(store, http.DefaultTransport)
 }
 
-// buildRuntime wires together hugrClient → engine/querier → hubDB →
-// providers.BuildAll(cfg.Providers) → skills/tools/session managers →
-// agent. Caller owns runtime.close() in the shutdown path.
+// buildRuntime wires together local engine + hugr client → queriers →
+// router / services / session manager → ADK agent. Caller owns
+// runtime.close() in the shutdown path.
 func buildRuntime(
 	ctx context.Context,
 	cfg *config.Config,
@@ -228,7 +196,13 @@ func buildRuntime(
 		skills:     components.skills,
 	}
 
-	var querier qetypes.Querier
+	// Two queriers: local engine (optional) + remote hugr client (always).
+	// memoryQuerier is the one hub.db reads/writes go through — prefer
+	// local when it's up, otherwise fall back to remote.
+	var localQuerier qetypes.Querier
+	var remoteQuerier qetypes.Querier = components.hugrClient
+	var localModels []string
+
 	if cfg.LocalDBEnabled {
 		engine, err := local.New(ctx, cfg.LocalDB, cfg.Identity, cfg.Embedding, logger)
 		if err != nil {
@@ -236,63 +210,60 @@ func buildRuntime(
 			return nil, fmt.Errorf("local engine: %w", err)
 		}
 		rt.engine = engine
-		querier = engine
+		localQuerier = engine
+		for _, m := range cfg.LocalDB.Models {
+			localModels = append(localModels, m.Name)
+		}
 	} else {
 		logger.Info("hub mode: connecting to", "url", cfg.Hugr.URL)
-		querier = components.hugrClient
 	}
 
-	hubMemory, err := memdb.New(querier, memdb.Options{
-		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
-	})
-	if err != nil {
-		rt.close(logger)
-		return nil, fmt.Errorf("hub memory client: %w", err)
+	memoryQuerier := remoteQuerier
+	if localQuerier != nil {
+		memoryQuerier = localQuerier
 	}
-	hubSessions, err := sessdb.New(querier, sessdb.Options{
-		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
-	})
-	if err != nil {
-		rt.close(logger)
-		return nil, fmt.Errorf("hub sessions client: %w", err)
-	}
-	hubLearning, err := learndb.New(querier, learndb.Options{
-		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
-	})
-	if err != nil {
-		rt.close(logger)
-		return nil, fmt.Errorf("hub learning client: %w", err)
-	}
-	hubRegistry, err := regdb.New(querier, regdb.Options{
-		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
-	})
-	if err != nil {
-		rt.close(logger)
-		return nil, fmt.Errorf("hub registry client: %w", err)
-	}
-	hubEmbeddings := embdb.New(querier, embdb.Options{
-		Model:     cfg.Embedding.Model,
-		Dimension: cfg.Embedding.Dimension,
-		Logger:    logger,
-	})
-	rt.hubMemory = hubMemory
-	rt.hubSessions = hubSessions
-	rt.hubLearning = hubLearning
-	rt.hubRegistry = hubRegistry
-	rt.hubEmbeddings = hubEmbeddings
 
+	// Router: gets both queriers + local-model names; builds model.LLMs
+	// internally, picking per-model querier by membership in localModels.
+	router := models.NewRouter(
+		localQuerier,
+		remoteQuerier,
+		localModels,
+		cfg.LLM,
+		models.WithLogger(logger),
+		models.WithToolChoiceFunc(func() string { return "auto" }),
+	).WithLogger(logger)
+	for intentName, modelName := range cfg.LLM.Routes {
+		logger.Info("intent route configured", "intent", intentName, "model", modelName)
+	}
+
+	// Agent-registry client — used for registerAgentInstance in local mode.
 	if cfg.LocalDBEnabled {
-		if err := registerAgentInstance(ctx, cfg, hubRegistry, logger); err != nil {
+		reg, err := agentstore.New(memoryQuerier, agentstore.Options{
+			AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+		})
+		if err != nil {
+			rt.close(logger)
+			return nil, fmt.Errorf("agent registry client: %w", err)
+		}
+		if err := registerAgentInstance(ctx, cfg, reg, logger); err != nil {
 			rt.close(logger)
 			return nil, err
 		}
 	}
 
+	// Embeddings adapter — shared by memory service + memory workers.
+	embed := embedding.New(memoryQuerier, embedding.Options{
+		Model:     cfg.Embedding.Model,
+		Dimension: cfg.Embedding.Dimension,
+		Logger:    logger,
+	})
+
 	// Classifier + scheduler + reviewer + compactor wired before
 	// SessionManager so the manager can publish events + queue
 	// reviews from the very first Create. All background goroutines
 	// start after we're confident buildRuntime won't fail.
-	cls := sessions.NewClassifier(hubSessions, logger, sessions.DefaultClassifierBuffer)
+	cls := sessions.NewClassifier(memoryQuerier, cfg.Identity.ID, cfg.Identity.ShortID, logger, sessions.DefaultClassifierBuffer)
 
 	loadSkillMemory := func(ctx context.Context, name string) (*skills.SkillMemoryConfig, error) {
 		sk, err := components.skills.Load(ctx, name)
@@ -303,10 +274,10 @@ func buildRuntime(
 	}
 
 	reviewer, err := memory.NewReviewer(memory.ReviewerOptions{
-		Memory:          hubMemory,
-		Learning:        hubLearning,
-		Sessions:        hubSessions,
-		Router:          components.router,
+		Querier:         memoryQuerier,
+		AgentID:         cfg.Identity.ID,
+		AgentShort:      cfg.Identity.ShortID,
+		Router:          router,
 		Logger:          logger,
 		Volatility:      cfg.Memory.VolatilityDuration,
 		LoadSkillMemory: loadSkillMemory,
@@ -316,13 +287,13 @@ func buildRuntime(
 		return nil, fmt.Errorf("build reviewer: %w", err)
 	}
 
-	threshold := cfg.ChatContext.CompactionThreshold
 	compactor, err := chatcontext.NewCompactor(chatcontext.CompactorOptions{
-		Memory:          hubMemory,
-		Sessions:        hubSessions,
-		Router:          components.router,
+		Querier:         memoryQuerier,
+		AgentID:         cfg.Identity.ID,
+		AgentShort:      cfg.Identity.ShortID,
+		Router:          router,
 		Tokens:          components.tokens,
-		Threshold:       threshold,
+		Threshold:       cfg.ChatContext.CompactionThreshold,
 		Logger:          logger,
 		LoadSkillMemory: loadSkillMemory,
 	})
@@ -332,9 +303,10 @@ func buildRuntime(
 	}
 
 	verifier, err := memory.NewVerifier(memory.VerifierOptions{
-		Memory:     hubMemory,
-		Learning:   hubLearning,
-		Router:     components.router,
+		Querier:    memoryQuerier,
+		AgentID:    cfg.Identity.ID,
+		AgentShort: cfg.Identity.ShortID,
+		Router:     router,
 		Logger:     logger,
 		Volatility: cfg.Memory.VolatilityDuration,
 	})
@@ -344,8 +316,9 @@ func buildRuntime(
 	}
 
 	consolidator, err := memory.NewConsolidator(memory.ConsolidatorOptions{
-		Memory:           hubMemory,
-		Learning:         hubLearning,
+		Querier:          memoryQuerier,
+		AgentID:          cfg.Identity.ID,
+		AgentShort:       cfg.Identity.ShortID,
 		HypothesisExpiry: cfg.Memory.Consolidation.HypothesisExpiry,
 		Logger:           logger,
 	})
@@ -361,8 +334,9 @@ func buildRuntime(
 		Reviewer:        reviewer,
 		Verifier:        verifier,
 		Consolidator:    consolidator,
-		Memory:          hubMemory,
-		Learning:        hubLearning,
+		Querier:         memoryQuerier,
+		AgentID:         cfg.Identity.ID,
+		AgentShort:      cfg.Identity.ShortID,
 		Logger:          logger,
 	})
 	if err != nil {
@@ -375,10 +349,12 @@ func buildRuntime(
 
 	// SessionManager wires classifier + scheduler in so IngestADKEvent
 	// publishes transcript rows and Delete queues post-session review.
-	sessionMgr := sessions.New(sessions.Config{
+	sessionMgr, err := sessions.New(sessions.Config{
 		Skills:       components.skills,
 		Tools:        components.tools,
-		Hub:          hubSessions,
+		Querier:      memoryQuerier,
+		AgentID:      cfg.Identity.ID,
+		AgentShort:   cfg.Identity.ShortID,
 		Constitution: components.constitution,
 		Logger:       logger,
 		Classifier:   cls,
@@ -395,15 +371,30 @@ func buildRuntime(
 			})
 		},
 	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build session manager: %w", err)
+	}
 	rt.sessions = sessionMgr
 
 	// Internal services self-register as tools.Providers.
-	// skills.NewService takes a consumer-defined SessionAccessor interface
-	// (keeps pkg/skills free of pkg/sessions dep); adapt *sessions.Manager
-	// inline.
+	memService, err := memory.NewService(memoryQuerier, sessionMgr, embed, memory.ServiceOptions{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build memory service: %w", err)
+	}
+	chatCtxService, err := chatcontext.NewService(memoryQuerier, sessionMgr, chatcontext.ServiceOptions{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build chatcontext service: %w", err)
+	}
 	components.tools.AddProvider(skills.NewService(skillsSessionAdapter{sm: sessionMgr}))
-	components.tools.AddProvider(memory.NewService(sessionMgr, hubMemory, hubSessions, hubEmbeddings))
-	components.tools.AddProvider(chatcontext.NewService(sessionMgr, hubMemory, hubSessions))
+	components.tools.AddProvider(memService)
+	components.tools.AddProvider(chatCtxService)
 	logger.Info("internal services registered",
 		"providers", []string{skills.ServiceName, memory.ServiceName, chatcontext.ServiceName})
 
@@ -436,10 +427,15 @@ func buildRuntime(
 	}
 
 	instruction := memory.WrapInstruction(
-		hugen.BaseInstructionProvider(sessionMgr), hubMemory, hubSessions)
+		hugen.BaseInstructionProvider(sessionMgr),
+		memoryQuerier,
+		memory.InjectorOptions{
+			AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+		},
+	)
 
 	a, err := hugen.NewAgent(hugen.Runtime{
-		Router:               components.router,
+		Router:               router,
 		Sessions:             sessionMgr,
 		Tokens:               components.tokens,
 		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{compactor.Callback()},
@@ -470,7 +466,7 @@ func buildRuntime(
 // migration) and upserts the agents row with the current
 // config_override. Runs only in local mode — in hub mode the hub owns
 // registration.
-func registerAgentInstance(ctx context.Context, cfg *config.Config, reg *regdb.Client, logger *slog.Logger) error {
+func registerAgentInstance(ctx context.Context, cfg *config.Config, reg *agentstore.Client, logger *slog.Logger) error {
 	at, err := reg.GetAgentType(ctx, cfg.Identity.Type)
 	if err != nil {
 		return fmt.Errorf("get agent_type %q: %w", cfg.Identity.Type, err)
@@ -484,7 +480,7 @@ func registerAgentInstance(ctx context.Context, cfg *config.Config, reg *regdb.C
 		"embedding": cfg.Embedding,
 		"memory":    cfg.Memory,
 	}
-	if err := reg.RegisterAgent(ctx, regdb.Agent{
+	if err := reg.RegisterAgent(ctx, agentstore.Agent{
 		ID:             cfg.Identity.ID,
 		AgentTypeID:    cfg.Identity.Type,
 		ShortID:        cfg.Identity.ShortID,

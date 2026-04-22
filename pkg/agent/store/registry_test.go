@@ -1,6 +1,6 @@
 //go:build duckdb_arrow
 
-package registry_test
+package store_test
 
 import (
 	"context"
@@ -10,14 +10,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/pkg/store/registry"
+	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/pkg/store/testenv"
 )
 
-func newClient(t *testing.T, agentID, shortID string) *registry.Client {
+func newClient(t *testing.T, agentID, shortID string) *agentstore.Client {
 	t.Helper()
 	service, _ := testenv.Engine(t)
-	c, err := registry.New(service, registry.Options{
+	c, err := agentstore.New(service, agentstore.Options{
 		AgentID:    agentID,
 		AgentShort: shortID,
 		Logger:     slog.New(slog.NewTextHandler(discardWriter{}, nil)),
@@ -51,7 +51,7 @@ func TestRegisterAgent_FirstTime(t *testing.T) {
 	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
 
-	err := h.RegisterAgent(ctx, registry.Agent{
+	err := h.RegisterAgent(ctx, agentstore.Agent{
 		ID:          "agt_ag02",
 		AgentTypeID: "hugr-data",
 		ShortID:     "ag02",
@@ -75,7 +75,7 @@ func TestRegisterAgent_Idempotent(t *testing.T) {
 	require.NotNil(t, first)
 	originalCreatedAt := first.CreatedAt
 
-	require.NoError(t, h.RegisterAgent(ctx, registry.Agent{
+	require.NoError(t, h.RegisterAgent(ctx, agentstore.Agent{
 		ID:             "agt_ag01",
 		AgentTypeID:    "hugr-data",
 		ShortID:        "ag01",

@@ -2,7 +2,7 @@
 // engine (local: local.New registers it; remote: Hugr side). Exposes
 // a typed Client to text → vector translation used by pkg/store/memory
 // callers (Search + Store) and memory.Reviewer.
-package embeddings
+package embedding
 
 import (
 	"fmt"

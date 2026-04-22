@@ -60,11 +60,12 @@ func newTestHarness(t *testing.T) *testHarness {
 	tm.AddProvider(tools.FakeProvider{N: "hugr-main", T: tools.FakeTools("demo_query", "demo_list")})
 	tm.AddProvider(tools.FakeProvider{N: "_skills", T: tools.FakeTools("skill_list", "skill_load")})
 
-	m := New(Config{
+	m, err := New(Config{
 		Skills:       sk,
 		Tools:        tm,
 		Constitution: "C",
 	})
+	require.NoError(t, err)
 	return &testHarness{m: m, tools: tm}
 }
 

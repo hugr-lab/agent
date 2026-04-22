@@ -1,8 +1,8 @@
-// Package learning exposes agent-scoped hub.db hypotheses +
-// session_reviews operations through a typed Client. Memory-audit log
-// (memory_log) lives in pkg/store/memory even though the reviewer
-// drives writes into it.
-package learning
+// Package sessions exposes agent-scoped hub.db session operations
+// (sessions + session_events + session_notes + session_participants)
+// through a typed Client. Constructed by the caller with a
+// types.Querier.
+package store
 
 import (
 	"fmt"
@@ -18,7 +18,7 @@ type Options struct {
 	Logger     *slog.Logger
 }
 
-// Client is the agent-scoped hub.db learning API.
+// Client is the agent-scoped hub.db sessions API.
 type Client struct {
 	querier    types.Querier
 	agentID    string
@@ -29,10 +29,10 @@ type Client struct {
 // New constructs the Client.
 func New(querier types.Querier, opts Options) (*Client, error) {
 	if querier == nil {
-		return nil, fmt.Errorf("learning: nil querier")
+		return nil, fmt.Errorf("sessions: nil querier")
 	}
 	if opts.AgentID == "" {
-		return nil, fmt.Errorf("learning: AgentID required")
+		return nil, fmt.Errorf("sessions: AgentID required")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()

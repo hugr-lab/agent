@@ -9,8 +9,9 @@ import (
 	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
+	"github.com/hugr-lab/query-engine/types"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -30,8 +31,8 @@ import (
 //     describing the fold so the post-session reviewer can still see
 //     how many turns were summarised.
 type Compactor struct {
-	memory          *memdb.Client
-	sessions        *sessdb.Client
+	memory          *memstore.Client
+	sessions        *sessstore.Client
 	router          *models.Router
 	tokens          *models.TokenEstimator
 	threshold       float64
@@ -40,15 +41,18 @@ type Compactor struct {
 	loadSkillMemory func(ctx context.Context, skillName string) (*skills.SkillMemoryConfig, error)
 }
 
-// CompactorOptions bundles compactor construction parameters.
+// CompactorOptions bundles compactor construction parameters. The
+// compactor builds its own memstore + sessstore clients internally
+// from Querier + AgentID + AgentShort.
 type CompactorOptions struct {
-	Memory    *memdb.Client
-	Sessions  *sessdb.Client
-	Router    *models.Router
-	Tokens    *models.TokenEstimator
-	Threshold float64 // default 0.70
-	MinTurns  int     // minimum turn groups retained after compaction; default 4
-	Logger    *slog.Logger
+	Querier    types.Querier
+	AgentID    string
+	AgentShort string
+	Router     *models.Router
+	Tokens     *models.TokenEstimator
+	Threshold  float64 // default 0.70
+	MinTurns   int     // minimum turn groups retained after compaction; default 4
+	Logger     *slog.Logger
 
 	// LoadSkillMemory returns the per-skill memory config for a skill
 	// by name. When set, the compactor uses the session's active
@@ -59,8 +63,8 @@ type CompactorOptions struct {
 
 // NewCompactor constructs a Compactor.
 func NewCompactor(opts CompactorOptions) (*Compactor, error) {
-	if opts.Sessions == nil {
-		return nil, fmt.Errorf("learning: Compactor requires Sessions")
+	if opts.Querier == nil {
+		return nil, fmt.Errorf("learning: Compactor requires Querier")
 	}
 	if opts.Router == nil {
 		return nil, fmt.Errorf("learning: Compactor requires Router")
@@ -77,9 +81,21 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 	if opts.MinTurns <= 0 {
 		opts.MinTurns = 4
 	}
+	memC, err := memstore.New(opts.Querier, memstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	}
+	sessC, err := sessstore.New(opts.Querier, sessstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build sessions store: %w", err)
+	}
 	return &Compactor{
-		memory:          opts.Memory,
-		sessions:        opts.Sessions,
+		memory:          memC,
+		sessions:        sessC,
 		router:          opts.Router,
 		tokens:          opts.Tokens,
 		threshold:       opts.Threshold,
@@ -131,7 +147,7 @@ func (c *Compactor) Before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 	req.Contents = newContents
 
 	if sid != "" && c.sessions != nil {
-		_, _ = c.sessions.AppendEvent(ctx, sessdb.Event{
+		_, _ = c.sessions.AppendEvent(ctx, sessstore.Event{
 			SessionID: sid,
 			EventType: "compaction",
 			Author:    "system",
@@ -288,11 +304,11 @@ func (c *Compactor) mergedHints(ctx context.Context, sid string) memory.MergedCo
 	active := map[string]struct{}{}
 	for _, ev := range events {
 		switch ev.EventType {
-		case sessdb.EventTypeSkillLoaded:
+		case sessstore.EventTypeSkillLoaded:
 			if name := skillNameFromSessionEvent(ev); name != "" {
 				active[name] = struct{}{}
 			}
-		case sessdb.EventTypeSkillUnloaded:
+		case sessstore.EventTypeSkillUnloaded:
 			delete(active, skillNameFromSessionEvent(ev))
 		}
 	}
@@ -313,7 +329,7 @@ func (c *Compactor) mergedHints(ctx context.Context, sid string) memory.MergedCo
 // skillNameFromSessionEvent is the SessionEvent counterpart to
 // skillNameFromEvent — shares the Metadata["skill"] fallback to
 // SessionEvent.Content.
-func skillNameFromSessionEvent(ev sessdb.Event) string {
+func skillNameFromSessionEvent(ev sessstore.Event) string {
 	if ev.Metadata != nil {
 		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
 			return name

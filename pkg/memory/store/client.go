@@ -3,7 +3,7 @@
 // typed Client. Constructed by the caller with a types.Querier —
 // which can be an embedded *hugr.Service (local mode) or a remote
 // *client.Client (hub mode); the Client does not know which.
-package memory
+package store
 
 import (
 	"context"

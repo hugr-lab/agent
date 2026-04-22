@@ -6,44 +6,92 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/model"
 )
 
-// ConfigProvider is the minimal keyed-config view needed by
-// LoadRoutesFromConfig. Any source that can return a string by key
-// satisfies it.
-type ConfigProvider interface {
-	GetString(key string) string
-}
-
-// ModelFactory creates a model.LLM from a Hugr data source name.
-// Used by Router to instantiate models from config-driven route names.
-type ModelFactory func(hugrModelName string) model.LLM
-
-// Router wraps a base model.LLM and routes requests by intent.
-// Thread-safe: routes can be updated via LoadRoutesFromConfig (called
-// from file watcher goroutine) while GenerateContent runs concurrently.
+// Router wraps model.LLM instances and routes requests by intent.
+// Router owns LLM construction: per model it picks a querier (local
+// engine for models registered in local, remote hugr otherwise), and
+// builds a model.LLM via NewHugr with the shared options.
+//
+// Thread-safe: routes are populated once at NewRouter and never
+// mutated after — no locking needed on read.
 type Router struct {
 	mu           sync.RWMutex
 	defaultModel model.LLM
 	routes       map[Intent]model.LLM
-	factory      ModelFactory
 	logger       *slog.Logger
 }
 
-// NewRouter creates an IntentLLM router. All intents initially route to the default model.
-func NewRouter(defaultModel model.LLM) *Router {
+// NewRouter constructs a Router given both possible queriers, the
+// list of model names that live in the local engine, the LLM config
+// (default Model + per-intent Routes + shared MaxTokens/Temperature),
+// and a list of construction Options appended to every built model.
+//
+// remote is always required (default fallback querier).
+// local may be nil when LocalDB is disabled — localModels must then
+// be empty.
+func NewRouter(
+	local types.Querier,
+	remote types.Querier,
+	localModels []string,
+	cfg Config,
+	opts ...Option,
+) *Router {
+	r := &Router{
+		routes: make(map[Intent]model.LLM),
+		logger: slog.Default(),
+	}
+
+	isLocal := make(map[string]bool, len(localModels))
+	for _, n := range localModels {
+		isLocal[n] = true
+	}
+	querierFor := func(modelName string) types.Querier {
+		if local != nil && isLocal[modelName] {
+			return local
+		}
+		return remote
+	}
+
+	// Shared model options: attach MaxTokens / Temperature from cfg in
+	// addition to the caller-supplied ones.
+	buildOpts := func() []Option {
+		out := make([]Option, 0, len(opts)+2)
+		out = append(out, opts...)
+		if cfg.MaxTokens > 0 {
+			out = append(out, WithMaxTokens(cfg.MaxTokens))
+		}
+		if cfg.Temperature > 0 {
+			out = append(out, WithTemperature(cfg.Temperature))
+		}
+		return out
+	}
+
+	if cfg.Model != "" {
+		r.defaultModel = NewHugr(querierFor(cfg.Model), cfg.Model, buildOpts()...)
+	}
+
+	for intentName, modelName := range cfg.Routes {
+		if modelName == "" {
+			continue
+		}
+		m := NewHugr(querierFor(modelName), modelName, buildOpts()...)
+		r.routes[Intent(intentName)] = m
+	}
+	return r
+}
+
+// NewRouterWithDefault builds a Router wrapping a pre-constructed
+// default model. Handy for tests + for callers that don't need per-
+// model querier routing.
+func NewRouterWithDefault(defaultModel model.LLM) *Router {
 	return &Router{
 		defaultModel: defaultModel,
 		routes:       make(map[Intent]model.LLM),
 		logger:       slog.Default(),
 	}
-}
-
-// WithFactory sets a model factory for config-driven route changes.
-func (r *Router) WithFactory(f ModelFactory) *Router {
-	r.factory = f
-	return r
 }
 
 // WithLogger sets the logger.
@@ -52,14 +100,8 @@ func (r *Router) WithLogger(l *slog.Logger) *Router {
 	return r
 }
 
-// SetRoute maps an intent to a specific model.
-func (r *Router) SetRoute(intent Intent, m model.LLM) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.routes[intent] = m
-}
-
-// ModelFor returns the model mapped to the given intent, falling back to default.
+// ModelFor returns the model mapped to the given intent, falling back
+// to the default model when no explicit route is set.
 func (r *Router) ModelFor(intent Intent) model.LLM {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -69,27 +111,12 @@ func (r *Router) ModelFor(intent Intent) model.LLM {
 	return r.defaultModel
 }
 
-// LoadRoutesFromConfig reads llm.routes from the ConfigProvider and sets up
-// model routing. Called at startup and on config change.
-func (r *Router) LoadRoutesFromConfig(cfg ConfigProvider) {
-	if r.factory == nil || cfg == nil {
-		return
-	}
-
+// SetRoute — still exposed for tests that inject fake LLMs directly.
+// Production wiring uses NewRouter alone.
+func (r *Router) SetRoute(intent Intent, m model.LLM) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	intents := []Intent{IntentDefault, IntentToolCalling, IntentSummarization, IntentClassification}
-	for _, intent := range intents {
-		key := "llm.routes." + string(intent)
-		name := cfg.GetString(key)
-		if name == "" {
-			continue
-		}
-		m := r.factory(name)
-		r.routes[intent] = m
-		r.logger.Info("intent route configured", "intent", string(intent), "model", name)
-	}
+	r.routes[intent] = m
 }
 
 // model.LLM interface — delegates via ModelFor(IntentDefault).

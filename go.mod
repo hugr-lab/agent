@@ -8,9 +8,9 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10501.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
-	github.com/hugr-lab/query-engine v0.3.29
-	github.com/hugr-lab/query-engine/client v0.3.29
-	github.com/hugr-lab/query-engine/types v0.3.29
+	github.com/hugr-lab/query-engine v0.3.32
+	github.com/hugr-lab/query-engine/client v0.3.32
+	github.com/hugr-lab/query-engine/types v0.3.32
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/spf13/viper v1.21.0

@@ -1,6 +1,6 @@
 // Package registry exposes hub.db agent + agent_types operations
 // through a typed Client.
-package registry
+package store
 
 import (
 	"fmt"

@@ -3,12 +3,14 @@ package memory
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/hugr-lab/hugen/pkg/sessions"
-	embdb "github.com/hugr-lab/hugen/pkg/store/embeddings"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	embedding "github.com/hugr-lab/hugen/pkg/models/embedding"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -19,33 +21,59 @@ import (
 // providers: [{provider: _memory}].
 const ServiceName = "_memory"
 
+// ServiceOptions bundles service construction parameters. AgentID and
+// AgentShort are forwarded to the internal store clients. Logger may be
+// nil.
+type ServiceOptions struct {
+	AgentID    string
+	AgentShort string
+	Logger     *slog.Logger
+}
+
 // Service is the tools.Provider that exposes long-term memory tools
 // (memory_search / memory_linked / memory_stats / memory_note /
 // memory_clear_note). Stateless beyond the hub + session-manager
 // references it holds.
 type Service struct {
 	sm         *sessions.Manager
-	memory     *memdb.Client
-	sessions   *sessdb.Client
-	embeddings *embdb.Client
+	memory     *memstore.Client
+	sessions   *sessstore.Client
+	embeddings *embedding.Client
 	tools      []tool.Tool
 }
 
-// NewService returns the memory tools provider. When memory/sessions
-// are nil the service exposes no tools (Tools() → empty slice);
-// registering it anyway keeps the provider catalogue consistent.
-func NewService(sm *sessions.Manager, memory *memdb.Client, sessClient *sessdb.Client, embeddings *embdb.Client) *Service {
-	s := &Service{sm: sm, memory: memory, sessions: sessClient, embeddings: embeddings}
-	if memory != nil && sessClient != nil {
-		s.tools = []tool.Tool{
-			&memorySearchTool{sm: sm, memory: memory},
-			&memoryLinkedTool{sm: sm, memory: memory},
-			&memoryStatsTool{sm: sm, memory: memory},
-			&memoryNoteTool{sm: sm, sessions: sessClient},
-			&memoryClearNoteTool{sm: sm, sessions: sessClient},
-		}
+// NewService returns the memory tools provider. When querier is nil the
+// service exposes no tools (Tools() → empty slice); registering it
+// anyway keeps the provider catalogue consistent. The service builds
+// its own memstore + sessstore clients internally from the given
+// querier. Embeddings are injected (they're a models-domain dependency).
+func NewService(querier types.Querier, sm *sessions.Manager, embeddings *embedding.Client, opts ServiceOptions) (*Service, error) {
+	s := &Service{sm: sm, embeddings: embeddings}
+	if querier == nil {
+		return s, nil
 	}
-	return s
+	memC, err := memstore.New(querier, memstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("memory: build memory store: %w", err)
+	}
+	sessC, err := sessstore.New(querier, sessstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("memory: build sessions store: %w", err)
+	}
+	s.memory = memC
+	s.sessions = sessC
+	s.tools = []tool.Tool{
+		&memorySearchTool{sm: sm, memory: memC},
+		&memoryLinkedTool{sm: sm, memory: memC},
+		&memoryStatsTool{sm: sm, memory: memC},
+		&memoryNoteTool{sm: sm, sessions: sessC},
+		&memoryClearNoteTool{sm: sm, sessions: sessC},
+	}
+	return s, nil
 }
 
 // Name implements tools.Provider.
@@ -60,7 +88,7 @@ func (s *Service) Tools() []tool.Tool { return s.tools }
 
 type memorySearchTool struct {
 	sm     *sessions.Manager
-	memory *memdb.Client
+	memory *memstore.Client
 }
 
 func (t *memorySearchTool) Name() string { return "memory_search" }
@@ -126,7 +154,7 @@ func (t *memorySearchTool) Run(ctx tool.Context, args any) (map[string]any, erro
 			limit = 20
 		}
 	}
-	results, err := t.memory.Search(ctx, query, nil, memdb.SearchOpts{
+	results, err := t.memory.Search(ctx, query, nil, memstore.SearchOpts{
 		Category: category,
 		Tags:     tags,
 		Limit:    limit,
@@ -144,7 +172,7 @@ func (t *memorySearchTool) Run(ctx tool.Context, args any) (map[string]any, erro
 
 type memoryLinkedTool struct {
 	sm     *sessions.Manager
-	memory *memdb.Client
+	memory *memstore.Client
 }
 
 func (t *memoryLinkedTool) Name() string { return "memory_linked" }
@@ -203,7 +231,7 @@ func (t *memoryLinkedTool) Run(ctx tool.Context, args any) (map[string]any, erro
 
 type memoryStatsTool struct {
 	sm     *sessions.Manager
-	memory *memdb.Client
+	memory *memstore.Client
 }
 
 func (t *memoryStatsTool) Name() string { return "memory_stats" }
@@ -236,7 +264,7 @@ func (t *memoryStatsTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
 
 type memoryNoteTool struct {
 	sm       *sessions.Manager
-	sessions *sessdb.Client
+	sessions *sessstore.Client
 }
 
 func (t *memoryNoteTool) Name() string { return "memory_note" }
@@ -280,7 +308,7 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	if sid == "" {
 		return nil, fmt.Errorf("memory_note: no session id in tool context")
 	}
-	id, err := t.sessions.AddNote(ctx, sessdb.Note{
+	id, err := t.sessions.AddNote(ctx, sessstore.Note{
 		SessionID: sid, Content: content,
 	})
 	if err != nil {
@@ -299,7 +327,7 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 
 type memoryClearNoteTool struct {
 	sm       *sessions.Manager
-	sessions *sessdb.Client
+	sessions *sessstore.Client
 }
 
 func (t *memoryClearNoteTool) Name() string { return "memory_clear_note" }

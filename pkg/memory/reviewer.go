@@ -11,9 +11,10 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
+	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -23,9 +24,9 @@ import (
 // calls Review). Review is idempotent: re-running on a completed
 // session is a no-op.
 type Reviewer struct {
-	memory   *memdb.Client
-	learning *learndb.Client
-	sessions *sessdb.Client
+	memory   *memstore.Client
+	learning *learnstore.Client
+	sessions *sessstore.Client
 	router   *models.Router
 	logger   *slog.Logger
 
@@ -51,11 +52,13 @@ type Reviewer struct {
 	now func() time.Time
 }
 
-// ReviewerOptions bundle reviewer construction parameters.
+// ReviewerOptions bundle reviewer construction parameters. The
+// reviewer builds its own memstore / learnstore / sessstore clients
+// internally from Querier + AgentID + AgentShort.
 type ReviewerOptions struct {
-	Memory     *memdb.Client
-	Learning   *learndb.Client
-	Sessions   *sessdb.Client
+	Querier    types.Querier
+	AgentID    string
+	AgentShort string
 	Router     *models.Router
 	Logger     *slog.Logger
 	Config     MergedConfig
@@ -71,24 +74,36 @@ type ReviewerOptions struct {
 }
 
 // NewReviewer builds a Reviewer. Router is optional — if nil the
-// reviewer refuses to run (returns ErrNoModel). Hub is required.
+// reviewer refuses to run (returns ErrNoModel). Querier is required;
+// the reviewer constructs its own store clients internally.
 func NewReviewer(opts ReviewerOptions) (*Reviewer, error) {
-	if opts.Memory == nil {
-		return nil, fmt.Errorf("learning: Reviewer requires Memory")
-	}
-	if opts.Learning == nil {
-		return nil, fmt.Errorf("learning: Reviewer requires Learning")
-	}
-	if opts.Sessions == nil {
-		return nil, fmt.Errorf("learning: Reviewer requires Sessions")
+	if opts.Querier == nil {
+		return nil, fmt.Errorf("learning: Reviewer requires Querier")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	storeOpts := memstore.Options{AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger}
+	memC, err := memstore.New(opts.Querier, storeOpts)
+	if err != nil {
+		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	}
+	learnC, err := learnstore.New(opts.Querier, learnstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build learning store: %w", err)
+	}
+	sessC, err := sessstore.New(opts.Querier, sessstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build sessions store: %w", err)
+	}
 	return &Reviewer{
-		memory:          opts.Memory,
-		learning:        opts.Learning,
-		sessions:        opts.Sessions,
+		memory:          memC,
+		learning:        learnC,
+		sessions:        sessC,
 		router:          opts.Router,
 		logger:          opts.Logger,
 		config:          opts.Config,
@@ -117,7 +132,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if existing != nil {
 		reviewID = existing.ID
 	} else {
-		id, err := r.learning.CreateReview(ctx, learndb.Review{
+		id, err := r.learning.CreateReview(ctx, learnstore.Review{
 			SessionID: sessionID, Status: "pending",
 		})
 		if err != nil {
@@ -149,7 +164,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if toolCalls < minCalls {
 		r.logger.Info("reviewer: skipping session below min_tool_calls",
 			"session", sessionID, "tool_calls", toolCalls, "min", minCalls)
-		return r.learning.CompleteReview(ctx, reviewID, learndb.ReviewResult{
+		return r.learning.CompleteReview(ctx, reviewID, learnstore.ReviewResult{
 			ModelUsed: "skipped",
 		})
 	}
@@ -175,7 +190,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("learning: parse: %w", err)
 	}
 
-	result := learndb.ReviewResult{
+	result := learnstore.ReviewResult{
 		ModelUsed:  llm.Name(),
 		TokensUsed: usage,
 	}
@@ -196,7 +211,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	}
 
 	for _, hy := range parsed.Hypotheses {
-		if _, err := r.learning.CreateHypothesis(ctx, learndb.Hypothesis{
+		if _, err := r.learning.CreateHypothesis(ctx, learnstore.Hypothesis{
 			Content:        hy.Content,
 			Category:       hy.Category,
 			Priority:       defaultStr(hy.Priority, "medium"),
@@ -220,7 +235,7 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 // reviewer — keeps the path testable without an embedding model.
 func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact, merged MergedConfig) (bool, error) {
 	// Look for near-duplicates by category + keyword.
-	existing, _ := r.memory.Search(ctx, f.Content, nil, memdb.SearchOpts{
+	existing, _ := r.memory.Search(ctx, f.Content, nil, memstore.SearchOpts{
 		Category: f.Category,
 		Limit:    5,
 	})
@@ -238,7 +253,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 	vol := defaultStr(f.Volatility, "stable")
 	dur := r.durationFor(vol)
 	now := r.now()
-	item := memdb.Item{
+	item := memstore.Item{
 		Content:    f.Content,
 		Category:   f.Category,
 		Volatility: vol,
@@ -254,7 +269,7 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 // buildPrompt assembles the summarisation prompt from transcript +
 // notes + merged review prompt. The format is intentionally small —
 // the cheap model sees: instruction + transcript window + notes.
-func (r *Reviewer) buildPrompt(events []sessdb.EventFull, notes []sessdb.Note, merged MergedConfig) string {
+func (r *Reviewer) buildPrompt(events []sessstore.EventFull, notes []sessstore.Note, merged MergedConfig) string {
 	var sb strings.Builder
 	sb.WriteString(r.reviewPrompt(merged))
 	sb.WriteString("\n\n## Transcript\n")
@@ -316,18 +331,18 @@ func (r *Reviewer) reviewPrompt(merged MergedConfig) string {
 // skill_loaded / skill_unloaded events, then asking loadSkillMemory
 // for each active skill's memory.yaml. Falls back to the reviewer's
 // static config when no loader is wired.
-func (r *Reviewer) mergedConfigFor(ctx context.Context, events []sessdb.EventFull) MergedConfig {
+func (r *Reviewer) mergedConfigFor(ctx context.Context, events []sessstore.EventFull) MergedConfig {
 	if r.loadSkillMemory == nil {
 		return r.config
 	}
 	active := map[string]struct{}{}
 	for _, ev := range events {
 		switch ev.EventType {
-		case sessdb.EventTypeSkillLoaded:
+		case sessstore.EventTypeSkillLoaded:
 			if name := skillNameFromEvent(ev); name != "" {
 				active[name] = struct{}{}
 			}
-		case sessdb.EventTypeSkillUnloaded:
+		case sessstore.EventTypeSkillUnloaded:
 			delete(active, skillNameFromEvent(ev))
 		}
 	}
@@ -346,7 +361,7 @@ func (r *Reviewer) mergedConfigFor(ctx context.Context, events []sessdb.EventFul
 	return MergeWithLogger(configs, r.logger)
 }
 
-func skillNameFromEvent(ev sessdb.EventFull) string {
+func skillNameFromEvent(ev sessstore.EventFull) string {
 	if ev.Metadata != nil {
 		if name, ok := ev.Metadata["skill"].(string); ok && name != "" {
 			return name
@@ -508,13 +523,13 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func linkList(targetIDs []string) []memdb.Link {
+func linkList(targetIDs []string) []memstore.Link {
 	if len(targetIDs) == 0 {
 		return nil
 	}
-	links := make([]memdb.Link, 0, len(targetIDs))
+	links := make([]memstore.Link, 0, len(targetIDs))
 	for _, id := range targetIDs {
-		links = append(links, memdb.Link{TargetID: id, Relation: "related"})
+		links = append(links, memstore.Link{TargetID: id, Relation: "related"})
 	}
 	return links
 }

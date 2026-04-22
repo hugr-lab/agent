@@ -3,11 +3,13 @@ package chatcontext
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/hugr-lab/hugen/pkg/sessions"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -18,27 +20,52 @@ import (
 // providers: [{provider: _context}].
 const ServiceName = "_context"
 
+// ServiceOptions bundles service construction parameters. AgentID /
+// AgentShort are forwarded to the internal store clients. Logger may
+// be nil.
+type ServiceOptions struct {
+	AgentID    string
+	AgentShort string
+	Logger     *slog.Logger
+}
+
 // Service is the tools.Provider that exposes context-window tools
 // (context_status, context_intro). Compaction is automatic via the
 // Compactor BeforeModelCallback — no context_compress tool is
 // exposed.
 type Service struct {
 	sm       *sessions.Manager
-	memory   *memdb.Client
-	sessions *sessdb.Client
+	memory   *memstore.Client
+	sessions *sessstore.Client
 	tools    []tool.Tool
 }
 
-// NewService constructs the Service. memory/sessions may be nil —
-// context_intro then returns just prompt/tool counts without
-// hub-level stats.
-func NewService(sm *sessions.Manager, memory *memdb.Client, sessClient *sessdb.Client) *Service {
-	s := &Service{sm: sm, memory: memory, sessions: sessClient}
+// NewService constructs the Service. querier may be nil — context_intro
+// then returns just prompt/tool counts without hub-level stats. The
+// service builds its own memstore + sessstore clients internally.
+func NewService(querier types.Querier, sm *sessions.Manager, opts ServiceOptions) (*Service, error) {
+	s := &Service{sm: sm}
+	if querier != nil {
+		memC, err := memstore.New(querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("chatcontext: build memory store: %w", err)
+		}
+		sessC, err := sessstore.New(querier, sessstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("chatcontext: build sessions store: %w", err)
+		}
+		s.memory = memC
+		s.sessions = sessC
+	}
 	s.tools = []tool.Tool{
 		&contextStatusTool{sm: sm},
-		&contextIntroTool{sm: sm, memory: memory, sessions: sessClient},
+		&contextIntroTool{sm: sm, memory: s.memory, sessions: s.sessions},
 	}
-	return s
+	return s, nil
 }
 
 // Name implements tools.Provider.
@@ -95,8 +122,8 @@ func (t *contextStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error)
 
 type contextIntroTool struct {
 	sm       *sessions.Manager
-	memory   *memdb.Client
-	sessions *sessdb.Client
+	memory   *memstore.Client
+	sessions *sessstore.Client
 }
 
 func (t *contextIntroTool) Name() string { return "context_intro" }

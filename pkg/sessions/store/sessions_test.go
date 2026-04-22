@@ -1,6 +1,6 @@
 //go:build duckdb_arrow
 
-package sessions_test
+package store_test
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hugr-lab/hugen/pkg/store/registry"
-	"github.com/hugr-lab/hugen/pkg/store/sessions"
+	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/store/testenv"
 )
 
@@ -19,19 +19,19 @@ type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
-func newClient(t *testing.T, agentID, shortID string) *sessions.Client {
+func newClient(t *testing.T, agentID, shortID string) *sessstore.Client {
 	t.Helper()
 	service, _ := testenv.Engine(t)
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
-	reg, err := registry.New(service, registry.Options{
+	reg, err := agentstore.New(service, agentstore.Options{
 		AgentID: agentID, AgentShort: shortID, Logger: logger,
 	})
 	require.NoError(t, err)
-	require.NoError(t, reg.RegisterAgent(context.Background(), registry.Agent{
+	require.NoError(t, reg.RegisterAgent(context.Background(), agentstore.Agent{
 		ID: agentID, AgentTypeID: "hugr-data", ShortID: shortID,
 		Name: "test-agent", Status: "active",
 	}))
-	c, err := sessions.New(service, sessions.Options{
+	c, err := sessstore.New(service, sessstore.Options{
 		AgentID: agentID, AgentShort: shortID, Logger: logger,
 	})
 	require.NoError(t, err)
@@ -42,11 +42,11 @@ func TestSessions_CRUD(t *testing.T) {
 	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
 
-	_, err := h.CreateSession(ctx, sessions.Record{
+	_, err := h.CreateSession(ctx, sessstore.Record{
 		ID: "sess-active", OwnerID: "u1", Status: "active", Mission: "active one",
 	})
 	require.NoError(t, err)
-	_, err = h.CreateSession(ctx, sessions.Record{
+	_, err = h.CreateSession(ctx, sessstore.Record{
 		ID: "sess-closed", OwnerID: "u1", Status: "active",
 	})
 	require.NoError(t, err)
@@ -62,15 +62,15 @@ func TestSessions_CRUD(t *testing.T) {
 	assert.True(t, ids["sess-active"], "active session missing from ListActiveSessions")
 	assert.False(t, ids["sess-closed"], "closed session leaked into ListActiveSessions")
 
-	_, err = h.AppendEvent(ctx, sessions.Event{
-		SessionID: "sess-active", EventType: sessions.EventTypeSkillLoaded,
+	_, err = h.AppendEvent(ctx, sessstore.Event{
+		SessionID: "sess-active", EventType: sessstore.EventTypeSkillLoaded,
 		Author: "sess-active", Content: "hugr-data",
 		Metadata: map[string]any{"skill": "hugr-data"},
 	})
 	require.NoError(t, err)
 
-	_, err = h.AppendEvent(ctx, sessions.Event{
-		SessionID: "sess-active", EventType: sessions.EventTypeSkillUnloaded,
+	_, err = h.AppendEvent(ctx, sessstore.Event{
+		SessionID: "sess-active", EventType: sessstore.EventTypeSkillUnloaded,
 		Author: "sess-active", Content: "hugr-data",
 		Metadata: map[string]any{"skill": "hugr-data"},
 	})
@@ -79,8 +79,8 @@ func TestSessions_CRUD(t *testing.T) {
 	evs, err := h.GetEvents(ctx, "sess-active")
 	require.NoError(t, err)
 	require.Len(t, evs, 2)
-	assert.Equal(t, sessions.EventTypeSkillLoaded, evs[0].EventType)
-	assert.Equal(t, sessions.EventTypeSkillUnloaded, evs[1].EventType)
+	assert.Equal(t, sessstore.EventTypeSkillLoaded, evs[0].EventType)
+	assert.Equal(t, sessstore.EventTypeSkillUnloaded, evs[1].EventType)
 	assert.Equal(t, 1, evs[0].Seq)
 	assert.Equal(t, 2, evs[1].Seq)
 	assert.Equal(t, "hugr-data", evs[0].Content)
@@ -89,17 +89,17 @@ func TestSessions_CRUD(t *testing.T) {
 func TestSessions_Notes(t *testing.T) {
 	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	_, err := h.CreateSession(ctx, sessions.Record{
+	_, err := h.CreateSession(ctx, sessstore.Record{
 		ID: "sess-notes", OwnerID: "u1", Status: "active",
 	})
 	require.NoError(t, err)
 
-	id1, err := h.AddNote(ctx, sessions.Note{
+	id1, err := h.AddNote(ctx, sessstore.Note{
 		SessionID: "sess-notes", Content: "found 14 fields",
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, id1)
-	_, err = h.AddNote(ctx, sessions.Note{
+	_, err = h.AddNote(ctx, sessstore.Note{
 		SessionID: "sess-notes", Content: "severity 1-3",
 	})
 	require.NoError(t, err)
@@ -127,15 +127,15 @@ func TestSessions_Notes(t *testing.T) {
 func TestSessions_Participants(t *testing.T) {
 	h := newClient(t, "agt_ag01", "ag01")
 	ctx := context.Background()
-	_, err := h.CreateSession(ctx, sessions.Record{
+	_, err := h.CreateSession(ctx, sessstore.Record{
 		ID: "sess-p", OwnerID: "u1", Status: "active",
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, h.AddParticipant(ctx, sessions.Participant{
+	require.NoError(t, h.AddParticipant(ctx, sessstore.Participant{
 		SessionID: "sess-p", UserID: "u1", Role: "owner",
 	}))
-	require.NoError(t, h.AddParticipant(ctx, sessions.Participant{
+	require.NoError(t, h.AddParticipant(ctx, sessstore.Participant{
 		SessionID: "sess-p", UserID: "u2", Role: "observer",
 	}))
 

@@ -6,24 +6,28 @@ import (
 	"log/slog"
 	"time"
 
-	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/query-engine/types"
 )
 
 // Consolidator performs idempotent background maintenance: deletes
 // expired memory items and expires stale hypotheses. Runs under the
 // scheduler's priority-30 cron lane (ADR v7.2 §8).
 type Consolidator struct {
-	memory           *memdb.Client
-	learning         *learndb.Client
+	memory           *memstore.Client
+	learning         *learnstore.Client
 	hypothesisExpiry time.Duration
 	logger           *slog.Logger
 }
 
-// ConsolidatorOptions bundles consolidator construction parameters.
+// ConsolidatorOptions bundles consolidator construction parameters. The
+// consolidator builds its own memstore + learnstore clients internally
+// from Querier + AgentID + AgentShort.
 type ConsolidatorOptions struct {
-	Memory           *memdb.Client
-	Learning         *learndb.Client
+	Querier          types.Querier
+	AgentID          string
+	AgentShort       string
 	HypothesisExpiry time.Duration
 	Logger           *slog.Logger
 }
@@ -31,11 +35,8 @@ type ConsolidatorOptions struct {
 // NewConsolidator builds a Consolidator. HypothesisExpiry defaults to
 // 30 days when zero.
 func NewConsolidator(opts ConsolidatorOptions) (*Consolidator, error) {
-	if opts.Memory == nil {
-		return nil, fmt.Errorf("learning: Consolidator requires Memory")
-	}
-	if opts.Learning == nil {
-		return nil, fmt.Errorf("learning: Consolidator requires Learning")
+	if opts.Querier == nil {
+		return nil, fmt.Errorf("learning: Consolidator requires Querier")
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -43,9 +44,21 @@ func NewConsolidator(opts ConsolidatorOptions) (*Consolidator, error) {
 	if opts.HypothesisExpiry <= 0 {
 		opts.HypothesisExpiry = 30 * 24 * time.Hour
 	}
+	memC, err := memstore.New(opts.Querier, memstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	}
+	learnC, err := learnstore.New(opts.Querier, learnstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build learning store: %w", err)
+	}
 	return &Consolidator{
-		memory:           opts.Memory,
-		learning:         opts.Learning,
+		memory:           memC,
+		learning:         learnC,
 		hypothesisExpiry: opts.HypothesisExpiry,
 		logger:           opts.Logger,
 	}, nil

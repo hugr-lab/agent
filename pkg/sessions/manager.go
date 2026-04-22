@@ -11,8 +11,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	sessdb "github.com/hugr-lab/hugen/pkg/store/sessions"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/query-engine/types"
 	adksession "google.golang.org/adk/session"
 )
 
@@ -26,9 +27,15 @@ type Config struct {
 	// Manager itself no longer contributes a provider.
 	Tools *tools.Manager
 
-	// Hub persists session rows and skill lifecycle events. May be nil
-	// for tests.
-	Hub *sessdb.Client
+	// Querier is used by the Manager to build its own sessstore client
+	// internally. May be nil for tests that drive Session construction
+	// manually — in that case no hub persistence happens.
+	Querier types.Querier
+
+	// AgentID / AgentShort are forwarded to the internal sessstore
+	// client. AgentID is required when Querier is set.
+	AgentID    string
+	AgentShort string
 
 	// Constitution is the base system prompt text.
 	Constitution string
@@ -79,7 +86,7 @@ type Manager struct {
 
 	skills        skills.Manager
 	tools         *tools.Manager
-	hub           *sessdb.Client
+	hub           *sessstore.Client
 	constitution  string
 	logger        *slog.Logger
 	inlineBuilder InlineProviderFactory
@@ -92,22 +99,34 @@ var (
 	_ *Manager           = (*Manager)(nil)
 )
 
-// New builds a Manager.
-func New(cfg Config) *Manager {
+// New builds a Manager. When cfg.Querier is non-nil, the manager builds
+// its own sessstore client internally for hub persistence; otherwise it
+// runs in memory-only mode (useful for tests).
+func New(cfg Config) (*Manager, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	var hub *sessstore.Client
+	if cfg.Querier != nil {
+		c, err := sessstore.New(cfg.Querier, sessstore.Options{
+			AgentID: cfg.AgentID, AgentShort: cfg.AgentShort, Logger: cfg.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("session: build sessions store: %w", err)
+		}
+		hub = c
 	}
 	return &Manager{
 		sessions:      make(map[string]*Session),
 		skills:        cfg.Skills,
 		tools:         cfg.Tools,
-		hub:           cfg.Hub,
+		hub:           hub,
 		constitution:  cfg.Constitution,
 		logger:        cfg.Logger,
 		inlineBuilder: cfg.InlineBuilder,
 		classifier:    cfg.Classifier,
 		scheduler:     cfg.Scheduler,
-	}
+	}, nil
 }
 
 // publishEvent routes an ADK event to the classifier when one is
@@ -171,10 +190,10 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 		active := map[string]struct{}{}
 		for _, ev := range events {
 			switch ev.EventType {
-			case sessdb.EventTypeSkillLoaded:
+			case sessstore.EventTypeSkillLoaded:
 				name := ev.Content
 				if name == "" {
-					var meta sessdb.SkillLoadedMeta
+					var meta sessstore.SkillLoadedMeta
 					raw, _ := json.Marshal(ev.Metadata)
 					_ = json.Unmarshal(raw, &meta)
 					name = meta.Skill
@@ -182,7 +201,7 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 				if name != "" {
 					active[name] = struct{}{}
 				}
-			case sessdb.EventTypeSkillUnloaded:
+			case sessstore.EventTypeSkillUnloaded:
 				delete(active, ev.Content)
 			}
 		}
@@ -251,7 +270,7 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 	}
 
 	if m.hub != nil {
-		row := sessdb.Record{
+		row := sessstore.Record{
 			ID:      id,
 			AgentID: m.hub.AgentID(),
 			OwnerID: req.UserID,

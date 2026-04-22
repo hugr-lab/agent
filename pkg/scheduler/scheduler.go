@@ -7,8 +7,9 @@ import (
 	"sync"
 	"time"
 
-	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/query-engine/types"
 )
 
 // Reviewer, Verifier, and Consolidator are the contracts the scheduler
@@ -29,13 +30,17 @@ type (
 
 	// LearningStore is the narrow slice of the learning client the
 	// scheduler needs. Declared locally so tests can substitute stubs
-	// without building a full *learndb.Client.
+	// without building a full *learnstore.Client.
 	LearningStore interface {
-		ListPendingReviews(ctx context.Context, limit int) ([]learndb.Review, error)
+		ListPendingReviews(ctx context.Context, limit int) ([]learnstore.Review, error)
 	}
 )
 
-// Runtime is the scheduler's construction surface.
+// Runtime is the scheduler's construction surface. The scheduler
+// builds its own memstore + learnstore clients internally from
+// Querier + AgentID + AgentShort. Callers may still inject a custom
+// LearningStore (for tests) — when set, it takes precedence over the
+// one constructed from Querier.
 type Runtime struct {
 	// Interval is the baseline tick at which the scheduler polls for
 	// work. Default: 30s.
@@ -54,26 +59,36 @@ type Runtime struct {
 	Reviewer     Reviewer
 	Verifier     Verifier
 	Consolidator Consolidator
-	Memory       *memdb.Client
-	Learning     LearningStore
-	Logger       *slog.Logger
+
+	// Querier + AgentID + AgentShort are used to build the scheduler's
+	// narrow LearningStore view internally. Required unless Learning is
+	// explicitly injected.
+	Querier    types.Querier
+	AgentID    string
+	AgentShort string
+
+	// Learning is an optional pre-built narrow LearningStore. When
+	// non-nil, it overrides the one that would otherwise be built from
+	// Querier. Intended for tests with stubbed backends.
+	Learning LearningStore
+
+	Logger *slog.Logger
 }
 
 // Scheduler picks the highest-priority pending work on every tick.
 type Scheduler struct {
-	cfg   Runtime
-	wake  chan struct{}
-	done  chan struct{}
-	mu    sync.Mutex
-	queue []string // pending review session IDs awaiting nudge
+	cfg      Runtime
+	memory   *memstore.Client
+	learning LearningStore
+	wake     chan struct{}
+	done     chan struct{}
+	mu       sync.Mutex
+	queue    []string // pending review session IDs awaiting nudge
 }
 
 // New constructs a Scheduler. Fills in defaults but does not start
 // any goroutine. Start(ctx) kicks the loop off.
 func New(cfg Runtime) (*Scheduler, error) {
-	if cfg.Learning == nil {
-		return nil, fmt.Errorf("scheduler: Learning required")
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -91,10 +106,37 @@ func New(cfg Runtime) (*Scheduler, error) {
 	if _, err := Parse(cfg.ConsolidationAt); err != nil {
 		return nil, err
 	}
+
+	var memC *memstore.Client
+	learning := cfg.Learning
+	if cfg.Querier != nil {
+		m, err := memstore.New(cfg.Querier, memstore.Options{
+			AgentID: cfg.AgentID, AgentShort: cfg.AgentShort, Logger: cfg.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("scheduler: build memory store: %w", err)
+		}
+		memC = m
+		if learning == nil {
+			l, err := learnstore.New(cfg.Querier, learnstore.Options{
+				AgentID: cfg.AgentID, AgentShort: cfg.AgentShort, Logger: cfg.Logger,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("scheduler: build learning store: %w", err)
+			}
+			learning = l
+		}
+	}
+	if learning == nil {
+		return nil, fmt.Errorf("scheduler: Querier or Learning required")
+	}
+
 	return &Scheduler{
-		cfg:  cfg,
-		wake: make(chan struct{}, 1),
-		done: make(chan struct{}),
+		cfg:      cfg,
+		memory:   memC,
+		learning: learning,
+		wake:     make(chan struct{}, 1),
+		done:     make(chan struct{}),
 	}, nil
 }
 
@@ -187,10 +229,10 @@ func (s *Scheduler) tick(ctx context.Context) {
 // pickReview runs the oldest pending review in one tick. Returns true
 // if work was picked (so other lanes sit out the tick).
 func (s *Scheduler) pickReview(ctx context.Context) bool {
-	if s.cfg.Reviewer == nil || s.cfg.Learning == nil {
+	if s.cfg.Reviewer == nil || s.learning == nil {
 		return false
 	}
-	pending, err := s.cfg.Learning.ListPendingReviews(ctx, 1)
+	pending, err := s.learning.ListPendingReviews(ctx, 1)
 	if err != nil {
 		s.cfg.Logger.Warn("scheduler: ListPendingReviews", "err", err)
 		return false

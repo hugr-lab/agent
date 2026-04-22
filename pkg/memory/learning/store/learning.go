@@ -6,7 +6,7 @@
 // µs-offset timestamps so the composite PK
 // (event_time, event_type, memory_item_id, session_id) never collides
 // within a single call (spec 005 research Decision 3).
-package learning
+package store
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 
 	"github.com/hugr-lab/hugen/pkg/id"
 )
@@ -57,7 +57,7 @@ func (c *Client) CreateHypothesis(ctx context.Context, hyp Hypothesis) (string, 
 	if hyp.SourceSession != "" {
 		data["source_session_id"] = hyp.SourceSession
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_hypotheses_mut_input_data!) {
 			hub { db { agent {
 				insert_hypotheses(data: $data) { id }
@@ -93,9 +93,9 @@ func (c *Client) ListPendingHypotheses(ctx context.Context, priority string, lim
 		Verification   string `json:"verification"`
 		EstimatedCalls int    `json:"estimated_calls"`
 		SourceSession  string `json:"source_session_id"`
-		CreatedAt      qh.DBTime `json:"created_at"`
+		CreatedAt      time.Time `json:"created_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($filter: hub_db_hypotheses_filter, $limit: Int!) {
 			hub { db { agent {
 				hypotheses(filter: $filter, limit: $limit, order_by: [{field: "created_at", direction: ASC}]) {
@@ -125,7 +125,7 @@ func (c *Client) ListPendingHypotheses(ctx context.Context, priority string, lim
 			Verification:   r.Verification,
 			EstimatedCalls: r.EstimatedCalls,
 			SourceSession:  r.SourceSession,
-			CreatedAt:      r.CreatedAt.Time,
+			CreatedAt:      r.CreatedAt,
 		})
 	}
 	return out, nil
@@ -143,7 +143,7 @@ func (c *Client) hypothesisReplace(ctx context.Context, hypID string, mutate fun
 		return fmt.Errorf("hubdb: hypothesis %q not found", hypID)
 	}
 	mutate(current)
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($id: String!) {
 			hub { db { agent {
 				delete_hypotheses(filter: {id: {eq: $id}}) { affected_rows }
@@ -175,7 +175,7 @@ func (c *Client) hypothesisReplace(ctx context.Context, hypID string, mutate fun
 	if current.FactID != "" {
 		data["fact_id"] = current.FactID
 	}
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_hypotheses_mut_input_data!) {
 			hub { db { agent {
 				insert_hypotheses(data: $data) { id }
@@ -196,12 +196,12 @@ func (c *Client) getHypothesis(ctx context.Context, hypID string) (*Hypothesis, 
 		Verification   string  `json:"verification"`
 		EstimatedCalls int     `json:"estimated_calls"`
 		SourceSession  string  `json:"source_session_id"`
-		CreatedAt      qh.DBTime  `json:"created_at"`
-		CheckedAt      *qh.DBTime `json:"checked_at"`
+		CreatedAt      time.Time  `json:"created_at"`
+		CheckedAt      *time.Time `json:"checked_at"`
 		Result         string  `json:"result"`
 		FactID         string  `json:"fact_id"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
 			hub { db { agent {
 				hypotheses(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
@@ -233,13 +233,12 @@ func (c *Client) getHypothesis(ctx context.Context, hypID string) (*Hypothesis, 
 		Verification:   r.Verification,
 		EstimatedCalls: r.EstimatedCalls,
 		SourceSession:  r.SourceSession,
-		CreatedAt:      r.CreatedAt.Time,
+		CreatedAt:      r.CreatedAt,
 		Result:         r.Result,
 		FactID:         r.FactID,
 	}
-	if r.CheckedAt != nil && !r.CheckedAt.Time.IsZero() {
-		ct := r.CheckedAt.Time
-		out.CheckedAt = &ct
+	if r.CheckedAt != nil && !r.CheckedAt.IsZero() {
+		out.CheckedAt = r.CheckedAt
 	}
 	return out, nil
 }
@@ -352,7 +351,7 @@ func (c *Client) CreateReview(ctx context.Context, r Review) (string, error) {
 	if r.ModelUsed != "" {
 		data["model_used"] = r.ModelUsed
 	}
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_reviews_mut_input_data!) {
 			hub { db { agent {
 				insert_session_reviews(data: $data) { id }
@@ -401,7 +400,7 @@ func (c *Client) listReviews(ctx context.Context, filter map[string]any, limit i
 		HypothesesAdded int     `json:"hypotheses_added"`
 		ModelUsed       string  `json:"model_used"`
 		TokensUsed      int     `json:"tokens_used"`
-		ReviewedAt      *qh.DBTime `json:"reviewed_at"`
+		ReviewedAt      *time.Time `json:"reviewed_at"`
 		Error           string  `json:"error"`
 	}
 	q := `query ($filter: hub_db_session_reviews_filter, $limit: Int!) {
@@ -422,7 +421,7 @@ func (c *Client) listReviews(ctx context.Context, filter map[string]any, limit i
 				}}}
 			}`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier, q, map[string]any{
+	rows, err := queries.RunQuery[[]row](ctx, c.querier, q, map[string]any{
 		"filter": filter,
 		"limit":  limit,
 	}, "hub.db.agent.session_reviews")
@@ -446,9 +445,8 @@ func (c *Client) listReviews(ctx context.Context, filter map[string]any, limit i
 			TokensUsed:      r.TokensUsed,
 			Error:           r.Error,
 		}
-		if r.ReviewedAt != nil && !r.ReviewedAt.Time.IsZero() {
-			t := r.ReviewedAt.Time
-			rev.ReviewedAt = &t
+		if r.ReviewedAt != nil && !r.ReviewedAt.IsZero() {
+			rev.ReviewedAt = r.ReviewedAt
 		}
 		out = append(out, rev)
 	}
@@ -494,7 +492,7 @@ func (c *Client) replaceReview(ctx context.Context, reviewID string, mutate func
 	}
 	current := rows[0]
 	mutate(&current)
-	if err := qh.RunMutation(ctx, c.querier,
+	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($id: String!) {
 			hub { db { agent {
 				delete_session_reviews(filter: {id: {eq: $id}}) { affected_rows }
@@ -523,7 +521,7 @@ func (c *Client) replaceReview(ctx context.Context, reviewID string, mutate func
 	if current.ReviewedAt != nil {
 		data["reviewed_at"] = current.ReviewedAt.UTC().Format(time.RFC3339)
 	}
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_reviews_mut_input_data!) {
 			hub { db { agent {
 				insert_session_reviews(data: $data) { id }

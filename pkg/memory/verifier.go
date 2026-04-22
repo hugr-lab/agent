@@ -9,8 +9,9 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/models"
-	learndb "github.com/hugr-lab/hugen/pkg/store/learning"
-	memdb "github.com/hugr-lab/hugen/pkg/store/memory"
+	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/query-engine/types"
 )
 
 // Verifier runs one hypothesis check per VerifyNext invocation. The
@@ -20,8 +21,8 @@ import (
 // standalone mode; Hub-mode can later route verification through a
 // sub-agent with richer tool access.
 type Verifier struct {
-	memory   *memdb.Client
-	learning *learndb.Client
+	memory   *memstore.Client
+	learning *learnstore.Client
 	router   *models.Router
 	logger   *slog.Logger
 
@@ -33,10 +34,13 @@ type Verifier struct {
 	now func() time.Time
 }
 
-// VerifierOptions bundles verifier construction parameters.
+// VerifierOptions bundles verifier construction parameters. Querier +
+// AgentID + AgentShort are used to build memstore + learnstore clients
+// internally.
 type VerifierOptions struct {
-	Memory     *memdb.Client
-	Learning   *learndb.Client
+	Querier    types.Querier
+	AgentID    string
+	AgentShort string
 	Router     *models.Router
 	Logger     *slog.Logger
 	Volatility map[string]time.Duration
@@ -44,11 +48,8 @@ type VerifierOptions struct {
 
 // NewVerifier builds a Verifier.
 func NewVerifier(opts VerifierOptions) (*Verifier, error) {
-	if opts.Memory == nil {
-		return nil, fmt.Errorf("learning: Verifier requires Memory")
-	}
-	if opts.Learning == nil {
-		return nil, fmt.Errorf("learning: Verifier requires Learning")
+	if opts.Querier == nil {
+		return nil, fmt.Errorf("learning: Verifier requires Querier")
 	}
 	if opts.Router == nil {
 		return nil, fmt.Errorf("learning: Verifier requires Router")
@@ -56,9 +57,21 @@ func NewVerifier(opts VerifierOptions) (*Verifier, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	memC, err := memstore.New(opts.Querier, memstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	}
+	learnC, err := learnstore.New(opts.Querier, learnstore.Options{
+		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("learning: build learning store: %w", err)
+	}
 	return &Verifier{
-		memory:     opts.Memory,
-		learning:   opts.Learning,
+		memory:     memC,
+		learning:   learnC,
 		router:     opts.Router,
 		logger:     opts.Logger,
 		volatility: opts.Volatility,
@@ -87,7 +100,7 @@ func (v *Verifier) VerifyNext(ctx context.Context) error {
 // → parse verdict → Confirm / Reject / Defer. Failures mid-flight
 // leave the row in `checking` — a subsequent Consolidator run can
 // reset stuck rows, or the operator can inspect the hypothesis.
-func (v *Verifier) verify(ctx context.Context, h learndb.Hypothesis) error {
+func (v *Verifier) verify(ctx context.Context, h learnstore.Hypothesis) error {
 	if err := v.learning.MarkHypothesisChecking(ctx, h.ID); err != nil {
 		return fmt.Errorf("learning: MarkChecking %q: %w", h.ID, err)
 	}
@@ -119,10 +132,10 @@ func (v *Verifier) verify(ctx context.Context, h learndb.Hypothesis) error {
 	}
 }
 
-func (v *Verifier) confirmHypothesis(ctx context.Context, h learndb.Hypothesis, verdict verifierVerdict) error {
+func (v *Verifier) confirmHypothesis(ctx context.Context, h learnstore.Hypothesis, verdict verifierVerdict) error {
 	now := v.now()
 	dur := v.durationFor(defaultStr(verdict.Volatility, "stable"))
-	factID, err := v.memory.Store(ctx, memdb.Item{
+	factID, err := v.memory.Store(ctx, memstore.Item{
 		Content:    h.Content + "\nEvidence: " + verdict.Evidence,
 		Category:   defaultStr(h.Category, "data_insight"),
 		Volatility: defaultStr(verdict.Volatility, "stable"),
@@ -137,10 +150,10 @@ func (v *Verifier) confirmHypothesis(ctx context.Context, h learndb.Hypothesis, 
 	return v.learning.ConfirmHypothesis(ctx, h.ID, verdict.Evidence, factID)
 }
 
-func (v *Verifier) rejectHypothesis(ctx context.Context, h learndb.Hypothesis, verdict verifierVerdict) error {
+func (v *Verifier) rejectHypothesis(ctx context.Context, h learnstore.Hypothesis, verdict verifierVerdict) error {
 	now := v.now()
 	dur := v.durationFor("moderate")
-	_, err := v.memory.Store(ctx, memdb.Item{
+	_, err := v.memory.Store(ctx, memstore.Item{
 		Content:    "Rejected hypothesis: " + h.Content + "\nReality: " + verdict.Evidence,
 		Category:   "anti_pattern",
 		Volatility: "moderate",
@@ -155,7 +168,7 @@ func (v *Verifier) rejectHypothesis(ctx context.Context, h learndb.Hypothesis, v
 	return v.learning.RejectHypothesis(ctx, h.ID, verdict.Evidence)
 }
 
-func (v *Verifier) buildPrompt(h learndb.Hypothesis) string {
+func (v *Verifier) buildPrompt(h learnstore.Hypothesis) string {
 	var b strings.Builder
 	b.WriteString("You are verifying a hypothesis derived from a prior agent session. Respond with a single JSON object describing your verdict — do not use tools.\n\n")
 	b.WriteString("Hypothesis: ")

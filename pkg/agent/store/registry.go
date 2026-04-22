@@ -1,4 +1,4 @@
-package registry
+package store
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
-	"github.com/hugr-lab/hugen/pkg/store/internal/qh"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // GetAgentType fetches an agent type by ID. Returns (nil, nil) if not found.
@@ -18,10 +18,10 @@ func (c *Client) GetAgentType(ctx context.Context, typeID string) (*AgentType, e
 		Name        string         `json:"name"`
 		Description string         `json:"description"`
 		Config      map[string]any `json:"config"`
-		CreatedAt   qh.DBTime         `json:"created_at"`
-		UpdatedAt   qh.DBTime         `json:"updated_at"`
+		CreatedAt   time.Time         `json:"created_at"`
+		UpdatedAt   time.Time         `json:"updated_at"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($id: String!) {
 			hub { db {
 				agent_types(filter: {id: {eq: $id}}, limit: 1) {
@@ -47,8 +47,8 @@ func (c *Client) GetAgentType(ctx context.Context, typeID string) (*AgentType, e
 		Name:        r.Name,
 		Description: r.Description,
 		Config:      r.Config,
-		CreatedAt:   r.CreatedAt.Time,
-		UpdatedAt:   r.UpdatedAt.Time,
+		CreatedAt:   r.CreatedAt,
+		UpdatedAt:   r.UpdatedAt,
 	}, nil
 }
 
@@ -61,10 +61,10 @@ func (c *Client) GetAgent(ctx context.Context, id string) (*Agent, error) {
 		Name           string         `json:"name"`
 		Status         string         `json:"status"`
 		ConfigOverride map[string]any `json:"config_override"`
-		CreatedAt      qh.DBTime         `json:"created_at"`
-		LastActive     qh.DBTime         `json:"last_active"`
+		CreatedAt      time.Time         `json:"created_at"`
+		LastActive     time.Time         `json:"last_active"`
 	}
-	rows, err := qh.RunQuery[[]row](ctx, c.querier,
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($id: String!) {
 			hub { db {
 				agents(filter: {id: {eq: $id}}, limit: 1) {
@@ -92,8 +92,8 @@ func (c *Client) GetAgent(ctx context.Context, id string) (*Agent, error) {
 		Name:           r.Name,
 		Status:         r.Status,
 		ConfigOverride: r.ConfigOverride,
-		CreatedAt:      r.CreatedAt.Time,
-		LastActive:     r.LastActive.Time,
+		CreatedAt:      r.CreatedAt,
+		LastActive:     r.LastActive,
 	}, nil
 }
 
@@ -121,7 +121,7 @@ func (c *Client) RegisterAgent(ctx context.Context, a Agent) error {
 
 	if existing != nil {
 		now := time.Now().UTC().Format(time.RFC3339)
-		return qh.RunMutation(ctx, c.querier,
+		return queries.RunMutation(ctx, c.querier,
 			`mutation ($id: String!, $data: hub_db_agents_mut_data!) {
 				hub { db {
 					update_agents(filter: {id: {eq: $id}}, data: $data) { affected_rows }
@@ -139,7 +139,7 @@ func (c *Client) RegisterAgent(ctx context.Context, a Agent) error {
 		)
 	}
 
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_agents_mut_input_data!) {
 			hub { db {
 				insert_agents(data: $data) { id }
@@ -161,7 +161,7 @@ func (c *Client) RegisterAgent(ctx context.Context, a Agent) error {
 // UpdateAgentActivity bumps last_active to now.
 func (c *Client) UpdateAgentActivity(ctx context.Context, id string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	return qh.RunMutation(ctx, c.querier,
+	return queries.RunMutation(ctx, c.querier,
 		`mutation ($id: String!, $data: hub_db_agents_mut_data!) {
 			hub { db {
 				update_agents(filter: {id: {eq: $id}}, data: $data) { affected_rows }

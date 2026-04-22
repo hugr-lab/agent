@@ -197,12 +197,13 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	toolsMgr := tools.New(logger)
 
-	sessionMgr := sessions.New(sessions.Config{
+	sessionMgr, err := sessions.New(sessions.Config{
 		Skills:       skillsMgr,
 		Tools:        toolsMgr,
 		Constitution: cfg.constitution,
 		Logger:       logger,
 	})
+	require.NoError(t, err)
 
 	// Register the real skills.Service so the test exercises the same
 	// provider wiring as production.
@@ -213,7 +214,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 		tokens = models.NewTokenEstimator()
 	}
 
-	router := models.NewRouter(cfg.llm)
+	router := models.NewRouterWithDefault(cfg.llm)
 	a, err := hugen.NewAgent(hugen.Runtime{
 		Router:   router,
 		Sessions: sessionMgr,
