@@ -24,15 +24,19 @@ categories:
     volatility: fast
     initial_score: 0.5
     tags_hint: "domain, topic"
-  user_preference:
-    description: "User's language, format, detail level"
-    volatility: slow
-    initial_score: 0.85
-    tags_hint: "preference_type"
 
 review:
   enabled: true
   min_tool_calls: 3
+  # Rolling-window reviewer knobs. Agent-level defaults kick in when
+  # these are left zero.
+  window_tokens: 4000
+  overlap_tokens: 500
+  floor_age: 1h
+  exclude_event_types:
+    - compaction_summary
+    - reasoning
+    - error
   prompt: |
     Focus on Hugr Data Mesh artefacts worth remembering:
     schema structures, working query templates, anti-patterns

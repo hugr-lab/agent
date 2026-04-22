@@ -1,15 +1,14 @@
 package memory
 
 import (
-	"bytes"
-	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMerge_CategoriesFirstWins(t *testing.T) {
+func TestMerge_CategoriesPrefixedBySkill(t *testing.T) {
 	a := NamedConfig{Name: "hugr-data", Config: &skills.SkillMemoryConfig{
 		Categories: map[string]skills.CategoryConfig{
 			"schema": {Volatility: "stable", InitialScore: 0.8},
@@ -22,25 +21,13 @@ func TestMerge_CategoriesFirstWins(t *testing.T) {
 		},
 	}}
 	got := Merge([]NamedConfig{a, b})
-	assert.Equal(t, "stable", got.Categories["schema"].Volatility, "first-loaded wins")
-	assert.Equal(t, 0.6, got.Categories["extra"].InitialScore)
-}
-
-func TestMergeWithLogger_EmitsCollisionWarning(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	a := NamedConfig{Name: "hugr-data", Config: &skills.SkillMemoryConfig{
-		Categories: map[string]skills.CategoryConfig{"schema": {Volatility: "stable"}},
-	}}
-	b := NamedConfig{Name: "web", Config: &skills.SkillMemoryConfig{
-		Categories: map[string]skills.CategoryConfig{"schema": {Volatility: "volatile"}},
-	}}
-	MergeWithLogger([]NamedConfig{a, b}, logger)
-	out := buf.String()
-	assert.Contains(t, out, "category collision")
-	assert.Contains(t, out, "hugr-data")
-	assert.Contains(t, out, "web")
+	// Categories are namespaced by skill name; no collision possible.
+	assert.Equal(t, "stable", got.Categories["hugr-data.schema"].Volatility)
+	assert.Equal(t, "volatile", got.Categories["web.schema"].Volatility)
+	assert.Equal(t, 0.6, got.Categories["web.extra"].InitialScore)
+	// CategoryOrigin links back to declaring skill.
+	assert.Equal(t, "hugr-data", got.CategoryOrigin["hugr-data.schema"])
+	assert.Equal(t, "web", got.CategoryOrigin["web.schema"])
 }
 
 func TestMerge_ReviewPromptsConcatenated(t *testing.T) {
@@ -91,5 +78,41 @@ func TestMerge_NilConfigSkipped(t *testing.T) {
 		Categories: map[string]skills.CategoryConfig{"schema": {Volatility: "stable"}},
 	}}
 	got := Merge([]NamedConfig{a, b})
-	assert.Contains(t, got.Categories, "schema")
+	assert.Contains(t, got.Categories, "has-memory.schema")
+	assert.NotContains(t, got.Categories, "no-memory.schema")
+}
+
+func TestMerge_WindowAggregates(t *testing.T) {
+	a := NamedConfig{Name: "a", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{
+			WindowTokens:  8000,
+			OverlapTokens: 400,
+			FloorAge:      2 * time.Hour,
+		},
+	}}
+	b := NamedConfig{Name: "b", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{
+			WindowTokens:  4000, // smaller wins
+			OverlapTokens: 800,  // larger wins
+			FloorAge:      30 * time.Minute,
+		},
+	}}
+	got := Merge([]NamedConfig{a, b})
+	assert.Equal(t, 4000, got.WindowTokens, "MIN window_tokens")
+	assert.Equal(t, 800, got.OverlapTokens, "MAX overlap_tokens")
+	assert.Equal(t, 30*time.Minute, got.FloorAge, "MIN floor_age")
+}
+
+func TestMerge_ExcludeEventTypesUnion(t *testing.T) {
+	a := NamedConfig{Name: "a", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{ExcludeEventTypes: []string{"compaction_summary", "reasoning"}},
+	}}
+	b := NamedConfig{Name: "b", Config: &skills.SkillMemoryConfig{
+		Review: skills.ReviewConfig{ExcludeEventTypes: []string{"reasoning", "error"}},
+	}}
+	got := Merge([]NamedConfig{a, b})
+	assert.Contains(t, got.ExcludeEventTypes, "compaction_summary")
+	assert.Contains(t, got.ExcludeEventTypes, "reasoning")
+	assert.Contains(t, got.ExcludeEventTypes, "error")
+	assert.Len(t, got.ExcludeEventTypes, 3)
 }

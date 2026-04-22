@@ -61,6 +61,76 @@ func (c *Client) logBatch(ctx context.Context, entries []LogEntry) error {
 	return nil
 }
 
+// ListLogOpts narrows ListLog's memory_log query by any combination
+// of event_type + session_id. Zero values are treated as "any" for
+// their respective filter dimensions.
+type ListLogOpts struct {
+	EventType string
+	SessionID string
+	Limit     int
+}
+
+// ListLog returns memory_log rows filtered by EventType / SessionID,
+// most recent first. Unlike GetLog (keyed on memory_item_id) this is
+// used by the reviewer to scan review_checkpoint rows across sessions
+// for cursor recovery.
+func (c *Client) ListLog(ctx context.Context, opts ListLogOpts) ([]LogEntry, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	filter := map[string]any{
+		"agent_id": map[string]any{"eq": c.agentID},
+	}
+	if opts.EventType != "" {
+		filter["event_type"] = map[string]any{"eq": opts.EventType}
+	}
+	if opts.SessionID != "" {
+		filter["session_id"] = map[string]any{"eq": opts.SessionID}
+	}
+	type row struct {
+		EventTime    time.Time      `json:"event_time"`
+		EventType    string         `json:"event_type"`
+		MemoryItemID string         `json:"memory_item_id"`
+		SessionID    string         `json:"session_id"`
+		AgentID      string         `json:"agent_id"`
+		Details      map[string]any `json:"details"`
+	}
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
+		`query ($filter: hub_db_memory_log_filter, $limit: Int!) {
+			hub { db { agent {
+				memory_log(
+					filter: $filter,
+					limit: $limit,
+					order_by: [{field: "event_time", direction: DESC}]
+				) {
+					event_time event_type memory_item_id session_id agent_id details
+				}
+			}}}
+		}`,
+		map[string]any{"filter": filter, "limit": limit},
+		"hub.db.agent.memory_log",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]LogEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, LogEntry{
+			EventTime:    r.EventTime,
+			EventType:    r.EventType,
+			MemoryItemID: r.MemoryItemID,
+			SessionID:    r.SessionID,
+			AgentID:      r.AgentID,
+			Details:      r.Details,
+		})
+	}
+	return out, nil
+}
+
 // GetLog returns audit entries for a memory item, most recent first.
 func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]LogEntry, error) {
 	if limit <= 0 {

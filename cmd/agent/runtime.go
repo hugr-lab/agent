@@ -274,13 +274,18 @@ func buildRuntime(
 	}
 
 	reviewer, err := memory.NewReviewer(memory.ReviewerOptions{
-		Querier:         memoryQuerier,
-		AgentID:         cfg.Identity.ID,
-		AgentShort:      cfg.Identity.ShortID,
-		Router:          router,
-		Logger:          logger,
-		Volatility:      cfg.Memory.VolatilityDuration,
-		LoadSkillMemory: loadSkillMemory,
+		Querier:              memoryQuerier,
+		AgentID:              cfg.Identity.ID,
+		AgentShort:           cfg.Identity.ShortID,
+		Router:               router,
+		Logger:               logger,
+		Volatility:           cfg.Memory.VolatilityDuration,
+		LoadSkillMemory:      loadSkillMemory,
+		Tokens:               components.tokens,
+		DefaultWindowTokens:  cfg.Memory.Review.WindowTokens,
+		DefaultOverlapTokens: cfg.Memory.Review.OverlapTokens,
+		DefaultFloorAge:      cfg.Memory.Review.FloorAge,
+		DefaultExcludeTypes:  cfg.Memory.Review.ExcludeEventTypes,
 	})
 	if err != nil {
 		rt.close(logger)

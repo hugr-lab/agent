@@ -6,25 +6,29 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/scheduler"
-	"github.com/hugr-lab/hugen/pkg/skills"
 	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/scheduler"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
+	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
-// Reviewer drives post-session fact extraction. One Reviewer instance
-// is shared across the scheduler (scheduler picks session IDs and
-// calls Review). Review is idempotent: re-running on a completed
-// session is a no-op.
+// Reviewer drives rolling-window session fact extraction. One Reviewer
+// instance is shared across the scheduler (scheduler picks session IDs
+// and calls Review). Unlike the earlier "one review per closed
+// session" flow, the reviewer now processes windowed slices of
+// ongoing and closed sessions, writing a review_checkpoint audit row
+// after every successful window — session_reviews is no longer used as
+// a cursor, since the same session can be reviewed many times.
 type Reviewer struct {
 	memory   *memstore.Client
 	learning *learnstore.Client
@@ -32,10 +36,9 @@ type Reviewer struct {
 	router   *models.Router
 	logger   *slog.Logger
 
-	// Injected merged memory config — reviewer needs it to know which
-	// categories are valid and what prompt to send. Defaults to
-	// nil (agent-level defaults apply). The plumbing from active
-	// skills → MergedConfig lives in pkg/session (future task).
+	// Injected merged memory config — reviewer falls back to this
+	// static agent-level config when no skills declare memory knobs
+	// for a given session.
 	config MergedConfig
 
 	// Volatility-to-duration map from config.MemoryConfig. Falls back
@@ -50,24 +53,27 @@ type Reviewer struct {
 	// extracted fact is treated as a reinforcement of an existing one.
 	dedupThreshold float64
 
+	// tokens estimates per-event and per-window token counts so the
+	// reviewer can honour skill-declared window_tokens/overlap_tokens.
+	tokens *models.TokenEstimator
+
+	// Agent-level defaults for the rolling-window knobs; each one is
+	// overridden per-session by the merged skill config when that
+	// skill sets a non-zero value.
+	defaultWindowTokens  int
+	defaultOverlapTokens int
+	defaultFloorAge      time.Duration
+	defaultExcludeTypes  []string
+
 	// now is injectable for deterministic tests.
 	now func() time.Time
 
-	// sched + delay: set by bindScheduler when the reviewer is
-	// registered as a scheduler task. QueueReview uses these to nudge
-	// the scheduler after ReviewDelay; Tick consumes the pending queue.
+	// sched: set by bindScheduler when the reviewer is registered as a
+	// scheduler task. QueueReview uses it to nudge the scheduler.
 	sched *scheduler.Scheduler
-	delay time.Duration
 
-	pendingMu sync.Mutex
-	pending   []delayedReview
-}
-
-// delayedReview is one entry in the in-memory queue: a session ID
-// the reviewer will look at after dueAt.
-type delayedReview struct {
-	sessionID string
-	dueAt     time.Time
+	recentlyClosedMu sync.Mutex
+	recentlyClosed   map[string]time.Time
 }
 
 // ReviewerOptions bundle reviewer construction parameters. The
@@ -79,7 +85,6 @@ type ReviewerOptions struct {
 	AgentShort string
 	Router     *models.Router
 	Logger     *slog.Logger
-	Config     MergedConfig
 	Volatility map[string]time.Duration
 
 	// LoadSkillMemory returns the per-skill memory config for a skill
@@ -89,6 +94,20 @@ type ReviewerOptions struct {
 	// skill's memory config, and calls Merge. When nil, the reviewer
 	// uses its static Config.
 	LoadSkillMemory func(ctx context.Context, skillName string) (*skills.SkillMemoryConfig, error)
+
+	// Tokens powers per-event token estimation used for rolling-window
+	// composition. Required for the reviewer to honour WindowTokens /
+	// OverlapTokens; callers should pass the same estimator used by
+	// the compactor so calibration is shared.
+	Tokens *models.TokenEstimator
+
+	// Agent-level rolling-window defaults. Any field left at its zero
+	// value is replaced by the hard-coded defaults at construction
+	// time.
+	DefaultWindowTokens  int
+	DefaultOverlapTokens int
+	DefaultFloorAge      time.Duration
+	DefaultExcludeTypes  []string
 }
 
 // NewReviewer builds a Reviewer. Router is optional — if nil the
@@ -118,59 +137,110 @@ func NewReviewer(opts ReviewerOptions) (*Reviewer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("learning: build sessions store: %w", err)
 	}
+
+	winTok := opts.DefaultWindowTokens
+	if winTok <= 0 {
+		winTok = 4000
+	}
+	overTok := opts.DefaultOverlapTokens
+	if overTok <= 0 {
+		overTok = 500
+	}
+	floor := opts.DefaultFloorAge
+	if floor <= 0 {
+		floor = 1 * time.Hour
+	}
+	exclude := opts.DefaultExcludeTypes
+	if len(exclude) == 0 {
+		exclude = []string{"compaction_summary", "reasoning", "error"}
+	}
+
 	return &Reviewer{
-		memory:          memC,
-		learning:        learnC,
-		sessions:        sessC,
-		router:          opts.Router,
-		logger:          opts.Logger,
-		config:          opts.Config,
-		volatility:      opts.Volatility,
-		loadSkillMemory: opts.LoadSkillMemory,
-		dedupThreshold:  0.1, // cosine distance < 0.1 → duplicate (i.e. similarity > 0.9)
-		now:             func() time.Time { return time.Now().UTC() },
+		memory:               memC,
+		learning:             learnC,
+		sessions:             sessC,
+		router:               opts.Router,
+		logger:               opts.Logger,
+		volatility:           opts.Volatility,
+		loadSkillMemory:      opts.LoadSkillMemory,
+		tokens:               opts.Tokens,
+		defaultWindowTokens:  winTok,
+		defaultOverlapTokens: overTok,
+		defaultFloorAge:      floor,
+		defaultExcludeTypes:  exclude,
+		dedupThreshold:       0.1, // cosine distance < 0.1 → duplicate (i.e. similarity > 0.9)
+		now:                  func() time.Time { return time.Now().UTC() },
+		recentlyClosed:       map[string]time.Time{},
 	}, nil
 }
 
-// Review runs the post-session extraction pipeline for the given
-// session. Idempotent: if a completed review already exists, returns
-// nil.
-func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
+// ReviewStats summarises the outcome of a single window review so the
+// scheduler can persist the result as a review_checkpoint audit row.
+type ReviewStats struct {
+	FactsStored     int
+	FactsReinforced int
+	HypothesesAdded int
+	Tokens          int  // estimated tokens of the filtered window
+	SkippedBelowMin bool // true when the min_tool_calls gate fired
+}
+
+// Review runs the extraction pipeline on a windowed slice of a
+// session's transcript. fromSeq <= 0 means "from the start of the
+// session"; toSeq <= 0 means "through the latest event". The caller
+// (Tick) picks the window; direct callers that want the whole session
+// pass (0, -1).
+//
+// Unlike the earlier design, Review no longer consults session_reviews
+// — the new checkpoint cursor lives in memory_log event_type
+// "review_checkpoint" because a session can be reviewed many times.
+func (r *Reviewer) Review(ctx context.Context, sessionID string, fromSeq, toSeq int) (ReviewStats, error) {
+	var stats ReviewStats
 	if sessionID == "" {
-		return fmt.Errorf("learning: Reviewer: empty sessionID")
+		return stats, fmt.Errorf("learning: Reviewer: empty sessionID")
 	}
-	existing, err := r.learning.GetReview(ctx, sessionID)
+
+	allEvents, err := r.sessions.GetEventsFull(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("learning: GetReview: %w", err)
+		return stats, fmt.Errorf("learning: GetEventsFull: %w", err)
 	}
-	if existing != nil && existing.Status == "completed" {
-		return nil // already done
-	}
-	reviewID := ""
-	if existing != nil {
-		reviewID = existing.ID
-	} else {
-		id, err := r.learning.CreateReview(ctx, learnstore.Review{
-			SessionID: sessionID, Status: "pending",
-		})
-		if err != nil {
-			return fmt.Errorf("learning: CreateReview: %w", err)
+
+	// Derive per-session merged config from the FULL transcript so the
+	// set of active skills reflects everything up to the end of the
+	// window (we don't want to drop skill config from events outside
+	// [from, to]).
+	merged := r.mergedConfigFor(ctx, allEvents)
+
+	// Apply window bounds.
+	var windowed []sessstore.EventFull
+	for _, ev := range allEvents {
+		if fromSeq > 0 && ev.Seq < fromSeq {
+			continue
 		}
-		reviewID = id
+		if toSeq > 0 && ev.Seq > toSeq {
+			continue
+		}
+		windowed = append(windowed, ev)
+	}
+	if len(windowed) == 0 {
+		return stats, nil
 	}
 
-	events, err := r.sessions.GetEventsFull(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("learning: GetEventsFull: %w", err)
+	// Filter out excluded event types.
+	excluded := r.excludeTypes(merged)
+	filtered := make([]sessstore.EventFull, 0, len(windowed))
+	for _, ev := range windowed {
+		if _, skip := excluded[ev.EventType]; skip {
+			continue
+		}
+		filtered = append(filtered, ev)
+	}
+	if len(filtered) == 0 {
+		return stats, nil
 	}
 
-	// Derive per-session merged config from active skills when a
-	// loader was configured. Otherwise fall back to the static
-	// agent-level config passed at construction.
-	merged := r.mergedConfigFor(ctx, events)
-
+	// Count tool_calls over the WINDOW only — not the whole session.
 	toolCalls := 0
-	for _, ev := range events {
+	for _, ev := range filtered {
 		if ev.EventType == "tool_call" {
 			toolCalls++
 		}
@@ -179,41 +249,44 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 	if merged.MinToolCalls > 0 {
 		minCalls = merged.MinToolCalls
 	}
+
+	// Estimate tokens of the filtered window.
+	for _, ev := range filtered {
+		stats.Tokens += r.estimateEventTokens(ev)
+	}
+
 	if toolCalls < minCalls {
-		r.logger.Info("reviewer: skipping session below min_tool_calls",
-			"session", sessionID, "tool_calls", toolCalls, "min", minCalls)
-		return r.learning.CompleteReview(ctx, reviewID, learnstore.ReviewResult{
-			ModelUsed: "skipped",
-		})
+		stats.SkippedBelowMin = true
+		r.logger.Info("reviewer: skipping window below min_tool_calls",
+			"session", sessionID, "tool_calls", toolCalls, "min", minCalls,
+			"from_seq", fromSeq, "to_seq", toSeq)
+		return stats, nil
 	}
 
 	if r.router == nil {
-		_ = r.learning.FailReview(ctx, reviewID, "no router configured")
-		return fmt.Errorf("learning: Reviewer: no router")
+		return stats, fmt.Errorf("learning: Reviewer: no router")
 	}
 
 	notes, _ := r.sessions.ListNotes(ctx, sessionID) // best-effort; notes are optional
-	prompt := r.buildPrompt(events, notes, merged)
+
+	// Fetch prior facts produced by earlier reviews of this session so
+	// the prompt can tell the LLM which extractions are already on
+	// record (dedup hint → fewer duplicates, more reinforcements).
+	priorFacts := r.collectPriorFacts(ctx, sessionID)
+
+	prompt := r.buildPrompt(filtered, notes, merged, priorFacts)
 
 	llm := r.router.ModelFor(models.IntentSummarization)
-	rawOutput, usage, err := RunOnce(ctx, llm, prompt)
+	rawOutput, _, err := RunOnce(ctx, llm, prompt)
 	if err != nil {
-		_ = r.learning.FailReview(ctx, reviewID, err.Error())
-		return fmt.Errorf("learning: LLM: %w", err)
+		return stats, fmt.Errorf("learning: LLM: %w", err)
 	}
 
 	parsed, err := parseReviewOutput(rawOutput)
 	if err != nil {
-		_ = r.learning.FailReview(ctx, reviewID, "parse: "+err.Error())
-		return fmt.Errorf("learning: parse: %w", err)
+		return stats, fmt.Errorf("learning: parse: %w", err)
 	}
 
-	result := learnstore.ReviewResult{
-		ModelUsed:  llm.Name(),
-		TokensUsed: usage,
-	}
-
-	// Store or reinforce each fact.
 	for _, f := range parsed.Facts {
 		reinforced, err := r.upsertFact(ctx, sessionID, f, merged)
 		if err != nil {
@@ -222,9 +295,9 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 			continue
 		}
 		if reinforced {
-			result.FactsReinforced++
+			stats.FactsReinforced++
 		} else {
-			result.FactsStored++
+			stats.FactsStored++
 		}
 	}
 
@@ -241,10 +314,48 @@ func (r *Reviewer) Review(ctx context.Context, sessionID string) error {
 				"session", sessionID, "err", err)
 			continue
 		}
-		result.HypothesesAdded++
+		stats.HypothesesAdded++
 	}
 
-	return r.learning.CompleteReview(ctx, reviewID, result)
+	return stats, nil
+}
+
+// priorFactEntry is a minimal view of a previously extracted fact used
+// to render the "Already extracted" section of the prompt.
+type priorFactEntry struct {
+	Content  string
+	Category string
+}
+
+// collectPriorFacts returns facts produced by earlier reviews of this
+// session (memory_log event_type = "store" rows) so the prompt can
+// dedup against them. Best-effort: errors return an empty slice.
+func (r *Reviewer) collectPriorFacts(ctx context.Context, sessionID string) []priorFactEntry {
+	logs, err := r.memory.ListLog(ctx, memstore.ListLogOpts{
+		EventType: "store",
+		SessionID: sessionID,
+		Limit:     50,
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]priorFactEntry, 0, len(logs))
+	seen := map[string]struct{}{}
+	for _, l := range logs {
+		if l.MemoryItemID == "" {
+			continue
+		}
+		if _, dup := seen[l.MemoryItemID]; dup {
+			continue
+		}
+		seen[l.MemoryItemID] = struct{}{}
+		item, err := r.memory.Get(ctx, l.MemoryItemID)
+		if err != nil || item == nil {
+			continue
+		}
+		out = append(out, priorFactEntry{Content: item.Content, Category: item.Category})
+	}
+	return out
 }
 
 // upsertFact stores a new fact or reinforces a close duplicate.
@@ -285,12 +396,50 @@ func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extracted
 }
 
 // buildPrompt assembles the summarisation prompt from transcript +
-// notes + merged review prompt. The format is intentionally small —
-// the cheap model sees: instruction + transcript window + notes.
-func (r *Reviewer) buildPrompt(events []sessstore.EventFull, notes []sessstore.Note, merged MergedConfig) string {
+// notes + merged review prompt. Includes two dedup/guidance sections:
+// a list of already-extracted facts for this session (so the LLM
+// reinforces rather than re-emits) and the whitelist of allowed
+// categories drawn from the merged skill configs.
+func (r *Reviewer) buildPrompt(events []sessstore.EventFull, notes []sessstore.Note, merged MergedConfig, priorFacts []priorFactEntry) string {
 	var sb strings.Builder
 	sb.WriteString(r.reviewPrompt(merged))
-	sb.WriteString("\n\n## Transcript\n")
+
+	// Category whitelist. Sorted alphabetically for stable prompts.
+	if len(merged.Categories) > 0 {
+		keys := make([]string, 0, len(merged.Categories))
+		for k := range merged.Categories {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		sb.WriteString("\n\n## Allowed categories\n")
+		for _, k := range keys {
+			sb.WriteString("- ")
+			sb.WriteString(k)
+			if desc := merged.Categories[k].Description; desc != "" {
+				sb.WriteString(" — ")
+				sb.WriteString(desc)
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Already-extracted facts.
+	if len(priorFacts) > 0 {
+		sb.WriteString("\n## Already extracted from this session\n")
+		for _, pf := range priorFacts {
+			sb.WriteString("- ")
+			sb.WriteString(pf.Content)
+			if pf.Category != "" {
+				sb.WriteString(" [")
+				sb.WriteString(pf.Category)
+				sb.WriteString("]")
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("Do NOT repeat these; use Reinforce (same content phrased differently with confirming evidence) only if you see new corroboration.\n")
+	}
+
+	sb.WriteString("\n## Transcript\n")
 	for _, ev := range events {
 		switch ev.EventType {
 		case "user_message":
@@ -419,6 +568,123 @@ func (r *Reviewer) initialScoreFor(category string, merged MergedConfig) float64
 		}
 	}
 	return 0.5
+}
+
+// ------------------------------------------------------------
+// Rolling-window helpers
+// ------------------------------------------------------------
+
+func (r *Reviewer) floorAge(merged MergedConfig) time.Duration {
+	if merged.FloorAge > 0 {
+		return merged.FloorAge
+	}
+	return r.defaultFloorAge
+}
+
+func (r *Reviewer) windowTokens(merged MergedConfig) int {
+	if merged.WindowTokens > 0 {
+		return merged.WindowTokens
+	}
+	return r.defaultWindowTokens
+}
+
+func (r *Reviewer) overlapTokens(merged MergedConfig) int {
+	if merged.OverlapTokens > 0 {
+		return merged.OverlapTokens
+	}
+	return r.defaultOverlapTokens
+}
+
+// excludeTypes returns the union of the merged config's exclude set
+// and the reviewer's default list. Always returns a non-nil map.
+func (r *Reviewer) excludeTypes(merged MergedConfig) map[string]struct{} {
+	out := make(map[string]struct{}, len(merged.ExcludeEventTypes)+len(r.defaultExcludeTypes))
+	for k := range merged.ExcludeEventTypes {
+		if k != "" {
+			out[k] = struct{}{}
+		}
+	}
+	for _, k := range r.defaultExcludeTypes {
+		if k != "" {
+			out[k] = struct{}{}
+		}
+	}
+	return out
+}
+
+// estimateEventTokens approximates the token cost of one session
+// event for rolling-window composition. Combines every text field the
+// prompt is going to stringify so the budget tracks prompt size.
+func (r *Reviewer) estimateEventTokens(ev sessstore.EventFull) int {
+	if r.tokens == nil {
+		// Fallback: char-count / 4 heuristic.
+		n := len(ev.Author) + len(ev.Content) + len(ev.ToolName) + len(ev.ToolResult)
+		if len(ev.ToolArgs) > 0 {
+			if b, err := json.Marshal(ev.ToolArgs); err == nil {
+				n += len(b)
+			}
+		}
+		return n / 4
+	}
+	var sb strings.Builder
+	sb.WriteString(ev.Author)
+	sb.WriteByte(' ')
+	sb.WriteString(ev.Content)
+	sb.WriteByte(' ')
+	sb.WriteString(ev.ToolName)
+	if len(ev.ToolArgs) > 0 {
+		if b, err := json.Marshal(ev.ToolArgs); err == nil {
+			sb.WriteByte(' ')
+			sb.Write(b)
+		}
+	}
+	sb.WriteByte(' ')
+	sb.WriteString(ev.ToolResult)
+	return r.tokens.Estimate(sb.String())
+}
+
+// walkTokensForward walks events AFTER startSeq (events.Seq > startSeq),
+// accumulating tokens until budget is reached. Returns the largest seq
+// included and the actual token count used. When no event is past
+// startSeq, returns (startSeq, 0).
+func (r *Reviewer) walkTokensForward(events []sessstore.EventFull, startSeq int, budget int) (endSeq int, tokensUsed int) {
+	endSeq = startSeq
+	for _, ev := range events {
+		if ev.Seq <= startSeq {
+			continue
+		}
+		tokensUsed += r.estimateEventTokens(ev)
+		endSeq = ev.Seq
+		if budget > 0 && tokensUsed >= budget {
+			break
+		}
+	}
+	return endSeq, tokensUsed
+}
+
+// walkTokensBackward walks events BEFORE startSeq+1 in reverse,
+// accumulating tokens until budget is reached. Returns the smallest
+// seq included (the "from" seq of the overlap band). When no event
+// precedes startSeq, returns startSeq+1 (no overlap).
+func (r *Reviewer) walkTokensBackward(events []sessstore.EventFull, startSeq int, budget int) int {
+	if budget <= 0 || startSeq <= 0 {
+		return startSeq + 1
+	}
+	used := 0
+	from := startSeq + 1
+	// Iterate in reverse through events at seq <= startSeq.
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.Seq > startSeq {
+			continue
+		}
+		used += r.estimateEventTokens(ev)
+		from = ev.Seq
+		if used >= budget {
+			break
+		}
+	}
+	return from
 }
 
 // ------------------------------------------------------------
@@ -561,94 +827,256 @@ func linkList(targetIDs []string) []memstore.Link {
 // in one place (bindScheduler callers + Wake callers).
 const reviewTaskName = "memory.review"
 
+// maxPerTick caps the number of candidate sessions processed in a
+// single Tick so a large backlog can't block the scheduler.
+const maxPerTick = 5
+
 // bindScheduler attaches the reviewer to a running scheduler so that
 // QueueReview can Wake the matching task. Typically called by
-// memory.Register; not part of the public Reviewer API.
-func (r *Reviewer) bindScheduler(sched *scheduler.Scheduler, delay time.Duration) {
+// memory.Register; not part of the public Reviewer API. The delay
+// parameter is retained for call-site compatibility but is now a
+// no-op — age gating lives entirely inside Tick (floor_age per
+// merged config).
+func (r *Reviewer) bindScheduler(sched *scheduler.Scheduler, _ time.Duration) {
 	r.sched = sched
-	r.delay = delay
 }
 
 // QueueReview implements sessions.ReviewQueuer. Called by
-// sessions.Manager.Delete when a session closes. Appends sessionID to
-// the in-memory pending queue with a dueAt timestamp, and schedules a
-// Wake after the configured delay so the classifier has time to flush
-// the closed session's transcript before Review reads it.
-//
-// Idempotent: multiple QueueReview calls for the same sessionID each
-// add a pending entry, but Tick deduplicates by session before
-// invoking Review (which is itself idempotent on session_reviews).
+// sessions.Manager.Delete when a session closes. Records the session
+// as "recently closed" so the next Tick treats it as ready
+// regardless of floor_age, and nudges the scheduler.
 func (r *Reviewer) QueueReview(sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	dueAt := r.nowFn().Add(r.delay)
-	r.pendingMu.Lock()
-	r.pending = append(r.pending, delayedReview{sessionID: sessionID, dueAt: dueAt})
-	r.pendingMu.Unlock()
+	now := r.nowFn()
+	r.recentlyClosedMu.Lock()
+	if r.recentlyClosed == nil {
+		r.recentlyClosed = map[string]time.Time{}
+	}
+	r.recentlyClosed[sessionID] = now
+	r.recentlyClosedMu.Unlock()
 
-	if r.sched == nil {
-		return
-	}
-	if r.delay <= 0 {
+	if r.sched != nil {
 		r.sched.Wake(reviewTaskName)
-		return
 	}
-	time.AfterFunc(r.delay, func() { r.sched.Wake(reviewTaskName) })
+}
+
+// cursor captures the most recent review_checkpoint row for one
+// session: EndSeq is the last event covered by the previous review;
+// EventTime is the timestamp of that checkpoint (zero when unknown).
+type cursor struct {
+	EndSeq    int
+	EventTime time.Time
 }
 
 // Tick is the Task registered with scheduler.Every("memory.review",…).
-// It drains the in-memory pending queue for entries whose dueAt has
-// passed. When pending is empty, it consults the hub for persisted
-// session_reviews rows (crash recovery) — one at a time to keep
-// user-facing turns unblocked.
+// It picks candidate sessions from (recentlyClosed snapshot ∪ active
+// sessions), loads review_checkpoint cursors, decides readiness via
+// the floor-age policy, and calls Review on up to maxPerTick windows.
 func (r *Reviewer) Tick(ctx context.Context) error {
-	due := r.dueSessions(r.nowFn())
+	// Snapshot and clear the recently-closed set atomically.
+	r.recentlyClosedMu.Lock()
+	closed := r.recentlyClosed
+	r.recentlyClosed = map[string]time.Time{}
+	r.recentlyClosedMu.Unlock()
 
-	if len(due) == 0 {
-		pending, err := r.learning.ListPendingReviews(ctx, 1)
-		if err != nil {
-			return err
+	// Load review_checkpoint cursors. ListLog returns most-recent
+	// first, so we keep only the first seen per sessionID.
+	cursors := map[string]cursor{}
+	logs, err := r.memory.ListLog(ctx, memstore.ListLogOpts{
+		EventType: "review_checkpoint",
+		Limit:     200,
+	})
+	if err != nil {
+		r.logger.Warn("reviewer: list checkpoints", "err", err)
+	}
+	for _, l := range logs {
+		if _, seen := cursors[l.SessionID]; seen {
+			continue
 		}
-		for _, p := range pending {
-			due = append(due, p.SessionID)
+		end := 0
+		if l.Details != nil {
+			if v, ok := l.Details["end_seq"]; ok {
+				end = asInt(v)
+			}
+		}
+		cursors[l.SessionID] = cursor{EndSeq: end, EventTime: l.EventTime}
+	}
+
+	// Build candidate list: closed first, then active sessions not
+	// already in the closed set.
+	type candidate struct {
+		sid    string
+		closed bool
+		status string
+	}
+	candidates := make([]candidate, 0, len(closed)+8)
+	for sid := range closed {
+		candidates = append(candidates, candidate{sid: sid, closed: true, status: "completed"})
+	}
+	active, err := r.sessions.ListActiveSessions(ctx)
+	if err != nil {
+		r.logger.Warn("reviewer: list active sessions", "err", err)
+	}
+	for _, rec := range active {
+		if _, already := closed[rec.ID]; already {
+			continue
+		}
+		candidates = append(candidates, candidate{sid: rec.ID, closed: false, status: rec.Status})
+	}
+
+	now := r.nowFn()
+	type ready struct {
+		sid    string
+		closed bool
+		events []sessstore.EventFull
+		maxSeq int
+		merged MergedConfig
+		cur    cursor
+		rec    *sessstore.Record
+	}
+	ready2 := make([]ready, 0, len(candidates))
+
+	// First pass: decide readiness.
+	for _, c := range candidates {
+		events, ferr := r.sessions.GetEventsFull(ctx, c.sid)
+		if ferr != nil {
+			r.logger.Warn("reviewer: load events", "session", c.sid, "err", ferr)
+			continue
+		}
+		if len(events) == 0 {
+			continue
+		}
+		maxSeq := 0
+		for _, ev := range events {
+			if ev.Seq > maxSeq {
+				maxSeq = ev.Seq
+			}
+		}
+		cur := cursors[c.sid]
+		if cur.EndSeq >= maxSeq {
+			continue // nothing new since last checkpoint
+		}
+		isClosed := c.closed || c.status == "completed"
+		merged := r.mergedConfigFor(ctx, events)
+		floor := r.floorAge(merged)
+
+		var rec *sessstore.Record
+		if !isClosed {
+			for i := range active {
+				if active[i].ID == c.sid {
+					rec = &active[i]
+					break
+				}
+			}
+		}
+
+		passes := false
+		switch {
+		case isClosed:
+			passes = true
+		case !cur.EventTime.IsZero():
+			if now.Sub(cur.EventTime) >= floor && cur.EndSeq < maxSeq {
+				passes = true
+			}
+		case rec != nil:
+			if now.Sub(rec.CreatedAt) >= floor && maxSeq > 0 {
+				passes = true
+			}
+		}
+		if !passes {
+			continue
+		}
+		ready2 = append(ready2, ready{
+			sid:    c.sid,
+			closed: isClosed,
+			events: events,
+			maxSeq: maxSeq,
+			merged: merged,
+			cur:    cur,
+			rec:    rec,
+		})
+		if len(ready2) >= maxPerTick {
+			break
 		}
 	}
 
-	for _, sid := range due {
-		if err := r.Review(ctx, sid); err != nil {
-			r.logger.Warn("memory.review: session review failed",
-				"session", sid, "err", err)
+	// Second pass: process ready candidates.
+	for _, rd := range ready2 {
+		trail := 0
+		if !rd.closed {
+			trail = 2 // don't touch events right at the tail of an active session
 		}
+		to := rd.maxSeq - trail
+		if to <= rd.cur.EndSeq {
+			continue
+		}
+		start := rd.cur.EndSeq
+
+		// Cap the window by windowTokens.
+		walkedEnd, _ := r.walkTokensForward(rd.events, start, r.windowTokens(rd.merged))
+		if walkedEnd > 0 && walkedEnd < to {
+			to = walkedEnd
+		}
+
+		// Overlap prefix — same overlapTokens budget for active and
+		// closed sessions (closed windows are usually small anyway).
+		from := start + 1
+		if start > 0 {
+			from = max(1, r.walkTokensBackward(rd.events, start, r.overlapTokens(rd.merged)))
+		}
+
+		if to < from {
+			continue
+		}
+
+		stats, rerr := r.Review(ctx, rd.sid, from, to)
+		if rerr != nil {
+			r.logger.Warn("memory.review: window review failed",
+				"session", rd.sid, "from_seq", from, "to_seq", to, "err", rerr)
+			continue
+		}
+
+		_ = r.memory.Log(ctx, memstore.LogEntry{
+			EventType: "review_checkpoint",
+			SessionID: rd.sid,
+			AgentID:   r.memory.AgentID(),
+			Details: map[string]any{
+				"start_seq":        from,
+				"end_seq":          to,
+				"tokens":           stats.Tokens,
+				"facts_stored":     stats.FactsStored,
+				"facts_reinforced": stats.FactsReinforced,
+				"hypotheses_added": stats.HypothesesAdded,
+				"skipped":          stats.SkippedBelowMin,
+			},
+		})
 	}
+
 	return nil
 }
 
-// dueSessions pops due pending entries (dueAt <= now) from the queue.
-// Entries whose dueAt is still in the future stay on the queue.
-// Duplicate session IDs are collapsed to a single entry.
-func (r *Reviewer) dueSessions(now time.Time) []string {
-	r.pendingMu.Lock()
-	defer r.pendingMu.Unlock()
-	if len(r.pending) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(r.pending))
-	var due []string
-	kept := r.pending[:0]
-	for _, p := range r.pending {
-		if p.dueAt.After(now) {
-			kept = append(kept, p)
-			continue
+// asInt coerces JSON-decoded numbers (float64 / json.Number / int) into
+// int. Returns 0 on any non-numeric value.
+func asInt(v any) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int32:
+		return int(t)
+	case int64:
+		return int(t)
+	case float32:
+		return int(t)
+	case float64:
+		return int(t)
+	case json.Number:
+		if i, err := t.Int64(); err == nil {
+			return int(i)
 		}
-		if _, dup := seen[p.sessionID]; dup {
-			continue
-		}
-		seen[p.sessionID] = struct{}{}
-		due = append(due, p.sessionID)
 	}
-	r.pending = kept
-	return due
+	return 0
 }
 
 // nowFn returns the reviewer's now() function; falls back to
