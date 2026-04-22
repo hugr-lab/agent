@@ -8,14 +8,19 @@ import (
 	"testing"
 	"time"
 
-	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(discardWriter{}, nil))
+}
+
 func TestParse_Valid(t *testing.T) {
-	// Our parser only supports * and single ints (constitution §V
-	// own-impl slot); step / range / list syntax is out of scope.
 	for _, c := range []string{"0 3 * * *", "15 14 1 * *", "* * * * *"} {
 		_, err := Parse(c)
 		require.NoError(t, err, c)
@@ -38,62 +43,62 @@ func TestSchedule_NextMatches(t *testing.T) {
 	assert.Equal(t, 0, next.Minute())
 }
 
-// stubHub lets us fake ListPendingReviews without a real engine.
-// It satisfies the narrow LearningStore interface the scheduler uses.
-type stubHub struct {
-	pending atomic.Value // []learnstore.Review
-}
-
-func (s *stubHub) ListPendingReviews(ctx context.Context, limit int) ([]learnstore.Review, error) {
-	if v := s.pending.Load(); v != nil {
-		return v.([]learnstore.Review), nil
-	}
-	return nil, nil
-}
-
-type stubReviewer struct {
-	calls atomic.Int64
-	seen  chan string
-	err   error
-}
-
-func newStubReviewer() *stubReviewer {
-	return &stubReviewer{seen: make(chan string, 4)}
-}
-
-func (r *stubReviewer) Review(ctx context.Context, sessionID string) error {
-	r.calls.Add(1)
-	select {
-	case r.seen <- sessionID:
-	default:
-	}
-	return r.err
-}
-
-func TestScheduler_PicksPendingReview(t *testing.T) {
-	hub := &stubHub{}
-	hub.pending.Store([]learnstore.Review{{ID: "rev1", SessionID: "sess1", Status: "pending"}})
-	rv := newStubReviewer()
-
-	s, err := New(Runtime{
-		Interval:    20 * time.Millisecond,
-		ReviewDelay: 5 * time.Millisecond,
-		Reviewer:    rv,
-		Learning:    hub,
-		Logger:      slog.New(slog.NewTextHandler(discardWriter{}, nil)),
-	})
-	require.NoError(t, err)
-
+func TestScheduler_EveryFires(t *testing.T) {
+	s := New(quietLogger())
+	var calls atomic.Int64
+	require.NoError(t, s.Every("t", 10*time.Millisecond, func(ctx context.Context) error {
+		calls.Add(1)
+		return nil
+	}))
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	s.Start(ctx)
 
-	select {
-	case got := <-rv.seen:
-		assert.Equal(t, "sess1", got)
-	case <-time.After(time.Second):
-		t.Fatal("reviewer not invoked")
-	}
+	// Within 80ms we expect at least 3 invocations (10ms interval).
+	require.Eventually(t, func() bool { return calls.Load() >= 3 }, 200*time.Millisecond, 5*time.Millisecond)
+}
 
+func TestScheduler_WakeFiresImmediately(t *testing.T) {
+	s := New(quietLogger())
+	var calls atomic.Int64
+	require.NoError(t, s.Every("t", time.Hour, func(ctx context.Context) error {
+		calls.Add(1)
+		return nil
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.Wake("t")
+	require.Eventually(t, func() bool { return calls.Load() >= 1 }, 200*time.Millisecond, 5*time.Millisecond)
+}
+
+func TestScheduler_WakeUnknownNoop(t *testing.T) {
+	s := New(quietLogger())
+	// Should not panic when waking a task that was never registered.
+	s.Wake("nobody-home")
+}
+
+func TestScheduler_ErrorLoggedAndLoopContinues(t *testing.T) {
+	s := New(quietLogger())
+	var calls atomic.Int64
+	require.NoError(t, s.Every("t", 10*time.Millisecond, func(ctx context.Context) error {
+		calls.Add(1)
+		return errors.New("boom")
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	// Two consecutive invocations prove the loop did not exit after the first error.
+	require.Eventually(t, func() bool { return calls.Load() >= 2 }, 200*time.Millisecond, 5*time.Millisecond)
+}
+
+func TestScheduler_DoneAfterCtxCancel(t *testing.T) {
+	s := New(quietLogger())
+	require.NoError(t, s.Every("t", time.Hour, func(ctx context.Context) error { return nil }))
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Start(ctx)
 	cancel()
 	select {
 	case <-s.Done():
@@ -102,131 +107,28 @@ func TestScheduler_PicksPendingReview(t *testing.T) {
 	}
 }
 
-func TestScheduler_QueueReviewWakes(t *testing.T) {
-	hub := &stubHub{}
-	rv := newStubReviewer()
-	s, err := New(Runtime{
-		Interval:    time.Hour, // so ticker doesn't fire
-		ReviewDelay: 5 * time.Millisecond,
-		Reviewer:    rv,
-		Learning:    hub,
-		Logger:      slog.New(slog.NewTextHandler(discardWriter{}, nil)),
-	})
-	require.NoError(t, err)
+func TestScheduler_DuplicateRegistration(t *testing.T) {
+	s := New(quietLogger())
+	task := func(ctx context.Context) error { return nil }
+	require.NoError(t, s.Every("dup", time.Second, task))
+	err := s.Every("dup", time.Second, task)
+	assert.Error(t, err)
+}
+
+func TestScheduler_RegisterAfterStart(t *testing.T) {
+	s := New(quietLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.Start(ctx)
-
-	// Populate pending list then nudge.
-	hub.pending.Store([]learnstore.Review{{ID: "r1", SessionID: "sX", Status: "pending"}})
-	s.QueueReview("sX")
-
-	select {
-	case <-rv.seen:
-	case <-time.After(time.Second):
-		t.Fatal("reviewer not invoked")
-	}
+	err := s.Every("late", time.Second, func(ctx context.Context) error { return nil })
+	assert.Error(t, err)
 }
 
-func TestScheduler_ReviewerErrorLogged(t *testing.T) {
-	hub := &stubHub{}
-	hub.pending.Store([]learnstore.Review{{SessionID: "s1", Status: "pending"}})
-	rv := newStubReviewer()
-	rv.err = errors.New("boom")
-	s, err := New(Runtime{
-		Interval: 15 * time.Millisecond,
-		Reviewer: rv, Learning: hub,
-		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
-	})
+func TestScheduler_CronRegistration(t *testing.T) {
+	s := New(quietLogger())
+	err := s.Cron("daily", "0 3 * * *", func(ctx context.Context) error { return nil })
 	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s.Start(ctx)
-	select {
-	case <-rv.seen:
-	case <-time.After(time.Second):
-		t.Fatal("reviewer not invoked")
-	}
-}
 
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
-
-// TestScheduler_StopTimeout — Stop(ctx) honours an explicit timeout,
-// returning ctx.Err() when the loop has not exited yet. Covers the
-// SC-004 invariant that shutdown is bounded.
-func TestScheduler_StopTimeout(t *testing.T) {
-	hub := &stubHub{}
-	rv := newStubReviewer()
-	s, err := New(Runtime{
-		Interval: time.Hour, Reviewer: rv, Learning: hub,
-		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
-	})
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s.Start(ctx)
-
-	// Don't cancel the loop — Stop with a short timeout returns DeadlineExceeded.
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	err = s.Stop(stopCtx)
-	stopCancel()
-	assert.ErrorIs(t, err, context.DeadlineExceeded)
-
-	// Now cancel and wait properly.
-	cancel()
-	select {
-	case <-s.Done():
-	case <-time.After(time.Second):
-		t.Fatal("scheduler did not exit after ctx cancel")
-	}
-}
-
-// TestScheduler_IdempotentOnCrashResume — a review kept in status
-// "pending" (e.g. because the process died mid-review) is picked up
-// again on the next scheduler tick. We simulate this by leaving the
-// stubHub's pending list populated and asserting the reviewer fires
-// twice across two separate Scheduler lifetimes.
-func TestScheduler_IdempotentOnCrashResume(t *testing.T) {
-	hub := &stubHub{}
-	hub.pending.Store([]learnstore.Review{{ID: "r1", SessionID: "sess-crash", Status: "pending"}})
-
-	// First run — picks the review, then "crashes" via ctx cancel.
-	rv1 := newStubReviewer()
-	s1, err := New(Runtime{
-		Interval: 15 * time.Millisecond,
-		Reviewer: rv1, Learning: hub,
-		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
-	})
-	require.NoError(t, err)
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	s1.Start(ctx1)
-	select {
-	case got := <-rv1.seen:
-		assert.Equal(t, "sess-crash", got)
-	case <-time.After(time.Second):
-		t.Fatal("first scheduler did not invoke reviewer")
-	}
-	cancel1()
-	<-s1.Done()
-
-	// Second run — pending row is still there (hub not mutated because the
-	// stub reviewer never called CompleteReview). Resumes cleanly.
-	rv2 := newStubReviewer()
-	s2, err := New(Runtime{
-		Interval: 15 * time.Millisecond,
-		Reviewer: rv2, Learning: hub,
-		Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil)),
-	})
-	require.NoError(t, err)
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-	s2.Start(ctx2)
-	select {
-	case got := <-rv2.seen:
-		assert.Equal(t, "sess-crash", got)
-	case <-time.After(time.Second):
-		t.Fatal("second scheduler did not resume pending review")
-	}
+	err = s.Cron("bad", "not-a-cron", func(ctx context.Context) error { return nil })
+	assert.Error(t, err)
 }

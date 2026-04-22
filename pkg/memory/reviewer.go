@@ -7,9 +7,11 @@ import (
 	"iter"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
@@ -50,6 +52,22 @@ type Reviewer struct {
 
 	// now is injectable for deterministic tests.
 	now func() time.Time
+
+	// sched + delay: set by bindScheduler when the reviewer is
+	// registered as a scheduler task. QueueReview uses these to nudge
+	// the scheduler after ReviewDelay; Tick consumes the pending queue.
+	sched *scheduler.Scheduler
+	delay time.Duration
+
+	pendingMu sync.Mutex
+	pending   []delayedReview
+}
+
+// delayedReview is one entry in the in-memory queue: a session ID
+// the reviewer will look at after dueAt.
+type delayedReview struct {
+	sessionID string
+	dueAt     time.Time
 }
 
 // ReviewerOptions bundle reviewer construction parameters. The
@@ -532,4 +550,113 @@ func linkList(targetIDs []string) []memstore.Link {
 		links = append(links, memstore.Link{TargetID: id, Relation: "related"})
 	}
 	return links
+}
+
+// ------------------------------------------------------------
+// Scheduler integration
+// ------------------------------------------------------------
+
+// reviewTaskName is the name the Reviewer uses when registering its
+// Tick with the scheduler. Kept package-private so the string lives
+// in one place (bindScheduler callers + Wake callers).
+const reviewTaskName = "memory.review"
+
+// bindScheduler attaches the reviewer to a running scheduler so that
+// QueueReview can Wake the matching task. Typically called by
+// memory.Register; not part of the public Reviewer API.
+func (r *Reviewer) bindScheduler(sched *scheduler.Scheduler, delay time.Duration) {
+	r.sched = sched
+	r.delay = delay
+}
+
+// QueueReview implements sessions.ReviewQueuer. Called by
+// sessions.Manager.Delete when a session closes. Appends sessionID to
+// the in-memory pending queue with a dueAt timestamp, and schedules a
+// Wake after the configured delay so the classifier has time to flush
+// the closed session's transcript before Review reads it.
+//
+// Idempotent: multiple QueueReview calls for the same sessionID each
+// add a pending entry, but Tick deduplicates by session before
+// invoking Review (which is itself idempotent on session_reviews).
+func (r *Reviewer) QueueReview(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	dueAt := r.nowFn().Add(r.delay)
+	r.pendingMu.Lock()
+	r.pending = append(r.pending, delayedReview{sessionID: sessionID, dueAt: dueAt})
+	r.pendingMu.Unlock()
+
+	if r.sched == nil {
+		return
+	}
+	if r.delay <= 0 {
+		r.sched.Wake(reviewTaskName)
+		return
+	}
+	time.AfterFunc(r.delay, func() { r.sched.Wake(reviewTaskName) })
+}
+
+// Tick is the Task registered with scheduler.Every("memory.review",…).
+// It drains the in-memory pending queue for entries whose dueAt has
+// passed. When pending is empty, it consults the hub for persisted
+// session_reviews rows (crash recovery) — one at a time to keep
+// user-facing turns unblocked.
+func (r *Reviewer) Tick(ctx context.Context) error {
+	due := r.dueSessions(r.nowFn())
+
+	if len(due) == 0 {
+		pending, err := r.learning.ListPendingReviews(ctx, 1)
+		if err != nil {
+			return err
+		}
+		for _, p := range pending {
+			due = append(due, p.SessionID)
+		}
+	}
+
+	for _, sid := range due {
+		if err := r.Review(ctx, sid); err != nil {
+			r.logger.Warn("memory.review: session review failed",
+				"session", sid, "err", err)
+		}
+	}
+	return nil
+}
+
+// dueSessions pops due pending entries (dueAt <= now) from the queue.
+// Entries whose dueAt is still in the future stay on the queue.
+// Duplicate session IDs are collapsed to a single entry.
+func (r *Reviewer) dueSessions(now time.Time) []string {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if len(r.pending) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(r.pending))
+	var due []string
+	kept := r.pending[:0]
+	for _, p := range r.pending {
+		if p.dueAt.After(now) {
+			kept = append(kept, p)
+			continue
+		}
+		if _, dup := seen[p.sessionID]; dup {
+			continue
+		}
+		seen[p.sessionID] = struct{}{}
+		due = append(due, p.sessionID)
+	}
+	r.pending = kept
+	return due
+}
+
+// nowFn returns the reviewer's now() function; falls back to
+// time.Now().UTC() when unset so QueueReview is safe to call without
+// explicit test wiring.
+func (r *Reviewer) nowFn() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now().UTC()
 }

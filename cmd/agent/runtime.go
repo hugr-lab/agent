@@ -327,21 +327,10 @@ func buildRuntime(
 		return nil, fmt.Errorf("build consolidator: %w", err)
 	}
 
-	sched, err := scheduler.New(scheduler.Runtime{
-		Interval:        cfg.Memory.Scheduler.Interval,
-		ReviewDelay:     cfg.Memory.Scheduler.ReviewDelay,
-		ConsolidationAt: cfg.Memory.Scheduler.ConsolidationAt,
-		Reviewer:        reviewer,
-		Verifier:        verifier,
-		Consolidator:    consolidator,
-		Querier:         memoryQuerier,
-		AgentID:         cfg.Identity.ID,
-		AgentShort:      cfg.Identity.ShortID,
-		Logger:          logger,
-	})
-	if err != nil {
+	sched := scheduler.New(logger)
+	if err := memory.Register(sched, reviewer, verifier, consolidator, cfg.Memory.Scheduler); err != nil {
 		rt.close(logger)
-		return nil, fmt.Errorf("build scheduler: %w", err)
+		return nil, fmt.Errorf("register memory tasks: %w", err)
 	}
 	rt.classifier = cls
 	rt.scheduler = sched
@@ -358,7 +347,7 @@ func buildRuntime(
 		Constitution: components.constitution,
 		Logger:       logger,
 		Classifier:   cls,
-		Scheduler:    sched,
+		Scheduler:    reviewer,
 		InlineBuilder: func(name, endpoint, authName string, lg *slog.Logger) (tools.Provider, error) {
 			return tools.NewMCPProvider(tools.MCPSpec{
 				Name:          name,
