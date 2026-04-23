@@ -360,9 +360,9 @@ func (c *Client) GetEventsFull(ctx context.Context, sessionID string) ([]EventFu
 		ChainDepth int            `json:"chain_depth"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
-		`query ($input: session_events_full_input!) {
+		`query ($input: hub_db_session_events_full_input!) {
 			hub { db { agent {
-				session_events_full(session_events_full_input: $input) {
+				session_events_full(args: $input) {
 					id session_id agent_id seq event_type author content
 					tool_name tool_args tool_result metadata created_at chain_depth
 				}
