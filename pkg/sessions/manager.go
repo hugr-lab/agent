@@ -2,7 +2,6 @@ package sessions
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -180,10 +179,14 @@ func (m *Manager) Cleanup(olderThan time.Duration) int {
 	return removed
 }
 
-// RestoreOpen re-creates Session objects from hub.db for every row with
-// status="active" and replays their skill-lifecycle events. Autoload
-// skills are applied afterwards to top up the session in case new
-// autoload entries were added since the session last ran.
+// RestoreOpen creates lightweight stubs for every active session row
+// in hub.db. No events replayed and no skills bound yet — that work
+// is deferred to Session.ensureMaterialized on first Get, so startup
+// stays cheap regardless of history size.
+//
+// app_name for restored sessions is read from sessions.metadata
+// (written by Create). Empty app_name is allowed — older rows may
+// predate this.
 func (m *Manager) RestoreOpen(ctx context.Context) error {
 	if m.hub == nil {
 		return nil
@@ -193,41 +196,18 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 		return fmt.Errorf("session: list active: %w", err)
 	}
 	for _, row := range rows {
-		events, err := m.hub.GetEvents(ctx, row.ID)
-		if err != nil {
-			m.logger.Warn("session: get events", "id", row.ID, "err", err)
-			continue
-		}
-		active := map[string]struct{}{}
-		for _, ev := range events {
-			switch ev.EventType {
-			case sessstore.EventTypeSkillLoaded:
-				name := ev.Content
-				if name == "" {
-					var meta sessstore.SkillLoadedMeta
-					raw, _ := json.Marshal(ev.Metadata)
-					_ = json.Unmarshal(raw, &meta)
-					name = meta.Skill
-				}
-				if name != "" {
-					active[name] = struct{}{}
-				}
-			case sessstore.EventTypeSkillUnloaded:
-				delete(active, ev.Content)
+		app := ""
+		if row.Metadata != nil {
+			if v, ok := row.Metadata["app_name"].(string); ok {
+				app = v
 			}
 		}
-
-		sess := m.newLocal(row.ID, "", row.OwnerID)
-		for name := range active {
-			sess.restoreSkill(ctx, name)
-		}
-		m.applyAutoload(ctx, sess)
-
+		sess := m.newLocal(row.ID, app, row.OwnerID)
 		m.mu.Lock()
 		m.sessions[row.ID] = sess
 		m.mu.Unlock()
 	}
-	m.logger.Info("session: restored", "count", len(rows))
+	m.logger.Info("session: stubs restored", "count", len(rows))
 	return nil
 }
 
@@ -271,6 +251,7 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 		return nil, fmt.Errorf("session: %q already exists", id)
 	}
 	sess := m.newLocal(id, req.AppName, req.UserID)
+	sess.markMaterialized() // fresh session — nothing to replay from hub
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
@@ -281,11 +262,16 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 	}
 
 	if m.hub != nil {
+		meta := map[string]any{}
+		if req.AppName != "" {
+			meta["app_name"] = req.AppName
+		}
 		row := sessstore.Record{
-			ID:      id,
-			AgentID: m.hub.AgentID(),
-			OwnerID: req.UserID,
-			Status:  "active",
+			ID:       id,
+			AgentID:  m.hub.AgentID(),
+			OwnerID:  req.UserID,
+			Status:   "active",
+			Metadata: meta,
 		}
 		if _, err := m.hub.CreateSession(ctx, row); err != nil {
 			m.logger.Warn("session: hub.CreateSession", "id", id, "err", err)
@@ -306,6 +292,9 @@ func (m *Manager) Get(ctx context.Context, req *adksession.GetRequest) (*adksess
 	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("session: %q not found", req.SessionID)
+	}
+	if err := sess.ensureMaterialized(ctx); err != nil {
+		return nil, fmt.Errorf("session %q materialize: %w", req.SessionID, err)
 	}
 	return &adksession.GetResponse{Session: sess}, nil
 }

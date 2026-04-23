@@ -144,9 +144,25 @@ func attachHubDB(ctx context.Context, service *hugr.Service, cfg Config, embeddi
 
 // registerModelSources registers every cfg.Models entry in the engine
 // as a data source. ${ENV_VAR} references in Path are expanded.
-// Registration failures warn and continue — routing policy (which
-// model is used for what intent) lives in the caller's router.
+//
+// core.data_sources rows persist in engine.db across restarts, so a
+// plain insert would hit a PK violation on every restart. config.yaml
+// is the source of truth for paths (API keys, model names, timeouts);
+// we bulk-delete the existing rows first so edits propagate on every
+// startup. Per-row insert failures warn and continue.
 func registerModelSources(ctx context.Context, engine *hugr.Service, models []ModelDef, logger *slog.Logger) {
+	if len(models) == 0 {
+		return
+	}
+	names := make([]string, 0, len(models))
+	for _, m := range models {
+		names = append(names, m.Name)
+	}
+	if err := deleteDataSources(ctx, engine, names); err != nil {
+		logger.Warn("data source bulk delete failed — insert may hit PK conflict",
+			"err", err)
+	}
+
 	for _, m := range models {
 		ds := types.DataSource{
 			Name:     m.Name,
@@ -163,6 +179,29 @@ func registerModelSources(ctx context.Context, engine *hugr.Service, models []Mo
 		}
 		logger.Info("data source registered", "name", m.Name, "type", m.Type)
 	}
+}
+
+// deleteDataSources unloads every name (ignoring errors — a row that
+// doesn't exist is fine) then drops all matching rows in one mutation.
+func deleteDataSources(ctx context.Context, engine *hugr.Service, names []string) error {
+	for _, n := range names {
+		_ = engine.UnloadDataSource(ctx, n)
+	}
+	nAny := make([]any, len(names))
+	for i, n := range names {
+		nAny[i] = n
+	}
+	res, err := engine.Query(ctx,
+		`mutation ($names: [String!]!) {
+			core { delete_data_sources(filter: {name: {in: $names}}) { success message } }
+		}`,
+		map[string]any{"names": nAny},
+	)
+	if err != nil {
+		return err
+	}
+	defer res.Close()
+	return res.Err()
 }
 
 // verifyLocalEmbedding runs a probe against the local embedding model
@@ -192,6 +231,10 @@ func verifyLocalEmbedding(ctx context.Context, service *hugr.Service, embedding 
 // probeEmbedding issues a single core.models.embedding call and
 // returns the observed vector length. Used to detect dimension drift
 // before any memory_item is written.
+//
+// Vector comes back wire-encoded as a quoted string (`"[0.1, 0.2, …]"`)
+// because types.Vector has a custom MarshalJSON; types.Vector's
+// matching UnmarshalJSON decodes that string back into []float64.
 func probeEmbedding(ctx context.Context, engine *hugr.Service, model string) (int, error) {
 	resp, err := engine.Query(ctx,
 		`query ($model: String!) {
@@ -209,10 +252,10 @@ func probeEmbedding(ctx context.Context, engine *hugr.Service, model string) (in
 		return 0, fmt.Errorf("embedding graphql: %w", err)
 	}
 	var result struct {
-		Vector []float64 `json:"vector"`
+		Vector types.Vector `json:"vector"`
 	}
 	if err := resp.ScanData("function.core.models.embedding", &result); err != nil {
 		return 0, fmt.Errorf("embedding scan: %w", err)
 	}
-	return len(result.Vector), nil
+	return result.Vector.Len(), nil
 }

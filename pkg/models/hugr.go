@@ -165,6 +165,8 @@ func (m *HugrModel) GenerateContent(
 
 		sub, err := m.querier.Subscribe(ctx, chatCompletionSubscription, vars)
 		if err != nil {
+			m.logger.Error("hugr chat_completion subscribe failed",
+				"model", m.hugrModel, "err", err)
 			yield(nil, fmt.Errorf("hugrmodel: subscribe: %w", err))
 			return
 		}
@@ -259,11 +261,16 @@ func (m *HugrModel) GenerateContent(
 			}
 		}
 		if err != nil {
+			m.logger.Error("hugr chat_completion subscription failed",
+				"model", m.hugrModel, "err", err)
 			yield(nil, fmt.Errorf("hugrmodel: subscription: %w", err))
 			return
 		}
 
 		if finishEvent.Model == "" && fullContent.Len() == 0 && len(allToolCalls) == 0 {
+			m.logger.Error("hugr chat_completion empty response",
+				"model", m.hugrModel,
+				"messages_count", len(messages))
 			yield(nil, fmt.Errorf("hugrmodel: empty response from LLM — provider may have returned an error (rate limit, invalid request). Check Hugr server logs"))
 			return
 		}

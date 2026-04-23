@@ -89,7 +89,7 @@ local_db:
     # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
     - name: gemma-embedding
       type: embedding
-      path: '${EMBED_LOCAL_URL}?model="embeddinggemma-300m"&timeout=30s'
+      path: '${EMBED_LOCAL_URL}?model="text-embedding-embeddinggemma-300m-qat"&timeout=30s'
     # Cloud LLMs (fill ${*_API_KEY} in .env before using)
     - name: gemini-pro-3-1
       type: llm-gemini

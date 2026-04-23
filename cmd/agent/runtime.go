@@ -437,8 +437,13 @@ func buildRuntime(
 	logger.Info("internal services registered",
 		"providers", []string{skills.ServiceName, memory.ServiceName, chatcontext.ServiceName})
 
-	// External providers from config.yaml (MCP only now).
+	// External providers from config.yaml. Internal services (type=system)
+	// are registered programmatically above — skip their YAML
+	// declarations to keep back-compat with existing configs.
 	for _, pc := range cfg.Providers {
+		if pc.Type == "system" {
+			continue
+		}
 		if pc.Type != "mcp" {
 			rt.close(logger)
 			return nil, fmt.Errorf("provider %q: only type=mcp is supported in config.providers", pc.Name)

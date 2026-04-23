@@ -4,18 +4,24 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hugr-lab/query-engine/types"
+
 	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // Embed returns a vector for text via the configured embedding data
 // source (core.models.embedding). Returns ErrDisabled when no model
 // is configured — callers should fall back to FTS in that case.
+//
+// Vector arrives wire-encoded as a quoted string ("[0.1, 0.2, ...]")
+// because types.Vector has a custom MarshalJSON; its matching
+// UnmarshalJSON decodes that back into []float64 on this side.
 func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if !c.Available() {
 		return nil, ErrDisabled
 	}
 	type result struct {
-		Vector []float64 `json:"vector"`
+		Vector types.Vector `json:"vector"`
 	}
 	r, err := queries.RunQuery[result](ctx, c.querier,
 		`query ($model: String!, $input: String!) {

@@ -40,6 +40,14 @@ type Session struct {
 	updatedAt    time.Time
 	notesCache   string    // rendered "## Session notes" block
 	notesCacheAt time.Time // render time for 10s TTL
+
+	// Materialization: sessions restored from hub.db on startup are
+	// created as stubs (no events, no bindings). The first Get hits
+	// ensureMaterialized, which replays skill state + conversation
+	// events exactly once. Fresh sessions from Create skip this via
+	// markMaterialized.
+	mzOnce sync.Once
+	mzErr  error
 }
 
 var (
@@ -74,6 +82,53 @@ func newSession(cfg sessionConfig) *Session {
 		constitution: cfg.constitution,
 		updatedAt:    time.Now(),
 	}
+}
+
+// markMaterialized is called on freshly Created sessions so the
+// first Get doesn't re-materialize from hub (which would no-op at
+// best, re-append events at worst).
+func (s *Session) markMaterialized() {
+	s.mzOnce.Do(func() {})
+}
+
+// ensureMaterialized is called by Manager.Get before returning a
+// Session stub restored at startup. Replays skill state + every
+// conversation event from hub.db. Idempotent via sync.Once.
+func (s *Session) ensureMaterialized(ctx context.Context) error {
+	s.mzOnce.Do(func() {
+		s.mzErr = s.materialize(ctx)
+	})
+	return s.mzErr
+}
+
+func (s *Session) materialize(ctx context.Context) error {
+	if s.hub == nil {
+		s.manager.applyAutoload(ctx, s)
+		return nil
+	}
+	events, err := s.hub.GetEvents(ctx, s.id)
+	if err != nil {
+		return fmt.Errorf("materialize %q: get events: %w", s.id, err)
+	}
+
+	// Skills first: walk the log to figure out which skills ended up
+	// active, then bind them. AddSkill is idempotent so double-loads
+	// from autoload below are safe.
+	active := replaySkillState(events)
+	for name := range active {
+		s.restoreSkill(ctx, name)
+	}
+	s.manager.applyAutoload(ctx, s)
+
+	// Conversation events: push into the ADK event store so the LLM
+	// sees the prior history on the next turn.
+	for _, ev := range events {
+		if adkEv, ok := convertToADKEvent(ev); ok {
+			s.events.append(adkEv)
+		}
+	}
+	s.touch()
+	return nil
 }
 
 // ------------------------------------------------------------
