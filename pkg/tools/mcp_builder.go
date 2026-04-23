@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 )
@@ -20,11 +21,19 @@ type MCPSpec struct {
 	Args      []string
 	Env       map[string]string
 
-	// Auth is an optional auth-config name. When set, the named store's
-	// RoundTripper wraps the base transport for HTTP transports. Ignored
-	// for stdio.
+	// Auth is an optional auth-config name. When set and AuthType
+	// resolves to "hugr", the named store's RoundTripper wraps the
+	// base transport for HTTP transports. Ignored for stdio.
 	Auth       string
 	AuthStores map[string]auth.TokenStore
+
+	// AuthType selects the HTTP transport wrapping.
+	//   - "hugr" / ""  → Bearer token from AuthStores[Auth] (back-compat).
+	//   - "header"     → inject AuthHeaderName: AuthHeaderValue
+	//   - "auto"       → no wrap (MCP server handles auth)
+	AuthType        string
+	AuthHeaderName  string
+	AuthHeaderValue string
 
 	// BaseTransport is the default (unauthenticated) RoundTripper.
 	BaseTransport http.RoundTripper
@@ -75,19 +84,46 @@ func NewMCPProvider(spec MCPSpec) (Provider, error) {
 }
 
 // mcpTransport resolves the HTTP round-tripper an MCP builder should
-// use: token-injected for the named auth store, or the base transport
-// when auth is empty.
+// use based on spec.AuthType. Empty AuthType falls back to "hugr"
+// when Auth is set (back-compat), else "auto".
 func mcpTransport(spec MCPSpec) (http.RoundTripper, error) {
 	base := spec.BaseTransport
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if spec.Auth == "" {
+
+	kind := strings.ToLower(spec.AuthType)
+	if kind == "" {
+		if spec.Auth != "" {
+			kind = "hugr"
+		} else {
+			kind = "auto"
+		}
+	}
+
+	switch kind {
+	case "hugr":
+		if spec.Auth == "" {
+			// No store to pull from — behave like auto for
+			// anonymous endpoints.
+			return base, nil
+		}
+		store, ok := spec.AuthStores[spec.Auth]
+		if !ok || store == nil {
+			return nil, fmt.Errorf("auth %q not found in store registry", spec.Auth)
+		}
+		return auth.Transport(store, base), nil
+
+	case "header":
+		if spec.AuthHeaderName == "" || spec.AuthHeaderValue == "" {
+			return nil, fmt.Errorf("provider %q: auth_type=header requires auth_header_name + auth_header_value", spec.Name)
+		}
+		return auth.HeaderTransport(spec.AuthHeaderName, spec.AuthHeaderValue, base), nil
+
+	case "auto":
 		return base, nil
+
+	default:
+		return nil, fmt.Errorf("provider %q: unknown auth_type %q (want hugr|header|auto)", spec.Name, spec.AuthType)
 	}
-	store, ok := spec.AuthStores[spec.Auth]
-	if !ok || store == nil {
-		return nil, fmt.Errorf("auth %q not found in store registry", spec.Auth)
-	}
-	return auth.Transport(store, base), nil
 }

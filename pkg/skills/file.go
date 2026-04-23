@@ -13,6 +13,7 @@ import (
 // skillFrontmatter is the YAML header inside SKILL.md.
 type skillFrontmatter struct {
 	Name        string               `yaml:"name"`
+	Version     string               `yaml:"version"`
 	Description string               `yaml:"description"`
 	Categories  []string             `yaml:"categories"`
 	Autoload    bool                 `yaml:"autoload"`
@@ -112,11 +113,24 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 		canonical = name
 	}
 
-	// Expand ${ENV_VAR} in inline endpoints — lets a single skill file
-	// stay portable across environments.
+	// Expand ${ENV_VAR} in inline endpoints + header auth values —
+	// lets a single skill file stay portable across environments.
+	// Also validates shape: Name is always required; exactly one of
+	// Provider or Endpoint must be set.
 	providers := make([]SkillProviderSpec, 0, len(fm.Providers))
-	for _, spec := range fm.Providers {
+	for i, spec := range fm.Providers {
+		if spec.Name == "" {
+			return nil, fmt.Errorf("skills: %q provider[%d]: name is required", canonical, i)
+		}
+		if spec.Provider == "" && spec.Endpoint == "" {
+			return nil, fmt.Errorf("skills: %q provider %q: either provider or endpoint is required", canonical, spec.Name)
+		}
+		if spec.Provider != "" && spec.Endpoint != "" {
+			return nil, fmt.Errorf("skills: %q provider %q: provider and endpoint are mutually exclusive", canonical, spec.Name)
+		}
 		spec.Endpoint = os.ExpandEnv(spec.Endpoint)
+		spec.AuthHeaderName = os.ExpandEnv(spec.AuthHeaderName)
+		spec.AuthHeaderValue = os.ExpandEnv(spec.AuthHeaderValue)
 		providers = append(providers, spec)
 	}
 
@@ -134,6 +148,7 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 
 	return &Skill{
 		Name:         canonical,
+		Version:      fm.Version,
 		Description:  fm.Description,
 		Categories:   fm.Categories,
 		Instructions: instructions,

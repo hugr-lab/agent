@@ -103,10 +103,15 @@ func (s *Session) SetCatalog(list []skills.SkillMeta) error {
 }
 
 // LoadSkill marks the skill active and registers a FilteredProvider
-// per declared SkillProviderSpec. Bindings are keyed deterministically
-// (`skill/<name>/<idx>`) so repeated LoadSkill calls are idempotent.
-// Tool names are always resolved fresh at Snapshot time — not stashed
-// in state.
+// per declared SkillProviderSpec. Bindings are keyed by provider
+// name (`skill/<skill>/<providerName>`) so repeated LoadSkill calls
+// are idempotent and provider names act as stable handles.
+//
+// Version drift: when skill.Version differs from the last-loaded
+// version recorded in state, the old bindings (and any inline raw
+// providers they owned) are torn down first. This lets operators
+// edit a skill's provider list on disk, bump version:, and have the
+// change applied without restarting the process.
 //
 // Atomicity: we bind every provider FIRST. If any binding fails we
 // abort before touching state or hub, so a partial load doesn't leave
@@ -117,29 +122,43 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 		return err
 	}
 
+	// Version drift → drop every old binding (filtered + inline raw)
+	// before rebuilding. We sweep by prefix because the previously
+	// bound provider names are not recoverable from the new skill
+	// file's provider list (which has already changed). On first load
+	// oldVer is absent and the sweep is a no-op.
+	if oldVer, ok := s.state.LoadedSkillVersion(sk.Name); ok && oldVer != sk.Version {
+		s.sweepSkillBindings(sk.Name)
+		s.state.ForgetSkillVersion(sk.Name)
+		s.logger.Info("skill version changed — bindings rebuilt",
+			"skill", sk.Name, "old", oldVer, "new", sk.Version)
+	}
+
 	// Bind bindings first (phase 1). Roll back any that were created
 	// in this call if a later one fails.
-	created := make([]int, 0, len(sk.Providers))
-	for i, spec := range sk.Providers {
+	created := make([]skills.SkillProviderSpec, 0, len(sk.Providers))
+	for _, spec := range sk.Providers {
 		existed := false
-		if _, err := s.tools.Provider(bindingName(sk.Name, i)); err == nil {
+		if _, err := s.tools.Provider(bindingName(sk.Name, spec.Name)); err == nil {
 			existed = true
 		}
-		if err := s.bindSkillProvider(sk.Name, i, spec); err != nil {
+		if err := s.bindSkillProvider(sk.Name, spec); err != nil {
 			// Roll back: drop only the providers we added in this call,
 			// not ones already present from a prior successful load.
 			for _, j := range created {
-				_ = s.tools.RemoveProvider(bindingName(sk.Name, j))
-				if sk.Providers[j].Provider == "" {
-					_ = s.tools.RemoveProvider(inlineName(sk.Name, j))
+				_ = s.tools.RemoveProvider(bindingName(sk.Name, j.Name))
+				if j.Provider == "" {
+					_ = s.tools.RemoveProvider(inlineName(sk.Name, j.Name))
 				}
 			}
-			return fmt.Errorf("load skill %q: provider %d: %w", sk.Name, i, err)
+			return fmt.Errorf("load skill %q: provider %q: %w", sk.Name, spec.Name, err)
 		}
 		if !existed {
-			created = append(created, i)
+			created = append(created, spec)
 		}
 	}
+
+	s.state.RecordSkillVersion(sk.Name, sk.Version)
 
 	// Phase 2: commit to state + hub. AddSkill is idempotent — if the
 	// skill was already active (restore + autoload combo), skip the
@@ -153,11 +172,7 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 	if s.hub != nil {
 		providerNames := make([]string, 0, len(sk.Providers))
 		for _, spec := range sk.Providers {
-			if spec.Provider != "" {
-				providerNames = append(providerNames, spec.Provider)
-			} else {
-				providerNames = append(providerNames, spec.Endpoint)
-			}
+			providerNames = append(providerNames, spec.Name)
 		}
 		meta, _ := json.Marshal(sessstore.SkillLoadedMeta{
 			Skill: sk.Name,
@@ -185,6 +200,7 @@ func (s *Session) UnloadSkill(ctx context.Context, name string) error {
 		return nil
 	}
 	s.state.RemoveRefsForSkill(name)
+	s.state.ForgetSkillVersion(name)
 	s.dropBindings(ctx, name)
 	s.touch()
 
@@ -261,11 +277,15 @@ func (s *Session) IngestADKEvent(_ context.Context, ev *adksession.Event) {
 // ------------------------------------------------------------
 
 // bindSkillProvider ensures a FilteredProvider exists in tools.Manager
-// for the skill's i-th provider spec. Named providers are resolved
-// against the manager; inline endpoints are built via the session
-// manager's InlineBuilder (if set).
-func (s *Session) bindSkillProvider(skillName string, idx int, spec skills.SkillProviderSpec) error {
-	binding := bindingName(skillName, idx)
+// for the skill's provider spec. Named providers are resolved against
+// the manager; inline endpoints are built via the session manager's
+// InlineBuilder (if set). Binding key uses spec.Name so providers
+// across skills with the same logical name resolve consistently.
+func (s *Session) bindSkillProvider(skillName string, spec skills.SkillProviderSpec) error {
+	if spec.Name == "" {
+		return fmt.Errorf("provider spec has empty name")
+	}
+	binding := bindingName(skillName, spec.Name)
 	if _, err := s.tools.Provider(binding); err == nil {
 		return nil // already bound
 	}
@@ -282,11 +302,17 @@ func (s *Session) bindSkillProvider(skillName string, idx int, spec skills.Skill
 		if s.manager.inlineBuilder == nil {
 			return fmt.Errorf("inline endpoint provided but no InlineBuilder configured")
 		}
-		name := inlineName(skillName, idx)
+		name := inlineName(skillName, spec.Name)
 		if existing, err := s.tools.Provider(name); err == nil {
 			raw = existing
 		} else {
-			p, err := s.manager.inlineBuilder(name, spec.Endpoint, spec.Auth, s.logger)
+			authIn := InlineProviderAuth{
+				Type:        spec.AuthType,
+				Name:        spec.Auth,
+				HeaderName:  spec.AuthHeaderName,
+				HeaderValue: spec.AuthHeaderValue,
+			}
+			p, err := s.manager.inlineBuilder(name, spec.Endpoint, authIn, s.logger)
 			if err != nil {
 				return fmt.Errorf("inline provider: %w", err)
 			}
@@ -427,8 +453,8 @@ func (s *Session) buildTools(ctx context.Context) []tool.Tool {
 		if err != nil {
 			continue
 		}
-		for i := range sk.Providers {
-			ts, err := s.tools.ProviderTools(bindingName(skillName, i))
+		for _, spec := range sk.Providers {
+			ts, err := s.tools.ProviderTools(bindingName(skillName, spec.Name))
 			if err != nil {
 				continue
 			}
@@ -450,8 +476,8 @@ func (s *Session) buildTools(ctx context.Context) []tool.Tool {
 func (s *Session) skillToolNames(sk *skills.Skill) []string {
 	var names []string
 	seen := map[string]bool{}
-	for i := range sk.Providers {
-		ts, err := s.tools.ProviderTools(bindingName(sk.Name, i))
+	for _, spec := range sk.Providers {
+		ts, err := s.tools.ProviderTools(bindingName(sk.Name, spec.Name))
 		if err != nil {
 			continue
 		}
@@ -476,17 +502,38 @@ func (s *Session) touch() {
 // providers that were registered for a skill, without touching
 // pre-configured providers (hugr-main, _skills, etc). Safe to call on
 // a skill whose on-disk definition has since changed shape — we reload
-// the skill to inspect its provider list.
+// the skill to inspect its provider list. When the skill file is gone
+// (or unparseable) we fall back to sweeping every skill/<name>/* and
+// skill-inline/<name>/* prefix so orphaned bindings still get cleaned.
 func (s *Session) dropBindings(ctx context.Context, name string) {
 	sk, err := s.skills.Load(ctx, name)
 	if err != nil {
+		s.sweepSkillBindings(name)
 		return
 	}
-	for i, spec := range sk.Providers {
-		_ = s.tools.RemoveProvider(bindingName(name, i))
+	for _, spec := range sk.Providers {
+		_ = s.tools.RemoveProvider(bindingName(name, spec.Name))
 		if spec.Provider == "" {
 			// inline raw provider synthesised in bindSkillProvider
-			_ = s.tools.RemoveProvider(inlineName(name, i))
+			_ = s.tools.RemoveProvider(inlineName(name, spec.Name))
+		}
+	}
+}
+
+// sweepSkillBindings removes every registered provider whose name
+// starts with "skill/<skillName>/" or "skill-inline/<skillName>/".
+// Used as a fallback when the on-disk skill has gone missing but we
+// still need to tear its runtime bindings down.
+func (s *Session) sweepSkillBindings(skillName string) {
+	prefixes := []string{
+		bindingName(skillName, ""),
+		inlineName(skillName, ""),
+	}
+	for _, p := range prefixes {
+		for _, existing := range s.tools.ProviderNames() {
+			if strings.HasPrefix(existing, p) {
+				_ = s.tools.RemoveProvider(existing)
+			}
 		}
 	}
 }
@@ -513,11 +560,13 @@ func (s *Session) restoreSkill(ctx context.Context, name string) {
 		return
 	}
 	s.state.AddSkill(sk.Name)
-	for i, spec := range sk.Providers {
-		if err := s.bindSkillProvider(sk.Name, i, spec); err != nil {
-			s.logger.Warn("session: bind on restore", "skill", sk.Name, "idx", i, "err", err)
+	for _, spec := range sk.Providers {
+		if err := s.bindSkillProvider(sk.Name, spec); err != nil {
+			s.logger.Warn("session: bind on restore",
+				"skill", sk.Name, "provider", spec.Name, "err", err)
 		}
 	}
+	s.state.RecordSkillVersion(sk.Name, sk.Version)
 	s.touch()
 }
 
@@ -544,17 +593,21 @@ func jsonToMap(b []byte) map[string]any {
 	return m
 }
 
-// bindingName is the tools.Manager key for a skill's i-th provider
-// binding. Stable across runs so idempotent LoadSkill works.
-func bindingName(skill string, idx int) string {
-	return fmt.Sprintf("skill/%s/%d", skill, idx)
+// bindingName is the tools.Manager key for a skill's provider-scope
+// filtered binding. Stable across runs so idempotent LoadSkill works.
+// When providerName is empty the result is the sweep prefix used by
+// sweepSkillBindings.
+func bindingName(skill, providerName string) string {
+	return fmt.Sprintf("skill/%s/%s", skill, providerName)
 }
 
 // inlineName is the tools.Manager key for the synthetic raw provider
 // backing a skill's inline endpoint binding (i.e. when the spec had
-// no provider: reference).
-func inlineName(skill string, idx int) string {
-	return fmt.Sprintf("inline/%s/%d", skill, idx)
+// no provider: reference). Prefix ensures two skills declaring the
+// same inline provider name don't collide — each owns its own
+// skill-inline/<skill>/<providerName> entry.
+func inlineName(skill, providerName string) string {
+	return fmt.Sprintf("skill-inline/%s/%s", skill, providerName)
 }
 
 // Touch is for tests/infra that need to flag activity.

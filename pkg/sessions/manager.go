@@ -70,11 +70,22 @@ type ReviewQueuer interface {
 	QueueReview(sessionID string)
 }
 
+// InlineProviderAuth bundles the auth-related fields from a skill's
+// inline provider spec. Lets InlineProviderFactory pick the right
+// transport wrapping (Bearer / static header / none) without pulling
+// skills types into the factory contract.
+type InlineProviderAuth struct {
+	Type        string // "hugr" | "header" | "auto" | ""
+	Name        string // cfg.Auth[Name] when Type == "hugr"
+	HeaderName  string // Type == "header"
+	HeaderValue string // Type == "header"
+}
+
 // InlineProviderFactory builds an anonymous MCP provider for a skill's
-// inline endpoint spec. Called at most once per distinct
-// (skillName, endpoint, auth) combination — the resulting provider is
-// registered in tools.Manager under the provided synthetic name.
-type InlineProviderFactory func(name, endpoint, authName string, logger *slog.Logger) (tools.Provider, error)
+// inline endpoint spec. Called at most once per distinct (skillName,
+// providerName) combination — the resulting provider is registered in
+// tools.Manager under the provided synthetic name.
+type InlineProviderFactory func(name, endpoint string, auth InlineProviderAuth, logger *slog.Logger) (tools.Provider, error)
 
 // Manager owns runtime sessions. Implements adksession.Service and
 // *Manager. System tools no longer live here — they

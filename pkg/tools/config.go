@@ -31,5 +31,13 @@ type ProviderConfig struct {
 	Command   string            `mapstructure:"command"`   // for stdio
 	Args      []string          `mapstructure:"args"`      // for stdio
 	Env       map[string]string `mapstructure:"env"`       // for stdio
-	Auth      string            `mapstructure:"auth"`      // optional auth config name (HTTP only)
+	Auth      string            `mapstructure:"auth"`      // optional auth config name (HTTP only, AuthType=hugr)
+
+	// AuthType selects the transport wrapping for HTTP transports:
+	//   - "hugr" / ""  → Bearer token from named Auth store (back-compat)
+	//   - "header"     → inject AuthHeaderName: AuthHeaderValue
+	//   - "auto"       → no wrap (MCP server handles auth itself)
+	AuthType        string `mapstructure:"auth_type"`
+	AuthHeaderName  string `mapstructure:"auth_header_name"`
+	AuthHeaderValue string `mapstructure:"auth_header_value"`
 }

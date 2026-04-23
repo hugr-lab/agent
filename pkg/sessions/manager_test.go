@@ -23,9 +23,11 @@ func makeSkillsDir(t *testing.T) string {
 	require.NoError(t, os.MkdirAll(demoDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(demoDir, "SKILL.md"), []byte(`---
 name: demo
+version: "0.1.0"
 description: A demo skill
 providers:
-  - provider: hugr-main
+  - name: hugr-main
+    provider: hugr-main
 ---
 Body.`), 0o644))
 
@@ -35,10 +37,12 @@ Body.`), 0o644))
 	require.NoError(t, os.MkdirAll(sysDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(sysDir, "SKILL.md"), []byte(`---
 name: _sys
+version: "0.1.0"
 description: Autoload test suite
 autoload: true
 providers:
-  - provider: _skills
+  - name: _skills
+    provider: _skills
 ---
 system bootstrap text`), 0o644))
 
@@ -47,13 +51,15 @@ system bootstrap text`), 0o644))
 
 // testHarness bundles the fixtures every test needs.
 type testHarness struct {
-	m     *Manager
-	tools *tools.Manager
+	m          *Manager
+	tools      *tools.Manager
+	skillsRoot string
 }
 
 func newTestHarness(t *testing.T) *testHarness {
 	t.Helper()
-	sk, err := skills.NewFileManager(makeSkillsDir(t))
+	root := makeSkillsDir(t)
+	sk, err := skills.NewFileManager(root)
 	require.NoError(t, err)
 
 	tm := tools.New(nil)
@@ -66,7 +72,7 @@ func newTestHarness(t *testing.T) *testHarness {
 		Constitution: "C",
 	})
 	require.NoError(t, err)
-	return &testHarness{m: m, tools: tm}
+	return &testHarness{m: m, tools: tm, skillsRoot: root}
 }
 
 func TestManager_CreateGetDelete(t *testing.T) {
@@ -147,8 +153,131 @@ func TestSession_UnloadSkill_DropsBindings(t *testing.T) {
 	// system-suite tools still present (autoloaded, not unloaded).
 	assert.Contains(t, names, "skill_list")
 
-	_, err := h.tools.Provider("skill/demo/0")
+	_, err := h.tools.Provider("skill/demo/hugr-main")
 	assert.Error(t, err, "binding view should be gone from tools.Manager")
+}
+
+// TestSession_LoadSkill_VersionDrift verifies that editing a skill's
+// version on disk + re-loading drops the stale bindings and creates
+// fresh ones pointing at the new provider set.
+func TestSession_LoadSkill_VersionDrift(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	resp, _ := h.m.Create(ctx, &adksession.CreateRequest{AppName: "a", UserID: "u", SessionID: "s1"})
+	sess := resp.Session.(*Session)
+
+	require.NoError(t, sess.LoadSkill(ctx, "demo"))
+	// Baseline: hugr-main tools exposed, no "alt" binding yet.
+	names := toolNames(sess.Snapshot().Tools)
+	assert.Contains(t, names, "demo_query")
+
+	// Register a second upstream provider and rewrite the demo skill
+	// on disk: version bumped, hugr-main replaced with alt-source.
+	h.tools.AddProvider(tools.FakeProvider{N: "alt-source", T: tools.FakeTools("alt_probe")})
+	require.NoError(t, os.WriteFile(filepath.Join(h.skillsRoot, "demo", "SKILL.md"), []byte(`---
+name: demo
+version: "0.2.0"
+description: A demo skill
+providers:
+  - name: alt
+    provider: alt-source
+---
+Body.`), 0o644))
+
+	require.NoError(t, sess.LoadSkill(ctx, "demo"))
+
+	names = toolNames(sess.Snapshot().Tools)
+	assert.Contains(t, names, "alt_probe", "new provider's tools should be exposed after version drift")
+	assert.NotContains(t, names, "demo_query", "old provider's tools should be gone after version drift")
+
+	// The old filtered binding key is gone.
+	_, err := h.tools.Provider("skill/demo/hugr-main")
+	assert.Error(t, err, "stale version binding should be dropped")
+	_, err = h.tools.Provider("skill/demo/alt")
+	assert.NoError(t, err, "new version binding should be registered")
+}
+
+// TestSession_LoadSkill_SameVersionNoop verifies that re-loading a
+// skill whose disk definition hasn't changed doesn't re-bind
+// providers or double-log skill_loaded.
+func TestSession_LoadSkill_SameVersionNoop(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+	resp, _ := h.m.Create(ctx, &adksession.CreateRequest{AppName: "a", UserID: "u", SessionID: "s1"})
+	sess := resp.Session.(*Session)
+
+	require.NoError(t, sess.LoadSkill(ctx, "demo"))
+	first, err := h.tools.Provider("skill/demo/hugr-main")
+	require.NoError(t, err)
+
+	// Second load on unchanged version: binding object must be the
+	// same instance; bindSkillProvider short-circuits.
+	require.NoError(t, sess.LoadSkill(ctx, "demo"))
+	second, err := h.tools.Provider("skill/demo/hugr-main")
+	require.NoError(t, err)
+	assert.Same(t, first, second, "same-version re-load should not rebuild binding")
+}
+
+// TestSession_LoadSkill_PartialBindRollback verifies the rollback
+// logic when one of several providers fails to bind: only the
+// providers that were added *in this call* get removed, preserving
+// anything already present from an earlier successful load.
+func TestSession_LoadSkill_PartialBindRollback(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// Two-provider skill: p1 resolves fine; p2 references a missing
+	// upstream provider so bindSkillProvider fails at index 1.
+	root := h.skillsRoot
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "partial"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "partial", "SKILL.md"), []byte(`---
+name: partial
+version: "0.1.0"
+providers:
+  - name: ok
+    provider: hugr-main
+  - name: bad
+    provider: ghost
+---
+body`), 0o644))
+
+	resp, _ := h.m.Create(ctx, &adksession.CreateRequest{AppName: "a", UserID: "u", SessionID: "s1"})
+	sess := resp.Session.(*Session)
+
+	err := sess.LoadSkill(ctx, "partial")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad")
+
+	// Neither binding should remain — the first was added in this
+	// call so it gets rolled back.
+	_, err = h.tools.Provider("skill/partial/ok")
+	assert.Error(t, err, "newly added binding rolled back on failure")
+	_, err = h.tools.Provider("skill/partial/bad")
+	assert.Error(t, err)
+}
+
+// TestSession_UnloadSkill_ForgetsVersion verifies that Unload clears
+// the version record so the next Load doesn't skip the bind due to
+// a stale version match.
+func TestSession_UnloadSkill_ForgetsVersion(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+	resp, _ := h.m.Create(ctx, &adksession.CreateRequest{AppName: "a", UserID: "u", SessionID: "s1"})
+	sess := resp.Session.(*Session)
+
+	require.NoError(t, sess.LoadSkill(ctx, "demo"))
+	_, tracked := sess.state.LoadedSkillVersion("demo")
+	assert.True(t, tracked)
+
+	require.NoError(t, sess.UnloadSkill(ctx, "demo"))
+	_, tracked = sess.state.LoadedSkillVersion("demo")
+	assert.False(t, tracked, "UnloadSkill must clear SkillVersions[name]")
+
+	// Re-load works and re-binds.
+	require.NoError(t, sess.LoadSkill(ctx, "demo"))
+	_, err := h.tools.Provider("skill/demo/hugr-main")
+	require.NoError(t, err)
 }
 
 func TestSession_SetCatalog_Clears(t *testing.T) {

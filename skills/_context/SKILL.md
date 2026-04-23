@@ -1,11 +1,13 @@
 ---
 name: _context
+version: "0.1.0"
 description: >
   Tools for managing your own conversation context: check current
   usage, see what's loaded, and trigger compaction when needed.
 autoload: true
 providers:
-  - provider: _context
+  - name: _context
+    provider: _context
 ---
 
 # Context management

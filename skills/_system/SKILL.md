@@ -1,5 +1,6 @@
 ---
 name: _system
+version: "0.1.0"
 description: >
   Built-in skill-management tools. Always active. Provides
   skill_list, skill_load, skill_unload, skill_ref, skill_ref_unload.
@@ -7,7 +8,8 @@ description: >
   live in the `_context` skill.
 autoload: true
 providers:
-  - provider: _skills
+  - name: _skills
+    provider: _skills
 ---
 
 # Skill and context management

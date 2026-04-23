@@ -40,6 +40,14 @@ type State struct {
 	Tools  []string
 	Refs   []string // "skill/ref" pairs
 
+	// SkillVersions tracks the version string last loaded per skill.
+	// Populated by LoadSkill; drives version-drift detection — when a
+	// skill is re-loaded with a different version, the old tool
+	// bindings are dropped before the new ones get built.
+	// Not persisted: on process restart every skill's first load
+	// re-computes the binding set from scratch.
+	SkillVersions map[string]string
+
 	// Catalog override: when CatalogSet is true, CatalogSkills is shown
 	// in the prompt; otherwise the manager's default catalog is used.
 	CatalogSkills []skills.SkillMeta
@@ -63,8 +71,45 @@ var _ adksession.State = (*State)(nil)
 // is always computed.
 func NewState() *State {
 	return &State{
-		kv:    make(map[string]any),
-		dirty: true,
+		kv:            make(map[string]any),
+		SkillVersions: make(map[string]string),
+		dirty:         true,
+	}
+}
+
+// LoadedSkillVersion returns the last loaded version string for the
+// named skill and whether the skill was loaded at all.
+func (s *State) LoadedSkillVersion(name string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.SkillVersions == nil {
+		return "", false
+	}
+	v, ok := s.SkillVersions[name]
+	return v, ok
+}
+
+// RecordSkillVersion stores the just-loaded version for name.
+func (s *State) RecordSkillVersion(name, version string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.SkillVersions == nil {
+		s.SkillVersions = make(map[string]string)
+	}
+	s.SkillVersions[name] = version
+	s.dirty = true
+}
+
+// ForgetSkillVersion removes the tracked version for name.
+func (s *State) ForgetSkillVersion(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.SkillVersions == nil {
+		return
+	}
+	if _, ok := s.SkillVersions[name]; ok {
+		delete(s.SkillVersions, name)
+		s.dirty = true
 	}
 }
 

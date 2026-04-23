@@ -1,11 +1,13 @@
 ---
 name: _memory
+version: "0.1.0"
 description: >
   Persistent memory tools. Save notes during the session, search
   long-term facts learned from previous sessions.
 autoload: true
 providers:
-  - provider: _memory
+  - name: _memory
+    provider: _memory
 ---
 
 # Memory

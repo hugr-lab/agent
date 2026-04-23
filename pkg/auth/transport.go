@@ -15,6 +15,18 @@ func Transport(store TokenStore, base http.RoundTripper) http.RoundTripper {
 	return &tokenTransport{store: store, base: base}
 }
 
+// HeaderTransport returns an http.RoundTripper that injects a static
+// header (e.g. `X-API-Key: ${WEATHER_API_KEY}`) into every outgoing
+// request. The value is copied once at construction time — env
+// expansion happens in the caller before passing it in. Used for MCP
+// providers that authenticate via a non-Bearer scheme.
+func HeaderTransport(headerName, headerValue string, base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &headerTransport{name: headerName, value: headerValue, base: base}
+}
+
 type tokenTransport struct {
 	store TokenStore
 	base  http.RoundTripper
@@ -35,4 +47,16 @@ func (t *tokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		slog.Warn("hugr auth rejected", "status", resp.StatusCode, "url", req.URL.String())
 	}
 	return resp, nil
+}
+
+type headerTransport struct {
+	name  string
+	value string
+	base  http.RoundTripper
+}
+
+func (h *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set(h.name, h.value)
+	return h.base.RoundTrip(r)
 }
