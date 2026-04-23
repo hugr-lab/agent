@@ -31,6 +31,14 @@ type ScriptedLLM struct {
 	turn      int
 }
 
+// Turns returns the number of GenerateContent calls served so far.
+// Useful in tests that want to assert "specialist used N turns".
+func (m *ScriptedLLM) Turns() int { return m.turn }
+
+// Reset rewinds the script to the first response. Useful when reusing
+// a ScriptedLLM across sub-tests.
+func (m *ScriptedLLM) Reset() { m.turn = 0 }
+
 // NewScriptedLLM creates a scripted LLM from a sequence of responses.
 func NewScriptedLLM(name string, responses []ScriptedResponse) *ScriptedLLM {
 	return &ScriptedLLM{name: name, responses: responses}

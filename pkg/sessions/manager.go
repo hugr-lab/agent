@@ -394,6 +394,18 @@ func (m *Manager) Delete(ctx context.Context, req *adksession.DeleteRequest) err
 	return nil
 }
 
+// UpdateSessionStatus proxies to the hub session-status update so
+// callers (notably the spec-006 sub-agent dispatcher) can mark a
+// child session completed / failed / abandoned at the end of a run
+// without reaching into the hub client directly. No-op when the
+// manager runs without a hub (test mode).
+func (m *Manager) UpdateSessionStatus(ctx context.Context, sessionID, status string) error {
+	if m.hub == nil {
+		return nil
+	}
+	return m.hub.UpdateSessionStatus(ctx, sessionID, status)
+}
+
 func (m *Manager) AppendEvent(ctx context.Context, cur adksession.Session, ev *adksession.Event) error {
 	if cur == nil {
 		return errors.New("session: AppendEvent: nil session")
