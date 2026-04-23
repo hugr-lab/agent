@@ -24,6 +24,16 @@ type Session struct {
 	id      string
 	appName string
 	userID  string
+	// sessionType mirrors sessions.session_type in hub (spec 006). Used
+	// by Manager.applyAutoload to filter autoload skills against the
+	// session's discriminator: a "subagent" session only picks up
+	// autoload skills whose AutoloadFor includes "subagent". Empty
+	// value at runtime is treated as SessionTypeRoot (defensive).
+	sessionType        string
+	parentSessionID    string
+	spawnedFromEventID string
+	mission            string
+	forkAfterSeq       *int
 
 	state  *State
 	events *eventStore
@@ -50,6 +60,45 @@ type Session struct {
 	mzErr  error
 }
 
+// SessionType returns the session's discriminator
+// (sessstore.SessionTypeRoot|SubAgent|Fork). Defaults to "root"
+// for sessions created without an explicit type (preserves pre-006
+// behaviour).
+func (s *Session) SessionType() string {
+	if s == nil || s.sessionType == "" {
+		return sessstore.SessionTypeRoot
+	}
+	return s.sessionType
+}
+
+// ParentSessionID returns the linked parent session id (empty for
+// root sessions).
+func (s *Session) ParentSessionID() string {
+	if s == nil {
+		return ""
+	}
+	return s.parentSessionID
+}
+
+// SpawnedFromEventID returns the parent's tool_call event id that
+// dispatched this session (empty for root sessions and pre-spec-006
+// rows).
+func (s *Session) SpawnedFromEventID() string {
+	if s == nil {
+		return ""
+	}
+	return s.spawnedFromEventID
+}
+
+// Mission returns the short task description recorded for this
+// sub-agent session ("" for root sessions).
+func (s *Session) Mission() string {
+	if s == nil {
+		return ""
+	}
+	return s.mission
+}
+
 var (
 	_ adksession.Session = (*Session)(nil)
 	_ *Session           = (*Session)(nil)
@@ -65,22 +114,36 @@ type sessionConfig struct {
 	hub          *sessstore.Client
 	logger       *slog.Logger
 	constitution string
+
+	// Spec 006 sub-agent linkage. All optional — root sessions leave
+	// these empty / nil; the dispatcher populates them when opening a
+	// child session, and RestoreOpen copies them off the hub Record.
+	sessionType        string
+	parentSessionID    string
+	spawnedFromEventID string
+	mission            string
+	forkAfterSeq       *int
 }
 
 func newSession(cfg sessionConfig) *Session {
 	return &Session{
-		id:           cfg.id,
-		appName:      cfg.appName,
-		userID:       cfg.userID,
-		state:        NewState(),
-		events:       newEventStore(),
-		manager:      cfg.manager,
-		skills:       cfg.skills,
-		tools:        cfg.tools,
-		hub:          cfg.hub,
-		logger:       cfg.logger,
-		constitution: cfg.constitution,
-		updatedAt:    time.Now(),
+		id:                 cfg.id,
+		appName:            cfg.appName,
+		userID:             cfg.userID,
+		sessionType:        cfg.sessionType,
+		parentSessionID:    cfg.parentSessionID,
+		spawnedFromEventID: cfg.spawnedFromEventID,
+		mission:            cfg.mission,
+		forkAfterSeq:       cfg.forkAfterSeq,
+		state:              NewState(),
+		events:             newEventStore(),
+		manager:            cfg.manager,
+		skills:             cfg.skills,
+		tools:              cfg.tools,
+		hub:                cfg.hub,
+		logger:             cfg.logger,
+		constitution:       cfg.constitution,
+		updatedAt:          time.Now(),
 	}
 }
 

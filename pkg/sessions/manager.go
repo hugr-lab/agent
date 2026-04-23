@@ -224,7 +224,13 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 				app = v
 			}
 		}
-		sess := m.newLocal(row.ID, app, row.OwnerID)
+		sess := m.newLocalWithLinkage(row.ID, app, row.OwnerID, subAgentLinkage{
+			sessionType:        row.SessionType,
+			parentSessionID:    row.ParentSessionID,
+			spawnedFromEventID: row.SpawnedFromEventID,
+			mission:            row.Mission,
+			forkAfterSeq:       row.ForkAfterSeq,
+		})
 		m.mu.Lock()
 		m.sessions[row.ID] = sess
 		m.mu.Unlock()
@@ -233,13 +239,18 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 	return nil
 }
 
-// applyAutoload loads every skill marked autoload into sess, idempotent
-// against AddSkill so repeat calls are safe.
+// applyAutoload loads every autoload skill applicable to the session's
+// type into sess, idempotent against AddSkill so repeat calls are safe.
+//
+// Spec 006: a sub-agent session only picks up autoload skills whose
+// frontmatter `autoload_for` includes "subagent" (the file parser
+// defaults missing lists to ["root"]). Existing root sessions keep
+// their pre-006 autoload set unchanged.
 func (m *Manager) applyAutoload(ctx context.Context, sess *Session) {
 	if m.skills == nil {
 		return
 	}
-	names, err := m.skills.AutoloadNames(ctx)
+	names, err := m.skills.AutoloadNamesFor(ctx, sess.SessionType())
 	if err != nil {
 		m.logger.Warn("session: autoload lookup", "err", err)
 		return
@@ -267,18 +278,32 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 		id = uuid.NewString()
 	}
 
+	// Spec 006: extract sub-agent / fork linkage from well-known State
+	// keys before constructing the Session so the discriminator is
+	// available to applyAutoload below + the hub Record carries it.
+	linkage := linkageFromState(req.State)
+
 	m.mu.Lock()
 	if _, exists := m.sessions[id]; exists {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("session: %q already exists", id)
 	}
-	sess := m.newLocal(id, req.AppName, req.UserID)
+	sess := m.newLocalWithLinkage(id, req.AppName, req.UserID, linkage)
 	sess.markMaterialized() // fresh session — nothing to replay from hub
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
 	if req.State != nil {
 		for k, v := range req.State {
+			// Skip the well-known linkage keys — they're already absorbed
+			// into the Session's typed fields and into the hub Record
+			// below; copying them into State would duplicate the truth
+			// and let later code mutate them out of sync.
+			switch k {
+			case stateKeyParentSessionID, stateKeyMission, stateKeyForkAfterSeq,
+				stateKeySessionType, stateKeySpawnedFromEventID:
+				continue
+			}
 			_ = sess.state.Set(k, v)
 		}
 	}
@@ -289,11 +314,16 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 			meta["app_name"] = req.AppName
 		}
 		row := sessstore.Record{
-			ID:       id,
-			AgentID:  m.hub.AgentID(),
-			OwnerID:  req.UserID,
-			Status:   "active",
-			Metadata: meta,
+			ID:                 id,
+			AgentID:            m.hub.AgentID(),
+			OwnerID:            req.UserID,
+			Status:             "active",
+			Metadata:           meta,
+			SessionType:        linkage.sessionType,
+			ParentSessionID:    linkage.parentSessionID,
+			SpawnedFromEventID: linkage.spawnedFromEventID,
+			Mission:            linkage.mission,
+			ForkAfterSeq:       linkage.forkAfterSeq,
 		}
 		if _, err := m.hub.CreateSession(ctx, row); err != nil {
 			m.logger.Warn("session: hub.CreateSession", "id", id, "err", err)
@@ -405,4 +435,88 @@ func (m *Manager) newLocal(id, app, user string) *Session {
 		logger:       m.logger,
 		constitution: m.constitution,
 	})
+}
+
+// newLocalWithLinkage builds a Session with spec-006 sub-agent linkage
+// (session_type, parent_session_id, spawned_from_event_id, mission,
+// fork_after_seq) populated. Used by Create when the caller supplied
+// the relevant CreateRequest.State keys, and by RestoreOpen when
+// rehydrating sessions from hub. Falls back to root when sessionType
+// is empty so existing call sites that don't care continue to work.
+func (m *Manager) newLocalWithLinkage(id, app, user string, sub subAgentLinkage) *Session {
+	return newSession(sessionConfig{
+		id:                 id,
+		appName:            app,
+		userID:             user,
+		manager:            m,
+		skills:             m.skills,
+		tools:              m.tools,
+		hub:                m.hub,
+		logger:             m.logger,
+		constitution:       m.constitution,
+		sessionType:        sub.sessionType,
+		parentSessionID:    sub.parentSessionID,
+		spawnedFromEventID: sub.spawnedFromEventID,
+		mission:            sub.mission,
+		forkAfterSeq:       sub.forkAfterSeq,
+	})
+}
+
+// subAgentLinkage carries the spec-006 sub-agent / fork linkage fields
+// extracted from CreateRequest.State (or rehydrated from a Record on
+// startup). See linkageFromState for the State-key contract.
+type subAgentLinkage struct {
+	sessionType        string
+	parentSessionID    string
+	spawnedFromEventID string
+	mission            string
+	forkAfterSeq       *int
+}
+
+// CreateRequest.State keys recognised by Manager.Create. Empty values
+// fall through to the default "root" session shape.
+const (
+	stateKeyParentSessionID    = "__parent_session_id__"
+	stateKeyMission            = "__mission__"
+	stateKeyForkAfterSeq       = "__fork_after_seq__"
+	stateKeySessionType        = "__session_type__"
+	stateKeySpawnedFromEventID = "__spawned_from_event_id__"
+)
+
+// linkageFromState reads the five well-known CreateRequest.State keys
+// and returns a subAgentLinkage. Unknown / missing keys → zero values
+// (i.e. root session). Type coercion is loose so tests can pass plain
+// Go types and JSON-decoded callers can pass the same map unmodified.
+func linkageFromState(state map[string]any) subAgentLinkage {
+	if len(state) == 0 {
+		return subAgentLinkage{}
+	}
+	out := subAgentLinkage{}
+	if v, ok := state[stateKeySessionType].(string); ok {
+		out.sessionType = v
+	}
+	if v, ok := state[stateKeyParentSessionID].(string); ok {
+		out.parentSessionID = v
+	}
+	if v, ok := state[stateKeySpawnedFromEventID].(string); ok {
+		out.spawnedFromEventID = v
+	}
+	if v, ok := state[stateKeyMission].(string); ok {
+		out.mission = v
+	}
+	switch v := state[stateKeyForkAfterSeq].(type) {
+	case nil:
+		// leave nil
+	case int:
+		out.forkAfterSeq = &v
+	case int64:
+		x := int(v)
+		out.forkAfterSeq = &x
+	case float64:
+		x := int(v)
+		out.forkAfterSeq = &x
+	case *int:
+		out.forkAfterSeq = v
+	}
+	return out
 }

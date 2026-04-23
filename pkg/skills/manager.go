@@ -27,6 +27,14 @@ type Manager interface {
 	// AutoloadNames returns every skill whose frontmatter sets
 	// autoload: true. Called by SessionManager on session Create.
 	AutoloadNames(ctx context.Context) ([]string, error)
+
+	// AutoloadNamesFor returns the autoload skills applicable to the
+	// given session type (spec 006): a skill applies when its
+	// frontmatter's `autoload_for` list includes sessionType. When a
+	// skill omits autoload_for the parser defaults to ["root"], so the
+	// pre-006 behaviour ("autoload skills land on root sessions only")
+	// is preserved automatically.
+	AutoloadNamesFor(ctx context.Context, sessionType string) ([]string, error)
 }
 
 // Cacheable is the optional interface satisfied by implementations that
