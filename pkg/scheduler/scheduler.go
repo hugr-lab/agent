@@ -157,24 +157,26 @@ func (s *Scheduler) runTask(ctx context.Context, e *entry) {
 	defer s.wg.Done()
 	for {
 		wait := s.waitDuration(e)
-		var timer <-chan time.Time
+		var timer *time.Timer
+		var timerC <-chan time.Time
 		if wait > 0 {
-			t := time.NewTimer(wait)
-			timer = t.C
-			defer func() {
-				if !t.Stop() {
-					select {
-					case <-t.C:
-					default:
-					}
-				}
-			}()
+			timer = time.NewTimer(wait)
+			timerC = timer.C
 		}
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return
-		case <-timer:
+		case <-timerC:
 		case <-e.wake:
+			if timer != nil && !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		}
 		if ctx.Err() != nil {
 			return
@@ -190,7 +192,10 @@ func (s *Scheduler) runTask(ctx context.Context, e *entry) {
 // cron tasks it's time until the next minute match.
 func (s *Scheduler) waitDuration(e *entry) time.Duration {
 	if e.cron != nil {
-		next := nextCronMatch(e.cron, time.Now())
+		next := e.cron.Next(time.Now())
+		if next.IsZero() {
+			return 24 * time.Hour // pathological schedule fallback
+		}
 		d := time.Until(next)
 		if d < 0 {
 			return 0
@@ -198,19 +203,4 @@ func (s *Scheduler) waitDuration(e *entry) time.Duration {
 		return d
 	}
 	return e.interval
-}
-
-// nextCronMatch walks forward from `from` one minute at a time until
-// the schedule matches. Minute granularity — adequate for the only
-// cron we care about (daily consolidation). Caps search at 25h so a
-// degenerate schedule never loops forever.
-func nextCronMatch(c *Schedule, from time.Time) time.Time {
-	t := from.Truncate(time.Minute).Add(time.Minute)
-	for range 25 * 60 {
-		if c.matches(t) {
-			return t
-		}
-		t = t.Add(time.Minute)
-	}
-	return from.Add(24 * time.Hour) // fallback; should not hit
 }
