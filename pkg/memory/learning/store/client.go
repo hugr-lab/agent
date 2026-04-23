@@ -1,6 +1,6 @@
-// Package learning exposes agent-scoped hub.db hypotheses +
+// Package store exposes agent-scoped hub.db hypotheses +
 // session_reviews operations through a typed Client. Memory-audit log
-// (memory_log) lives in pkg/store/memory even though the reviewer
+// (memory_log) lives in pkg/memory/store even though the reviewer
 // drives writes into it.
 package store
 

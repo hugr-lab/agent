@@ -34,8 +34,9 @@ type Runtime struct {
 
 	// ExtraBeforeCallbacks are appended to the BeforeModelCallbacks
 	// chain after tools.Inject. Order matters: the runtime ships with
-	// [tools.Inject, chatcontext.Compactor.Before], ensuring the compactor
-	// operates on a tools-aware request and runs last before the model.
+	// [tools.Inject, chatcontext.Compactor.Callback()], ensuring the
+	// compactor operates on a tools-aware request and runs last before
+	// the model.
 	ExtraBeforeCallbacks []llmagent.BeforeModelCallback
 
 	// InstructionProvider overrides the default `Session.Snapshot().Prompt`

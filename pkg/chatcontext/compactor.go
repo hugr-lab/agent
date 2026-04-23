@@ -119,9 +119,10 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 	}, nil
 }
 
-// Before is the ADK BeforeModelCallback. Returns (nil, nil) in the
-// steady state so the chain continues to the next callback.
-func (c *Compactor) Before(ctx adkagent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+// before is the ADK BeforeModelCallback. Returns (nil, nil) in the
+// steady state so the chain continues to the next callback. Exposed
+// to callers via Callback().
+func (c *Compactor) before(ctx adkagent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 	if req == nil || len(req.Contents) == 0 {
 		return nil, nil
 	}
@@ -300,7 +301,7 @@ func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
 // Callback returns the compactor as a llmagent.BeforeModelCallback
 // function value for direct use in llmagent.Config.
 func (c *Compactor) Callback() llmagent.BeforeModelCallback {
-	return c.Before
+	return c.before
 }
 
 // mergedHints returns the merged compaction hints (preserve / discard)

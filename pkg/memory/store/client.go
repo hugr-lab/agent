@@ -1,4 +1,4 @@
-// Package memory exposes agent-scoped hub.db memory operations
+// Package store exposes agent-scoped hub.db memory operations
 // (memory_items + memory_tags + memory_links + memory_log) through a
 // typed Client. Constructed by the caller with a types.Querier —
 // which can be an embedded *hugr.Service (local mode) or a remote
