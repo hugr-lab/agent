@@ -26,7 +26,6 @@ import (
 	"os"
 	"path"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -401,13 +400,6 @@ func collectMigrations(from, to string) ([]migrationScript, error) {
 			return c
 		}
 		return strings.Compare(a.filename, b.filename)
-	})
-	// Stable secondary sort by filename alphanumeric — SortFunc already stable.
-	sort.SliceStable(scripts, func(i, j int) bool {
-		if c := compareVersions(scripts[i].version, scripts[j].version); c != 0 {
-			return c < 0
-		}
-		return scripts[i].filename < scripts[j].filename
 	})
 	return scripts, nil
 }
