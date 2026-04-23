@@ -164,7 +164,7 @@ func buildAuthForBootstrap(ctx context.Context, boot *config.BootstrapConfig, mu
 	if err != nil {
 		return nil, nil, fmt.Errorf("hugr source: %w", err)
 	}
-	if err := reg.Add(hugrSrc); err != nil {
+	if err := reg.AddPrimary(hugrSrc); err != nil {
 		return nil, nil, err
 	}
 	if oidc, ok := hugrSrc.(*auth.OIDCStore); ok {

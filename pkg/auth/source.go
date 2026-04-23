@@ -66,6 +66,7 @@ type SourceRegistry struct {
 	mu           sync.RWMutex
 	byName       map[string]Source
 	aliases      map[string]string // alias -> target source name
+	primary      string            // name of the primary Source (set via AddPrimary)
 	promptLogins []func()
 }
 
@@ -84,6 +85,18 @@ func NewSourceRegistry(logger *slog.Logger) *SourceRegistry {
 // Add registers a Source under its Name. Returns an error on
 // duplicate name or alias collision.
 func (r *SourceRegistry) Add(s Source) error {
+	return r.add(s, false)
+}
+
+// AddPrimary is Add + marks the Source as the primary (hugr-side)
+// Source. BuildSources uses the primary when resolving alias
+// entries (`type: hugr`) without depending on a hardcoded name.
+// Only one Source can be primary — a second call returns an error.
+func (r *SourceRegistry) AddPrimary(s Source) error {
+	return r.add(s, true)
+}
+
+func (r *SourceRegistry) add(s Source, primary bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -97,8 +110,22 @@ func (r *SourceRegistry) Add(s Source) error {
 	if _, dup := r.aliases[name]; dup {
 		return fmt.Errorf("auth: name %q collides with an existing alias", name)
 	}
+	if primary {
+		if r.primary != "" {
+			return fmt.Errorf("auth: primary Source already registered (%q)", r.primary)
+		}
+		r.primary = name
+	}
 	r.byName[name] = s
 	return nil
+}
+
+// Primary returns the name of the primary Source, or "" when none
+// has been registered via AddPrimary.
+func (r *SourceRegistry) Primary() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.primary
 }
 
 // Alias registers `name` as a pointer to an existing Source. Used

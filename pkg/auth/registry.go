@@ -4,20 +4,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 )
 
-// AuthSpec is the transport-agnostic input to BuildStores /
+// AuthSpec is the transport-agnostic input to BuildHugrSource /
 // BuildSources: one entry per named auth config in config.yaml.
 // Callers translate their own config type (e.g.
 // internal/config.AuthConfig) into this shape so pkg/auth stays
 // free of project-specific imports.
 type AuthSpec struct {
-	Name         string
-	Type         string // hugr | oidc
-	Issuer       string
-	ClientID     string
+	Name     string
+	Type     string // hugr | oidc
+	Issuer   string
+	ClientID string
+	// Deprecated: ignored. The SourceRegistry mounts a single shared
+	// /auth/callback on mux; every Source is dispatched by OAuth
+	// state prefix. Kept on the struct to keep YAML that still
+	// carries callback_path: from breaking the decode.
 	CallbackPath string
 	BaseURL      string // e.g. http://localhost:10000 — used to build RedirectURL when OIDC path taken
 	AccessToken  string
@@ -29,16 +32,6 @@ type AuthSpec struct {
 	// access_token/token_url is set: discovery calls
 	// {DiscoverURL}/auth/config to fetch issuer + client_id.
 	DiscoverURL string
-}
-
-// Stores is the legacy result of BuildStores — a name→TokenStore map
-// plus any post-listener hooks (OIDC PromptLogin) to invoke after
-// the HTTP listener is bound.
-//
-// New callers should prefer SourceRegistry.
-type Stores struct {
-	Tokens      map[string]TokenStore
-	PromptLogin []func()
 }
 
 // BuildHugrSource builds the single Source needed for the hugr
@@ -106,12 +99,13 @@ func BuildSources(ctx context.Context, specs []AuthSpec, reg *SourceRegistry, lo
 		}
 		switch strings.ToLower(s.Type) {
 		case "hugr":
-			// type=hugr in provider-auth means "reuse the main hugr
-			// Source" — create an alias instead of a standalone Source.
-			// Target must already be registered.
-			target := primaryHugrName(reg)
+			// type=hugr in provider-auth means "reuse the primary
+			// Source" — create an alias instead of a standalone
+			// instance. Target must already be registered via
+			// AddPrimary.
+			target := reg.Primary()
 			if target == "" {
-				return fmt.Errorf("auth %q: type=hugr but no hugr Source registered", s.Name)
+				return fmt.Errorf("auth %q: type=hugr but no primary Source registered", s.Name)
 			}
 			if s.Name == target {
 				// Trivial self-reference (already registered).
@@ -144,63 +138,6 @@ func BuildSources(ctx context.Context, specs []AuthSpec, reg *SourceRegistry, lo
 	return nil
 }
 
-// BuildStores is the back-compat entry point: builds Sources for
-// every spec, mounts dispatch routes on the mux, and returns the
-// legacy Stores shape.
-func BuildStores(ctx context.Context, specs []AuthSpec, mux *http.ServeMux, logger *slog.Logger) (*Stores, error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	reg := NewSourceRegistry(logger)
-
-	// Seed the registry with every spec. For the hugr type we build
-	// a full Source (not just an alias) so BuildStores keeps its
-	// original, self-contained semantics.
-	seenPaths := map[string]string{}
-	for _, s := range specs {
-		if owner, dup := seenPaths[effectiveCallbackPath(s)]; dup {
-			return nil, fmt.Errorf("auth: callback path %q conflicts between %q and %q", effectiveCallbackPath(s), owner, s.Name)
-		}
-		seenPaths[effectiveCallbackPath(s)] = s.Name
-
-		switch strings.ToLower(s.Type) {
-		case "hugr":
-			src, err := BuildHugrSource(ctx, s, logger)
-			if err != nil {
-				return nil, err
-			}
-			if err := reg.Add(src); err != nil {
-				return nil, err
-			}
-			if oidc, ok := src.(*OIDCStore); ok {
-				reg.RegisterPromptLogin(oidc.PromptLogin)
-			}
-		case "oidc":
-			if s.Issuer == "" || s.ClientID == "" {
-				return nil, fmt.Errorf("auth %q: type=oidc needs issuer + client_id", s.Name)
-			}
-			src, err := newOIDCSourceForSpec(ctx, s, s.Issuer, s.ClientID, logger, "oidc")
-			if err != nil {
-				return nil, err
-			}
-			if err := reg.Add(src); err != nil {
-				return nil, err
-			}
-			if oidc, ok := src.(*OIDCStore); ok {
-				reg.RegisterPromptLogin(oidc.PromptLogin)
-			}
-		default:
-			return nil, fmt.Errorf("auth %q: unsupported type %q (want hugr|oidc)", s.Name, s.Type)
-		}
-	}
-	reg.Mount(mux)
-
-	return &Stores{
-		Tokens:      reg.TokenStores(),
-		PromptLogin: reg.PromptLogins(),
-	}, nil
-}
-
 // newOIDCSourceForSpec builds an OIDCStore for a given AuthSpec
 // using the provided issuer + clientID (possibly resolved through
 // hugr discovery). Centralises the RedirectURL derivation.
@@ -224,35 +161,3 @@ func newOIDCSourceForSpec(ctx context.Context, s AuthSpec, issuer, clientID stri
 	return store, nil
 }
 
-// effectiveCallbackPath is used only by BuildStores (back-compat)
-// to preserve the original "duplicate callback_path" error. In the
-// new Source model there is a single /auth/callback shared across
-// every Source, so no per-spec path collisions are possible.
-func effectiveCallbackPath(s AuthSpec) string {
-	if s.CallbackPath != "" {
-		return s.CallbackPath
-	}
-	return "/auth/callback"
-}
-
-// primaryHugrName returns the name of the first registered Source
-// whose Name looks like a hugr source. The simplest convention is
-// "the only Source that exists when BuildSources runs" — Phase A
-// adds exactly one hugr Source before BuildSources fires. For
-// future-proofing we fall back to the Source named "hugr" if
-// present. Returns "" when nothing found.
-func primaryHugrName(reg *SourceRegistry) string {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-	// Preferred: a source literally named "hugr".
-	if _, ok := reg.byName["hugr"]; ok {
-		return "hugr"
-	}
-	// Fallback: a sole source wins.
-	if len(reg.byName) == 1 {
-		for name := range reg.byName {
-			return name
-		}
-	}
-	return ""
-}

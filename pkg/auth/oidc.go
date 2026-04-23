@@ -16,7 +16,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
+
+// inFlightTTL bounds how long a /auth/login state is remembered
+// waiting for the matching /auth/callback. Keeps the map from
+// growing unbounded when users start a login and never return.
+const inFlightTTL = 10 * time.Minute
+
+// inFlightCapacity caps the map size independently of TTL. A single
+// operator opening logins in a loop can't balloon memory; LRU
+// evicts oldest entries past the cap.
+const inFlightCapacity = 64
 
 // OIDCConfig configures the OIDC browser flow.
 type OIDCConfig struct {
@@ -44,10 +56,10 @@ type OIDCStore struct {
 
 	// Per-in-flight-login state. The dispatcher resolves the Source
 	// by state prefix; HandleCallback looks up the verifier by the
-	// state's nonce suffix. Map gets pruned on use.
-	loginMu   sync.Mutex
-	inFlight  map[string]string // state -> codeVerifier
-	lastLogin string            // most recently issued state (for PromptLogin URL)
+	// state's nonce suffix. Expirable LRU auto-evicts stale entries
+	// (user started a login + never returned) so the map can't grow
+	// unbounded.
+	inFlight *expirable.LRU[string, string] // state -> codeVerifier
 
 	tokenMu      sync.Mutex
 	accessToken  string
@@ -94,7 +106,7 @@ func NewOIDCStore(ctx context.Context, cfg OIDCConfig) (*OIDCStore, error) {
 		logger:   cfg.Logger,
 		authURL:  disc.AuthorizationEndpoint,
 		tokenURL: disc.TokenEndpoint,
-		inFlight: make(map[string]string),
+		inFlight: expirable.NewLRU[string, string](inFlightCapacity, nil, inFlightTTL),
 		ready:    make(chan struct{}),
 	}, nil
 }
@@ -152,10 +164,7 @@ func (s *OIDCStore) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	state := EncodeState(s.cfg.Name, nonce)
 	codeVerifier := generateCodeVerifier()
 
-	s.loginMu.Lock()
-	s.inFlight[state] = codeVerifier
-	s.lastLogin = state
-	s.loginMu.Unlock()
+	s.inFlight.Add(state, codeVerifier)
 
 	challenge := computeCodeChallenge(codeVerifier)
 	params := url.Values{
@@ -186,12 +195,10 @@ func (s *OIDCStore) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.loginMu.Lock()
-	codeVerifier, ok := s.inFlight[state]
+	codeVerifier, ok := s.inFlight.Peek(state)
 	if ok {
-		delete(s.inFlight, state)
+		s.inFlight.Remove(state)
 	}
-	s.loginMu.Unlock()
 
 	if !ok {
 		http.Error(w, "unknown state", http.StatusBadRequest)

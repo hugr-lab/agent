@@ -32,7 +32,7 @@ type TokenResponse struct {
 // It reads the access token from the configured TokenStore, gated to
 // loopback callers only (RemoteAddr 127.0.0.1 / ::1).
 //
-// auths is the map returned by auth.BuildStores — keyed by the auth
+// auths is auth.SourceRegistry.TokenStores() — keyed by the auth
 // name the operator wrote in config.yaml.
 func TokenHandler(auths map[string]auth.TokenStore) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
