@@ -27,6 +27,12 @@ type ServiceOptions struct {
 	AgentID    string
 	AgentShort string
 	Logger     *slog.Logger
+
+	// Memory / Sessions are optional pre-built clients. When set, the
+	// service skips the per-subsystem New() call. Preferred wiring
+	// from runtime.go so every consumer shares the same instance.
+	Memory   *memstore.Client
+	Sessions *sessstore.Client
 }
 
 // Service is the tools.Provider that exposes context-window tools
@@ -44,22 +50,26 @@ type Service struct {
 // then returns just prompt/tool counts without hub-level stats. The
 // service builds its own memstore + sessstore clients internally.
 func NewService(querier types.Querier, sm *sessions.Manager, opts ServiceOptions) (*Service, error) {
-	s := &Service{sm: sm}
+	s := &Service{sm: sm, memory: opts.Memory, sessions: opts.Sessions}
 	if querier != nil {
-		memC, err := memstore.New(querier, memstore.Options{
-			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("chatcontext: build memory store: %w", err)
+		if s.memory == nil {
+			memC, err := memstore.New(querier, memstore.Options{
+				AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("chatcontext: build memory store: %w", err)
+			}
+			s.memory = memC
 		}
-		sessC, err := sessstore.New(querier, sessstore.Options{
-			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("chatcontext: build sessions store: %w", err)
+		if s.sessions == nil {
+			sessC, err := sessstore.New(querier, sessstore.Options{
+				AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("chatcontext: build sessions store: %w", err)
+			}
+			s.sessions = sessC
 		}
-		s.memory = memC
-		s.sessions = sessC
 	}
 	s.tools = []tool.Tool{
 		&contextStatusTool{sm: sm},

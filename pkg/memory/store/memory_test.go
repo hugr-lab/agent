@@ -13,7 +13,7 @@ import (
 
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
 	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
-	"github.com/hugr-lab/hugen/pkg/store/testenv"
+	"github.com/hugr-lab/hugen/internal/testenv"
 )
 
 type discardWriter struct{}

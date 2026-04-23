@@ -24,11 +24,16 @@ const injectorTTL = 10 * time.Second
 type InstructionProvider = llmagent.InstructionProvider
 
 // InjectorOptions bundles the injector's non-store runtime deps. The
-// injector builds its own memstore + sessstore clients internally.
+// injector builds its own memstore + sessstore clients internally
+// when Memory / Sessions are nil; otherwise it reuses the provided
+// ones.
 type InjectorOptions struct {
 	AgentID    string
 	AgentShort string
 	Logger     *slog.Logger
+
+	Memory   *memstore.Client
+	Sessions *sessstore.Client
 }
 
 // WrapInstruction returns a new InstructionProvider that appends a
@@ -45,20 +50,27 @@ type InjectorOptions struct {
 // degrades to the base provider — the memory-status block is simply
 // omitted.
 func WrapInstruction(base InstructionProvider, querier types.Querier, opts InjectorOptions) InstructionProvider {
-	if querier == nil {
-		return base
+	memory := opts.Memory
+	sessionsC := opts.Sessions
+	if memory == nil {
+		if querier == nil {
+			return base
+		}
+		c, err := memstore.New(querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return base
+		}
+		memory = c
 	}
-	memory, err := memstore.New(querier, memstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return base
-	}
-	sessionsC, err := sessstore.New(querier, sessstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		sessionsC = nil
+	if sessionsC == nil && querier != nil {
+		c, err := sessstore.New(querier, sessstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err == nil {
+			sessionsC = c
+		}
 	}
 	cache := &injectorCache{entries: map[string]injectorEntry{}}
 	return func(ctx agent.ReadonlyContext) (string, error) {

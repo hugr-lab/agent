@@ -27,12 +27,19 @@ type Config struct {
 	Tools *tools.Manager
 
 	// Querier is used by the Manager to build its own sessstore client
-	// internally. May be nil for tests that drive Session construction
-	// manually — in that case no hub persistence happens.
+	// internally when Sessions is nil. May be nil for tests that drive
+	// Session construction manually — in that case no hub persistence
+	// happens.
 	Querier types.Querier
 
+	// Sessions is a pre-built session-store client. Takes precedence
+	// over Querier when both are set. Preferred wiring from runtime so
+	// every subsystem shares the same underlying client.
+	Sessions *sessstore.Client
+
 	// AgentID / AgentShort are forwarded to the internal sessstore
-	// client. AgentID is required when Querier is set.
+	// client when the Manager builds it from Querier. Ignored when
+	// Sessions is provided.
 	AgentID    string
 	AgentShort string
 
@@ -116,8 +123,8 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	var hub *sessstore.Client
-	if cfg.Querier != nil {
+	hub := cfg.Sessions
+	if hub == nil && cfg.Querier != nil {
 		c, err := sessstore.New(cfg.Querier, sessstore.Options{
 			AgentID: cfg.AgentID, AgentShort: cfg.AgentShort, Logger: cfg.Logger,
 		})

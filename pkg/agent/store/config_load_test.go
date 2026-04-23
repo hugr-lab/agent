@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
-	"github.com/hugr-lab/hugen/pkg/store/testenv"
+	"github.com/hugr-lab/hugen/internal/testenv"
 )
 
 // TestLoadConfigFromHub_SeededAgent uses the testenv defaults: the

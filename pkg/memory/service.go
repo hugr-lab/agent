@@ -24,10 +24,17 @@ const ServiceName = "_memory"
 // ServiceOptions bundles service construction parameters. AgentID and
 // AgentShort are forwarded to the internal store clients. Logger may be
 // nil.
+//
+// Memory / Sessions fields let the runtime inject pre-built store
+// clients. When unset, NewService falls back to constructing them
+// from the querier parameter.
 type ServiceOptions struct {
 	AgentID    string
 	AgentShort string
 	Logger     *slog.Logger
+
+	Memory   *memstore.Client
+	Sessions *sessstore.Client
 }
 
 // Service is the tools.Provider that exposes long-term memory tools
@@ -49,20 +56,28 @@ type Service struct {
 // querier. Embeddings are injected (they're a models-domain dependency).
 func NewService(querier types.Querier, sm *sessions.Manager, embeddings *embedding.Client, opts ServiceOptions) (*Service, error) {
 	s := &Service{sm: sm, embeddings: embeddings}
-	if querier == nil {
+	memC := opts.Memory
+	sessC := opts.Sessions
+	if memC == nil && querier != nil {
+		c, err := memstore.New(querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("memory: build memory store: %w", err)
+		}
+		memC = c
+	}
+	if sessC == nil && querier != nil {
+		c, err := sessstore.New(querier, sessstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("memory: build sessions store: %w", err)
+		}
+		sessC = c
+	}
+	if memC == nil || sessC == nil {
 		return s, nil
-	}
-	memC, err := memstore.New(querier, memstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("memory: build memory store: %w", err)
-	}
-	sessC, err := sessstore.New(querier, sessstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("memory: build sessions store: %w", err)
 	}
 	s.memory = memC
 	s.sessions = sessC

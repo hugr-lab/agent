@@ -30,6 +30,11 @@ type ConsolidatorOptions struct {
 	AgentShort       string
 	HypothesisExpiry time.Duration
 	Logger           *slog.Logger
+
+	// Memory / Learning are optional pre-built clients. When set,
+	// NewConsolidator skips its internal New() calls.
+	Memory   *memstore.Client
+	Learning *learnstore.Client
 }
 
 // NewConsolidator builds a Consolidator. HypothesisExpiry defaults to
@@ -44,17 +49,25 @@ func NewConsolidator(opts ConsolidatorOptions) (*Consolidator, error) {
 	if opts.HypothesisExpiry <= 0 {
 		opts.HypothesisExpiry = 30 * 24 * time.Hour
 	}
-	memC, err := memstore.New(opts.Querier, memstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	memC := opts.Memory
+	if memC == nil {
+		c, err := memstore.New(opts.Querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build memory store: %w", err)
+		}
+		memC = c
 	}
-	learnC, err := learnstore.New(opts.Querier, learnstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build learning store: %w", err)
+	learnC := opts.Learning
+	if learnC == nil {
+		c, err := learnstore.New(opts.Querier, learnstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build learning store: %w", err)
+		}
+		learnC = c
 	}
 	return &Consolidator{
 		memory:           memC,

@@ -14,7 +14,7 @@ import (
 	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
-	"github.com/hugr-lab/hugen/pkg/store/testenv"
+	"github.com/hugr-lab/hugen/internal/testenv"
 	"github.com/hugr-lab/hugen/pkg/tools"
 )
 

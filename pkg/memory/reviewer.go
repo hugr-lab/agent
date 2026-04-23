@@ -108,6 +108,12 @@ type ReviewerOptions struct {
 	DefaultOverlapTokens int
 	DefaultFloorAge      time.Duration
 	DefaultExcludeTypes  []string
+
+	// Memory / Learning / Sessions are optional pre-built clients.
+	// When set, the reviewer skips its internal New() calls.
+	Memory   *memstore.Client
+	Learning *learnstore.Client
+	Sessions *sessstore.Client
 }
 
 // NewReviewer builds a Reviewer. Router is optional — if nil the
@@ -120,22 +126,35 @@ func NewReviewer(opts ReviewerOptions) (*Reviewer, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	storeOpts := memstore.Options{AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger}
-	memC, err := memstore.New(opts.Querier, storeOpts)
-	if err != nil {
-		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	memC := opts.Memory
+	if memC == nil {
+		c, err := memstore.New(opts.Querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build memory store: %w", err)
+		}
+		memC = c
 	}
-	learnC, err := learnstore.New(opts.Querier, learnstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build learning store: %w", err)
+	learnC := opts.Learning
+	if learnC == nil {
+		c, err := learnstore.New(opts.Querier, learnstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build learning store: %w", err)
+		}
+		learnC = c
 	}
-	sessC, err := sessstore.New(opts.Querier, sessstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build sessions store: %w", err)
+	sessC := opts.Sessions
+	if sessC == nil {
+		c, err := sessstore.New(opts.Querier, sessstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build sessions store: %w", err)
+		}
+		sessC = c
 	}
 
 	winTok := opts.DefaultWindowTokens

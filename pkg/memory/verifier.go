@@ -44,6 +44,11 @@ type VerifierOptions struct {
 	Router     *models.Router
 	Logger     *slog.Logger
 	Volatility map[string]time.Duration
+
+	// Memory / Learning are optional pre-built clients. When set,
+	// NewVerifier skips its internal New() calls.
+	Memory   *memstore.Client
+	Learning *learnstore.Client
 }
 
 // NewVerifier builds a Verifier.
@@ -57,17 +62,25 @@ func NewVerifier(opts VerifierOptions) (*Verifier, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	memC, err := memstore.New(opts.Querier, memstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	memC := opts.Memory
+	if memC == nil {
+		c, err := memstore.New(opts.Querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build memory store: %w", err)
+		}
+		memC = c
 	}
-	learnC, err := learnstore.New(opts.Querier, learnstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build learning store: %w", err)
+	learnC := opts.Learning
+	if learnC == nil {
+		c, err := learnstore.New(opts.Querier, learnstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build learning store: %w", err)
+		}
+		learnC = c
 	}
 	return &Verifier{
 		memory:     memC,

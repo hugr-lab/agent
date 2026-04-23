@@ -55,22 +55,31 @@ type Classifier struct {
 // querier yields a no-op classifier (Run() drains the channel without
 // hub writes) — useful for tests.
 func NewClassifier(querier types.Querier, agentID, agentShort string, logger *slog.Logger, bufSize int) *Classifier {
+	if querier == nil {
+		return NewClassifierWithHub(nil, logger, bufSize)
+	}
+	hub, err := sessstore.New(querier, sessstore.Options{
+		AgentID: agentID, AgentShort: agentShort, Logger: logger,
+	})
+	if err != nil {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("classifier: build sessions store failed, running without hub persistence", "err", err)
+		return NewClassifierWithHub(nil, logger, bufSize)
+	}
+	return NewClassifierWithHub(hub, logger, bufSize)
+}
+
+// NewClassifierWithHub builds a Classifier on top of an already-
+// constructed sessions-store client. Preferred wiring from runtime.go
+// so every subsystem shares the same *sessstore.Client instance.
+func NewClassifierWithHub(hub *sessstore.Client, logger *slog.Logger, bufSize int) *Classifier {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if bufSize <= 0 {
 		bufSize = DefaultClassifierBuffer
-	}
-	var hub *sessstore.Client
-	if querier != nil {
-		c, err := sessstore.New(querier, sessstore.Options{
-			AgentID: agentID, AgentShort: agentShort, Logger: logger,
-		})
-		if err == nil {
-			hub = c
-		} else {
-			logger.Warn("classifier: build sessions store failed, running without hub persistence", "err", err)
-		}
 	}
 	return &Classifier{
 		hub:     hub,

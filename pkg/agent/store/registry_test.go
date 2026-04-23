@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
-	"github.com/hugr-lab/hugen/pkg/store/testenv"
+	"github.com/hugr-lab/hugen/internal/testenv"
 )
 
 func newClient(t *testing.T, agentID, shortID string) *agentstore.Client {

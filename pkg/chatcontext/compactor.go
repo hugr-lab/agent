@@ -54,6 +54,12 @@ type CompactorOptions struct {
 	MinTurns   int     // minimum turn groups retained after compaction; default 4
 	Logger     *slog.Logger
 
+	// Memory / Sessions are optional pre-built clients. When set, the
+	// compactor skips its internal New() calls. Preferred wiring from
+	// runtime.go so every consumer shares the same instance.
+	Memory   *memstore.Client
+	Sessions *sessstore.Client
+
 	// LoadSkillMemory returns the per-skill memory config for a skill
 	// by name. When set, the compactor uses the session's active
 	// skills' compaction hints (preserve / discard). When nil, the
@@ -81,17 +87,25 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 	if opts.MinTurns <= 0 {
 		opts.MinTurns = 4
 	}
-	memC, err := memstore.New(opts.Querier, memstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build memory store: %w", err)
+	memC := opts.Memory
+	if memC == nil {
+		c, err := memstore.New(opts.Querier, memstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build memory store: %w", err)
+		}
+		memC = c
 	}
-	sessC, err := sessstore.New(opts.Querier, sessstore.Options{
-		AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("learning: build sessions store: %w", err)
+	sessC := opts.Sessions
+	if sessC == nil {
+		c, err := sessstore.New(opts.Querier, sessstore.Options{
+			AgentID: opts.AgentID, AgentShort: opts.AgentShort, Logger: opts.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("learning: build sessions store: %w", err)
+		}
+		sessC = c
 	}
 	return &Compactor{
 		memory:          memC,

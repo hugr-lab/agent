@@ -12,7 +12,7 @@ import (
 
 	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
-	"github.com/hugr-lab/hugen/pkg/store/testenv"
+	"github.com/hugr-lab/hugen/internal/testenv"
 )
 
 type discardWriter struct{}
