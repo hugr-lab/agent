@@ -1,13 +1,19 @@
-// Package auth provides token management for the hugr-agent.
+// Package auth owns token management + OAuth flow dispatch for the
+// hugr-agent.
 //
-// TokenStore is the central interface — it returns a valid Bearer access token
-// for authenticating with Hugr. Implementations handle token refresh
-// transparently.
+// Types in two layers:
+//   - Source (see source.go) is the full stateful token provider:
+//     Token() for bearer issuance, Login() + HandleCallback() for
+//     browser-based OAuth, OwnsState() so the shared /auth/callback
+//     dispatcher can route back to the right Source.
+//   - TokenStore (this file) is the thin slice every caller that
+//     just needs a bearer reaches through: auth.Transport(store,
+//     base) wraps an http.RoundTripper with Authorization: Bearer …
 //
-// Selection logic:
-//
-//	HUGR_ACCESS_TOKEN + HUGR_TOKEN_URL → RemoteStore
-//	otherwise                          → OIDCStore (device flow via {HUGR_URL}/auth/config)
+// Concrete Sources shipped today: RemoteStore (pre-seeded token +
+// external refresh URL), OIDCStore (PKCE + /.well-known discovery),
+// MCPSource (skeleton for per-MCP OAuth). Selection of the hugr
+// Source at boot lives in cmd/agent — see auth.BuildHugrSource.
 package auth
 
 import "context"

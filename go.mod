@@ -6,11 +6,12 @@ require (
 	github.com/a2aproject/a2a-go v0.3.13
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/duckdb/duckdb-go/v2 v2.10501.0
-	github.com/fsnotify/fsnotify v1.9.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
-	github.com/hugr-lab/query-engine v0.3.29
-	github.com/hugr-lab/query-engine/client v0.3.29
-	github.com/hugr-lab/query-engine/types v0.3.29
+	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/hugr-lab/query-engine v0.3.32
+	github.com/hugr-lab/query-engine/client v0.3.32
+	github.com/hugr-lab/query-engine/types v0.3.32
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/spf13/viper v1.21.0
@@ -49,6 +50,7 @@ require (
 	github.com/eko/gocache/store/redis/v4 v4.2.6 // indirect
 	github.com/eko/gocache/store/rediscluster/v4 v4.2.3 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/getkin/kin-openapi v0.134.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -62,12 +64,10 @@ require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/safehtml v0.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.7 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hugr-lab/airport-go v0.2.1 // indirect
 	github.com/itchyny/gojq v0.12.19 // indirect
 	github.com/itchyny/timefmt-go v0.1.8 // indirect

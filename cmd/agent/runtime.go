@@ -6,45 +6,86 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
-	"github.com/hugr-lab/hugen/adapters/file"
-	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/internal/config"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/pkg/auth"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/models/hugr"
-	"github.com/hugr-lab/hugen/pkg/providers"
-	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/chatcontext"
+	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/identity"
+	"github.com/hugr-lab/hugen/pkg/memory"
+	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
+	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/models/embedding"
+	"github.com/hugr-lab/hugen/pkg/scheduler"
+	"github.com/hugr-lab/hugen/pkg/sessions"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
+	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/hugr-lab/hugen/pkg/tools"
 	qe "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
 	qetypes "github.com/hugr-lab/query-engine/types"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/agent/llmagent"
 )
 
 // agentRuntime bundles all long-lived resources built at startup.
-// Shutdown closes them in the correct order:
-// server → HubDB → engine → hugrClient.
+// Shutdown cancels background contexts and closes the engine/client.
 type agentRuntime struct {
 	agent      agent.Agent
 	hugrClient *client.Client
 	engine     *qe.Service // nil in hub mode
-	hubDB      interfaces.HubDB
-	sessions   interfaces.SessionManager
-	tools      *tools.Manager
-	skills     skills.Manager
+
+	sessions *sessions.Manager
+	tools    *tools.Manager
+	skills   skills.Manager
+
+	classifier *sessions.Classifier
+	scheduler  *scheduler.Scheduler
+	bgCtx      context.Context
+	bgCancel   context.CancelFunc
 }
 
 func (r *agentRuntime) close(logger *slog.Logger) {
-	if r.hubDB != nil {
-		if err := r.hubDB.Close(); err != nil {
-			logger.Error("shutting down: hubDB close", "err", err)
-		}
+	// Signal every background worker to stop.
+	if r.bgCancel != nil {
+		r.bgCancel()
 	}
+
+	// Scheduler + classifier drain in parallel under a single 5s
+	// budget — serial waits could double the shutdown deadline
+	// even though the two workers are independent.
+	const budget = 5 * time.Second
+	deadline := time.Now().Add(budget)
+	var wg sync.WaitGroup
+	if r.scheduler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case <-r.scheduler.Done():
+			case <-time.After(time.Until(deadline)):
+				logger.Warn("shutting down: scheduler did not stop within budget")
+			}
+		}()
+	}
+	if r.classifier != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			drainCtx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+			defer cancel()
+			if err := r.classifier.Drain(drainCtx, time.Until(deadline)); err != nil {
+				logger.Warn("shutting down: classifier drain", "err", err)
+			}
+		}()
+	}
+	wg.Wait()
+
 	if r.engine != nil {
 		logger.Info("shutting down: closing engine")
 		if err := r.engine.Close(); err != nil {
@@ -57,73 +98,26 @@ func (r *agentRuntime) close(logger *slog.Logger) {
 	}
 }
 
-// buildComponents bundles the non-hub pieces built during startup: the
-// hugr LLM client, router, skills/tools managers, constitution.
-type buildComponents struct {
+// runtimeArtifacts bundles the non-hub pieces built during startup:
+// hugr client, skills/tools managers, constitution, token estimator.
+// The router is built separately because it needs both queriers.
+type runtimeArtifacts struct {
 	hugrClient   *client.Client
-	router       *intent.Router
 	skills       skills.Manager
 	tools        *tools.Manager
 	constitution string
-	tokens       *hugen.TokenEstimator
+	tokens       *models.TokenEstimator
 }
 
-func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger, hugrTransport http.RoundTripper) (*buildComponents, error) {
-	_ = ctx
-	hugrClient := client.NewClient(
-		cfg.Hugr.URL+"/ipc",
-		client.WithTransport(hugrTransport),
-	)
-
+// assembleRuntimeArtifacts loads the constitution, constructs the
+// skills + tools managers, and packages them alongside the incoming
+// hugr client + a token estimator. Called once at the top of
+// buildRuntime; separated to keep the pipeline body short.
+func assembleRuntimeArtifacts(_ context.Context, cfg *config.Config, hugrClient *client.Client, logger *slog.Logger) (*runtimeArtifacts, error) {
 	// Default HUGR_MCP_URL so inline endpoint specs in skills can still
 	// reference ${HUGR_MCP_URL} if they want an anonymous MCP binding.
 	if os.Getenv("HUGR_MCP_URL") == "" {
 		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
-	}
-
-	// Load YAML config (model, max_tokens, routes, skills path).
-	yamlCfg, err := file.NewConfigProvider("config.yaml")
-	if err != nil {
-		logger.Debug("config.yaml not loaded", "err", err)
-	} else {
-		if m := yamlCfg.GetString("llm.model"); m != "" {
-			cfg.Agent.Model = m
-		}
-		if mt := yamlCfg.GetInt("llm.max_tokens"); mt > 0 {
-			cfg.Agent.MaxTokens = mt
-		}
-		if t := yamlCfg.GetFloat64("llm.temperature"); t > 0 {
-			cfg.Agent.Temperature = float32(t)
-		}
-		if sp := yamlCfg.GetString("skills.path"); sp != "" {
-			cfg.Agent.SkillsPath = sp
-		}
-	}
-
-	llmOpts := []hugr.Option{
-		hugr.WithLogger(logger),
-		hugr.WithMaxTokens(cfg.Agent.MaxTokens),
-		hugr.WithToolChoiceFunc(func() string { return "auto" }),
-	}
-	if cfg.Agent.Temperature > 0 {
-		llmOpts = append(llmOpts, hugr.WithTemperature(cfg.Agent.Temperature))
-	}
-	llm := hugr.New(hugrClient, cfg.Agent.Model, llmOpts...)
-
-	router := intent.NewRouter(llm)
-	router.WithFactory(func(modelName string) model.LLM {
-		return hugr.New(hugrClient, modelName,
-			hugr.WithLogger(logger),
-			hugr.WithMaxTokens(cfg.Agent.MaxTokens),
-		)
-	}).WithLogger(logger)
-
-	if yamlCfg != nil {
-		router.LoadRoutesFromConfig(yamlCfg)
-		yamlCfg.OnChange(func() {
-			logger.Info("config.yaml changed, reloading routes")
-			router.LoadRoutesFromConfig(yamlCfg)
-		})
 	}
 
 	constitution, err := os.ReadFile(cfg.Agent.Constitution)
@@ -131,7 +125,7 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 		return nil, fmt.Errorf("read constitution %s: %w", cfg.Agent.Constitution, err)
 	}
 
-	skillsPath := cfg.Agent.SkillsPath
+	skillsPath := cfg.Skills.Path
 	if skillsPath == "" {
 		skillsPath = "./skills"
 	}
@@ -141,66 +135,80 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 	}
 	toolsMgr := tools.New(logger)
 
-	return &buildComponents{
+	return &runtimeArtifacts{
 		hugrClient:   hugrClient,
-		router:       router,
 		skills:       skillsMgr,
 		tools:        toolsMgr,
 		constitution: string(constitution),
-		tokens:       hugen.NewTokenEstimator(),
+		tokens:       models.NewTokenEstimator(),
 	}, nil
 }
 
-// buildAuthStores converts cfg.Auth into auth.Stores, registering each
-// OIDC callback on mux. Returns the stores + the slice of PromptLogin
-// triggers to fire after the HTTP listener is bound.
-func buildAuthStores(ctx context.Context, cfg *config.Config, logger *slog.Logger, mux *http.ServeMux) (*auth.Stores, error) {
-	specs := make([]auth.AuthSpec, 0, len(cfg.Auth))
-	for _, a := range cfg.Auth {
-		specs = append(specs, auth.AuthSpec{
-			Name:         a.Name,
-			Type:         a.Type,
-			Issuer:       a.Issuer,
-			ClientID:     a.ClientID,
-			CallbackPath: a.CallbackPath,
-			LoginPath:    a.LoginPath,
-			BaseURL:      cfg.Agent.BaseURL,
-			AccessToken:  a.AccessToken,
-			TokenURL:     a.TokenURL,
-			DiscoverURL:  cfg.Hugr.URL,
-		})
+// buildAuthForBootstrap is Phase A+B.1: builds the single hugr
+// Source declared by .env, wires it into a fresh SourceRegistry,
+// mounts the shared /auth/callback dispatcher, and returns the
+// RoundTripper the hugr client + engine should use.
+func buildAuthForBootstrap(ctx context.Context, boot *config.BootstrapConfig, mux *http.ServeMux, logger *slog.Logger) (*auth.SourceRegistry, http.RoundTripper, error) {
+	reg := auth.NewSourceRegistry(logger)
+
+	hugrSrc, err := auth.BuildHugrSource(ctx, auth.AuthSpec{
+		Name:        boot.HugrAuth.Name,
+		Type:        boot.HugrAuth.Type,
+		AccessToken: boot.HugrAuth.AccessToken,
+		TokenURL:    boot.HugrAuth.TokenURL,
+		Issuer:      boot.HugrAuth.Issuer,
+		ClientID:    boot.HugrAuth.ClientID,
+		BaseURL:     boot.A2A.BaseURL,
+		DiscoverURL: boot.Hugr.URL,
+	}, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hugr source: %w", err)
 	}
-	return auth.BuildStores(ctx, specs, mux, logger)
+	if err := reg.AddPrimary(hugrSrc); err != nil {
+		return nil, nil, err
+	}
+	if oidc, ok := hugrSrc.(*auth.OIDCStore); ok {
+		reg.RegisterPromptLogin(oidc.PromptLogin)
+	}
+	reg.Mount(mux)
+
+	return reg, auth.Transport(hugrSrc, http.DefaultTransport), nil
 }
 
-// resolveHugrTransport returns the RoundTripper used by the hugr LLM
-// client + engine connection. The auth entry is picked by name from
-// cfg.Hugr.Auth; empty / unknown name yields an unauthenticated
-// transport with a warning.
-func resolveHugrTransport(cfg *config.Config, stores *auth.Stores, logger *slog.Logger) http.RoundTripper {
-	if cfg.Hugr.Auth == "" {
-		logger.Warn("hugr: no auth configured — requests to hugr will be unauthenticated")
-		return http.DefaultTransport
+// loadFullConfig is Phase B.3: chooses between local YAML and
+// remote hub pull based on boot.Remote(). In remote mode it also
+// resolves agent_id via whoami before the GraphQL fetch.
+func loadFullConfig(ctx context.Context, boot *config.BootstrapConfig, hugrClient *client.Client, logger *slog.Logger) (*config.Config, error) {
+	if !boot.Remote() {
+		return config.LoadLocal("config.yaml", boot)
 	}
-	store, ok := stores.Tokens[cfg.Hugr.Auth]
-	if !ok || store == nil {
-		logger.Warn("hugr: auth not found in auth store pool — unauthenticated", "name", cfg.Hugr.Auth)
-		return http.DefaultTransport
+	who, err := identity.ResolveFromHugr(ctx, hugrClient)
+	if err != nil {
+		return nil, fmt.Errorf("remote identity: %w", err)
 	}
-	return auth.Transport(store, http.DefaultTransport)
+	boot.Identity.ID = who.UserID
+	boot.Identity.Name = who.UserName
+	logger.Info("remote identity resolved", "agent_id", who.UserID, "name", who.UserName)
+
+	cfg, err := config.LoadRemote(ctx, hugrClient, boot.Identity.ID, boot)
+	if err != nil {
+		return nil, fmt.Errorf("remote config: %w", err)
+	}
+	return cfg, nil
 }
 
-// buildRuntime wires together hugrClient → engine/querier → hubDB →
-// providers.BuildAll(cfg.Providers) → skills/tools/session managers →
-// agent. Caller owns runtime.close() in the shutdown path.
+// buildRuntime wires together local engine + hugr client → queriers →
+// router / services / session manager → ADK agent. Caller owns
+// runtime.close() in the shutdown path.
 func buildRuntime(
 	ctx context.Context,
+	boot *config.BootstrapConfig,
 	cfg *config.Config,
 	logger *slog.Logger,
-	authStores *auth.Stores,
-	hugrTransport http.RoundTripper,
+	authReg *auth.SourceRegistry,
+	hugrClient *client.Client,
 ) (*agentRuntime, error) {
-	components, err := buildComponentsFromConfig(ctx, cfg, logger, hugrTransport)
+	components, err := assembleRuntimeArtifacts(ctx, cfg, hugrClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("build components: %w", err)
 	}
@@ -211,88 +219,250 @@ func buildRuntime(
 		skills:     components.skills,
 	}
 
-	var querier qetypes.Querier
-	if cfg.HugrLocal.Enabled {
-		engine, err := buildLocalEngine(ctx, cfg, logger)
+	// Two Querier endpoints. Remote hugr client is always there; the
+	// local embedded engine comes up only when LocalDBEnabled. The
+	// "memory" querier is the one hub.db reads/writes route through —
+	// prefer local, fall back to remote.
+	var (
+		localQuerier  qetypes.Querier
+		remoteQuerier qetypes.Querier = components.hugrClient
+		localModels   []string
+	)
+	if cfg.LocalDBEnabled {
+		engine, models, err := buildLocalHugr(ctx, cfg, logger)
 		if err != nil {
 			components.hugrClient.CloseSubscriptions()
-			return nil, fmt.Errorf("local engine: %w", err)
+			return nil, err
 		}
 		rt.engine = engine
-		querier = engine
-		if err := setupLocalSources(ctx, engine, cfg, logger); err != nil {
-			rt.close(logger)
-			return nil, fmt.Errorf("setup local sources: %w", err)
-		}
+		localQuerier = engine
+		localModels = models
 	} else {
-		url := cfg.Memory.HugrURL
-		if url == "" {
-			url = cfg.Hugr.URL
-		}
-		logger.Info("hub mode: connecting to", "url", url)
-		querier = components.hugrClient
+		logger.Info("hub mode: connecting to", "url", cfg.Hugr.URL)
+	}
+	memoryQuerier := remoteQuerier
+	if localQuerier != nil {
+		memoryQuerier = localQuerier
 	}
 
-	hub, err := buildHubDB(cfg, querier, logger)
-	if err != nil {
-		rt.close(logger)
-		return nil, fmt.Errorf("build hubdb: %w", err)
+	// Router: picks per-model querier by membership in localModels.
+	router := models.NewRouter(
+		localQuerier,
+		remoteQuerier,
+		localModels,
+		cfg.LLM,
+		models.WithLogger(logger),
+		models.WithToolChoiceFunc(func() string { return "auto" }),
+	).WithLogger(logger)
+	for intentName, modelName := range cfg.LLM.Routes {
+		logger.Info("intent route configured", "intent", intentName, "model", modelName)
 	}
-	rt.hubDB = hub
 
-	if cfg.HugrLocal.Enabled {
-		if err := registerAgentInstance(ctx, cfg, hub, logger); err != nil {
+	// Self-register runs only in fully local mode — hub owns the
+	// agents row in every other combination.
+	if !boot.Remote() && cfg.LocalDBEnabled {
+		if err := selfRegisterAgent(ctx, cfg, memoryQuerier, logger); err != nil {
 			rt.close(logger)
 			return nil, err
 		}
 	}
 
-	// SessionManager first (without a concrete Skills-suite provider in
-	// tools yet — but InlineBuilder for skill endpoints works already).
-	// We build the provider registry *after* SessionManager exists
-	// because the system suite needs SessionManager as a dep.
-	sessionMgr := session.New(session.Config{
-		Skills:       components.skills,
-		Tools:        components.tools,
-		Hub:          hub,
-		Constitution: components.constitution,
-		Logger:       logger,
-		InlineBuilder: func(name, endpoint, authName string, lg *slog.Logger) (tools.Provider, error) {
-			return providers.Build(
-				config.ProviderConfig{Name: name, Type: "mcp", Endpoint: endpoint, Auth: authName},
-				providers.Deps{
-					AuthStores:    authStores.Tokens,
-					BaseTransport: http.DefaultTransport,
-					Skills:        components.skills,
-					Hub:           hub,
-					MCP:           cfg.MCP,
-					Logger:        lg,
-				},
-			)
-		},
+	// Embeddings adapter — shared by memory service + memory workers.
+	embed := embedding.New(memoryQuerier, embedding.Options{
+		Model:     cfg.Embedding.Model,
+		Dimension: cfg.Embedding.Dimension,
+		Logger:    logger,
 	})
-	rt.sessions = sessionMgr
 
-	// Build configured providers now that SessionManager exists —
-	// system builder needs it. Each Build registers into tools.Manager.
-	if err := providers.BuildAll(cfg.Providers, components.tools, providers.Deps{
-		AuthStores:    authStores.Tokens,
-		BaseTransport: http.DefaultTransport,
-		Sessions:      sessionMgr,
-		Skills:        components.skills,
-		Hub:           hub,
-		MCP:           cfg.MCP,
-		Logger:        logger,
-	}); err != nil {
+	// Hub clients — built once and shared across every subsystem
+	// (classifier, sessions manager, memory service, reviewer,
+	// compactor, consolidator, verifier, injector). Each consumer used
+	// to construct its own — five-plus identical instances per
+	// process.
+	//
+	// Every hub here is wired to memoryQuerier. In principle the
+	// three slots are independent — e.g. sessions could live on the
+	// local engine while memory_items route to a shared remote hub.
+	// Today the runtime deliberately collapses all three to one
+	// querier; splitting is a future task that needs per-subsystem
+	// routing flags in memory.Config + chatcontext.Config + an
+	// agent-level sessions routing switch.
+	sessHub, err := sessstore.New(memoryQuerier, sessstore.Options{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+	})
+	if err != nil {
 		rt.close(logger)
-		return nil, err
+		return nil, fmt.Errorf("build sessions store: %w", err)
+	}
+	memHub, err := memstore.New(memoryQuerier, memstore.Options{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build memory store: %w", err)
+	}
+	learnHub, err := learnstore.New(memoryQuerier, learnstore.Options{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build learning store: %w", err)
 	}
 
-	a, err := hugen.NewAgent(hugen.Config{
-		Router:   components.router,
-		Sessions: sessionMgr,
-		Tokens:   components.tokens,
-		Logger:   logger,
+	// Classifier + scheduler + reviewer + compactor wired before
+	// SessionManager so the manager can publish events + queue
+	// reviews from the very first Create. All background goroutines
+	// start after we're confident buildRuntime won't fail.
+	cls := sessions.NewClassifierWithHub(sessHub, logger, sessions.DefaultClassifierBuffer)
+
+	loadSkillMemory := func(ctx context.Context, name string) (*skills.SkillMemoryConfig, error) {
+		sk, err := components.skills.Load(ctx, name)
+		if err != nil || sk == nil {
+			return nil, err
+		}
+		return sk.Memory, nil
+	}
+
+	mem, err := memory.New(memory.Options{
+		Querier: memoryQuerier,
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID,
+		Logger:          logger,
+		Memory:          memHub,
+		Learning:        learnHub,
+		Sessions:        sessHub,
+		Router:          router,
+		Tokens:          components.tokens,
+		Config:          cfg.Memory,
+		LoadSkillMemory: loadSkillMemory,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build memory: %w", err)
+	}
+
+	chat, err := chatcontext.New(chatcontext.Options{
+		Querier: memoryQuerier,
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID,
+		Logger:          logger,
+		Memory:          memHub,
+		Sessions:        sessHub,
+		Router:          router,
+		Tokens:          components.tokens,
+		Threshold:       cfg.ChatContext.CompactionThreshold,
+		LoadSkillMemory: loadSkillMemory,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build chatcontext: %w", err)
+	}
+
+	sched := scheduler.New(logger)
+	if err := mem.RegisterTasks(sched); err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("register memory tasks: %w", err)
+	}
+	rt.classifier = cls
+	rt.scheduler = sched
+
+	// SessionManager wires classifier + scheduler in so IngestADKEvent
+	// publishes transcript rows and Delete queues post-session review.
+	sessionMgr, err := sessions.New(sessions.Config{
+		Skills:       components.skills,
+		Tools:        components.tools,
+		Sessions:     sessHub,
+		AgentID:      cfg.Identity.ID,
+		AgentShort:   cfg.Identity.ShortID,
+		Constitution: components.constitution,
+		Logger:       logger,
+		Classifier:   cls,
+		Scheduler:    mem.Reviewer(),
+		InlineBuilder: func(name, endpoint string, a sessions.InlineProviderAuth, lg *slog.Logger) (tools.Provider, error) {
+			return tools.NewMCPProvider(tools.MCPSpec{
+				Name:            name,
+				Endpoint:        endpoint,
+				Auth:            a.Name,
+				AuthType:        a.Type,
+				AuthHeaderName:  a.HeaderName,
+				AuthHeaderValue: a.HeaderValue,
+				AuthStores:      authReg.TokenStores(),
+				BaseTransport:   http.DefaultTransport,
+				Config:          cfg.MCP,
+				Logger:          lg,
+			})
+		},
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build session manager: %w", err)
+	}
+	rt.sessions = sessionMgr
+
+	// SessionManager is up — ChatContext can now own its Service
+	// (which needs sessions.Manager for the intro tool) and we can
+	// build the memory tools provider the same way.
+	if err := chat.AttachSessions(sessionMgr); err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("attach chatcontext service: %w", err)
+	}
+	memService, err := memory.NewService(memoryQuerier, sessionMgr, embed, memory.ServiceOptions{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+		Memory: memHub, Sessions: sessHub,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build memory service: %w", err)
+	}
+	components.tools.AddProvider(skills.NewService(sessionMgr.SkillsAccessor()))
+	components.tools.AddProvider(memService)
+	components.tools.AddProvider(chat.Provider())
+	logger.Info("internal services registered",
+		"providers", []string{skills.ServiceName, memory.ServiceName, chatcontext.ServiceName})
+
+	// External providers from config.yaml. Internal services (type=system)
+	// are registered programmatically above — skip their YAML
+	// declarations to keep back-compat with existing configs.
+	for _, pc := range cfg.Providers {
+		if pc.Type == "system" {
+			continue
+		}
+		if pc.Type != "mcp" {
+			rt.close(logger)
+			return nil, fmt.Errorf("provider %q: only type=mcp is supported in config.providers", pc.Name)
+		}
+		base := http.DefaultTransport
+		p, err := tools.NewMCPProvider(tools.MCPSpec{
+			Name:            pc.Name,
+			Endpoint:        pc.Endpoint,
+			Transport:       pc.Transport,
+			Command:         pc.Command,
+			Args:            pc.Args,
+			Env:             pc.Env,
+			Auth:            pc.Auth,
+			AuthType:        pc.AuthType,
+			AuthHeaderName:  pc.AuthHeaderName,
+			AuthHeaderValue: pc.AuthHeaderValue,
+			AuthStores:      authReg.TokenStores(),
+			BaseTransport:   base,
+			Config:          cfg.MCP,
+			Logger:          logger,
+		})
+		if err != nil {
+			rt.close(logger)
+			return nil, fmt.Errorf("provider %q: %w", pc.Name, err)
+		}
+		components.tools.AddProvider(p)
+		logger.Info("provider registered", "name", pc.Name, "type", pc.Type)
+	}
+
+	instruction := mem.InstructionProvider(hugen.BaseInstructionProvider(sessionMgr))
+
+	a, err := hugen.NewAgent(hugen.Runtime{
+		Router:               router,
+		Sessions:             sessionMgr,
+		Tokens:               components.tokens,
+		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{chat.Callback()},
+		InstructionProvider:  instruction,
+		Logger:               logger,
 	})
 	if err != nil {
 		rt.close(logger)
@@ -304,17 +474,52 @@ func buildRuntime(
 		logger.Warn("restore open sessions", "err", err)
 	}
 
-	hugen.StartSessionCleanup(context.Background(), sessionMgr, 1*time.Hour, logger)
+	// Start background workers. bgCtx inherits from the caller's
+	// signal-aware ctx so SIGINT flows straight through to the
+	// classifier / scheduler / session-cleanup loops without any
+	// defer-chain indirection.
+	rt.bgCtx, rt.bgCancel = context.WithCancel(ctx)
+	go cls.Run(rt.bgCtx)
+	sched.Start(rt.bgCtx)
+	hugen.StartSessionCleanup(rt.bgCtx, sessionMgr, 1*time.Hour, logger)
 
 	return rt, nil
+}
+
+// buildLocalHugr brings up the embedded query-engine backed by
+// cfg.LocalDB and returns it along with the model names the router
+// should route to it. Called only when cfg.LocalDBEnabled.
+func buildLocalHugr(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*qe.Service, []string, error) {
+	engine, err := local.New(ctx, cfg.LocalDB, cfg.Identity, cfg.Embedding, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("local engine: %w", err)
+	}
+	models := make([]string, 0, len(cfg.LocalDB.Models))
+	for _, m := range cfg.LocalDB.Models {
+		models = append(models, m.Name)
+	}
+	return engine, models, nil
+}
+
+// selfRegisterAgent constructs a short-lived agentstore client and
+// upserts the agents row. Runs only in fully-local mode — in every
+// other combination the hub owns the registry entry.
+func selfRegisterAgent(ctx context.Context, cfg *config.Config, querier qetypes.Querier, logger *slog.Logger) error {
+	reg, err := agentstore.New(querier, agentstore.Options{
+		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("agent registry client: %w", err)
+	}
+	return registerAgentInstance(ctx, cfg, reg, logger)
 }
 
 // registerAgentInstance verifies the agent_type row exists (seeded at
 // migration) and upserts the agents row with the current
 // config_override. Runs only in local mode — in hub mode the hub owns
 // registration.
-func registerAgentInstance(ctx context.Context, cfg *config.Config, hub interfaces.HubDB, logger *slog.Logger) error {
-	at, err := hub.GetAgentType(ctx, cfg.Identity.Type)
+func registerAgentInstance(ctx context.Context, cfg *config.Config, reg *agentstore.Client, logger *slog.Logger) error {
+	at, err := reg.GetAgentType(ctx, cfg.Identity.Type)
 	if err != nil {
 		return fmt.Errorf("get agent_type %q: %w", cfg.Identity.Type, err)
 	}
@@ -327,7 +532,7 @@ func registerAgentInstance(ctx context.Context, cfg *config.Config, hub interfac
 		"embedding": cfg.Embedding,
 		"memory":    cfg.Memory,
 	}
-	if err := hub.RegisterAgent(ctx, interfaces.Agent{
+	if err := reg.RegisterAgent(ctx, agentstore.Agent{
 		ID:             cfg.Identity.ID,
 		AgentTypeID:    cfg.Identity.Type,
 		ShortID:        cfg.Identity.ShortID,

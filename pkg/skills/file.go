@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"gopkg.in/yaml.v3"
 )
 
 // skillFrontmatter is the YAML header inside SKILL.md.
 type skillFrontmatter struct {
 	Name        string               `yaml:"name"`
+	Version     string               `yaml:"version"`
 	Description string               `yaml:"description"`
 	Categories  []string             `yaml:"categories"`
 	Autoload    bool                 `yaml:"autoload"`
@@ -22,7 +23,7 @@ type skillFrontmatter struct {
 	NextStep    string               `yaml:"next_step"`
 }
 
-// frontmatterRefMeta mirrors interfaces.SkillRefMeta with YAML tags so
+// frontmatterRefMeta mirrors SkillRefMeta with YAML tags so
 // skill authors can list references with human-written descriptions
 // instead of relying on filename-as-description fallback.
 type frontmatterRefMeta struct {
@@ -47,12 +48,12 @@ func NewFileManager(path string) (Manager, error) {
 
 // List scans the skills directory and returns compact metadata for every
 // valid skill found. Directories without a parseable SKILL.md are skipped.
-func (m *fileManager) List(_ context.Context) ([]interfaces.SkillMeta, error) {
+func (m *fileManager) List(_ context.Context) ([]SkillMeta, error) {
 	entries, err := os.ReadDir(m.path)
 	if err != nil {
 		return nil, fmt.Errorf("skills: read %q: %w", m.path, err)
 	}
-	var out []interfaces.SkillMeta
+	var out []SkillMeta
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -65,13 +66,32 @@ func (m *fileManager) List(_ context.Context) ([]interfaces.SkillMeta, error) {
 		if name == "" {
 			name = e.Name()
 		}
-		out = append(out, interfaces.SkillMeta{
-			Name:        name,
-			Description: fm.Description,
-			Categories:  append([]string(nil), fm.Categories...),
+		skillDir := filepath.Join(m.path, e.Name())
+		out = append(out, SkillMeta{
+			Name:             name,
+			Description:      fm.Description,
+			Categories:       append([]string(nil), fm.Categories...),
+			MemoryCategories: memoryCategoryNames(name, skillDir),
 		})
 	}
 	return out, nil
+}
+
+// memoryCategoryNames returns the fully-qualified `<skill>.<cat>`
+// names from the skill's memory.yaml, sorted for stable output.
+// Returns nil when the file is absent or malformed — List degrades to
+// the no-category catalog entry in those cases.
+func memoryCategoryNames(skillName, skillDir string) []string {
+	cfg := loadSkillMemory(skillDir)
+	if cfg == nil || len(cfg.Categories) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Categories))
+	for cat := range cfg.Categories {
+		out = append(out, skillName+"."+cat)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // AutoloadNames returns every skill name whose frontmatter has
@@ -113,18 +133,31 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 		canonical = name
 	}
 
-	// Expand ${ENV_VAR} in inline endpoints — lets a single skill file
-	// stay portable across environments.
+	// Expand ${ENV_VAR} in inline endpoints + header auth values —
+	// lets a single skill file stay portable across environments.
+	// Also validates shape: Name is always required; exactly one of
+	// Provider or Endpoint must be set.
 	providers := make([]SkillProviderSpec, 0, len(fm.Providers))
-	for _, spec := range fm.Providers {
+	for i, spec := range fm.Providers {
+		if spec.Name == "" {
+			return nil, fmt.Errorf("skills: %q provider[%d]: name is required", canonical, i)
+		}
+		if spec.Provider == "" && spec.Endpoint == "" {
+			return nil, fmt.Errorf("skills: %q provider %q: either provider or endpoint is required", canonical, spec.Name)
+		}
+		if spec.Provider != "" && spec.Endpoint != "" {
+			return nil, fmt.Errorf("skills: %q provider %q: provider and endpoint are mutually exclusive", canonical, spec.Name)
+		}
 		spec.Endpoint = os.ExpandEnv(spec.Endpoint)
+		spec.AuthHeaderName = os.ExpandEnv(spec.AuthHeaderName)
+		spec.AuthHeaderValue = os.ExpandEnv(spec.AuthHeaderValue)
 		providers = append(providers, spec)
 	}
 
-	var refs []interfaces.SkillRefMeta
+	var refs []SkillRefMeta
 	if len(fm.References) > 0 {
 		for _, r := range fm.References {
-			refs = append(refs, interfaces.SkillRefMeta{
+			refs = append(refs, SkillRefMeta{
 				Name:        r.Name,
 				Description: r.Description,
 			})
@@ -135,6 +168,7 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 
 	return &Skill{
 		Name:         canonical,
+		Version:      fm.Version,
 		Description:  fm.Description,
 		Categories:   fm.Categories,
 		Instructions: instructions,
@@ -142,7 +176,25 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 		Providers:    providers,
 		Refs:         refs,
 		NextStep:     fm.NextStep,
+		Memory:       loadSkillMemory(skillDir),
 	}, nil
+}
+
+// loadSkillMemory reads an optional memory.yaml adjacent to SKILL.md.
+// Absent file → nil (skill still usable). Parse errors → nil + no
+// fatal error; callers fall back to agent-level memory defaults. The
+// file is cheap enough to re-read on every Load since the manager
+// does not cache skill bodies.
+func loadSkillMemory(skillDir string) *SkillMemoryConfig {
+	raw, err := os.ReadFile(filepath.Join(skillDir, "memory.yaml"))
+	if err != nil {
+		return nil
+	}
+	var cfg SkillMemoryConfig
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	return &cfg
 }
 
 // Reference returns the raw content of a reference document.
@@ -156,7 +208,7 @@ func (m *fileManager) Reference(_ context.Context, skillName, refName string) (s
 }
 
 // RenderCatalog delegates to the package-level helper.
-func (m *fileManager) RenderCatalog(skills []interfaces.SkillMeta) string {
+func (m *fileManager) RenderCatalog(skills []SkillMeta) string {
 	return RenderCatalog(skills)
 }
 
@@ -173,18 +225,18 @@ func readFrontmatter(skillDir string) (skillFrontmatter, bool) {
 	return fm, true
 }
 
-func listRefs(refDir string) ([]interfaces.SkillRefMeta, error) {
+func listRefs(refDir string) ([]SkillRefMeta, error) {
 	entries, err := os.ReadDir(refDir)
 	if err != nil {
 		return nil, err
 	}
-	var refs []interfaces.SkillRefMeta
+	var refs []SkillRefMeta
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
 		name := strings.TrimSuffix(e.Name(), ".md")
-		refs = append(refs, interfaces.SkillRefMeta{Name: name, Description: name})
+		refs = append(refs, SkillRefMeta{Name: name, Description: name})
 	}
 	return refs, nil
 }

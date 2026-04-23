@@ -1,12 +1,15 @@
 ---
 name: _system
+version: "0.1.0"
 description: >
-  Built-in skill and context management tools. Always active. Provides
-  skill_list, skill_load, skill_unload, skill_ref, skill_ref_unload,
-  context_status.
+  Built-in skill-management tools. Always active. Provides
+  skill_list, skill_load, skill_unload, skill_ref, skill_ref_unload.
+  Context tools (context_status, context_intro, context_compress)
+  live in the `_context` skill.
 autoload: true
 providers:
-  - provider: _skills
+  - name: _skills
+    provider: _skills
 ---
 
 # Skill and context management
@@ -47,5 +50,6 @@ stale context into new turns.
 
 ## Budget awareness
 
-Before loading additional references, call `context_status` to check
-current usage. If usage is high, unload something before loading more.
+Before loading additional references, call `context_status` (from the
+`_context` skill) to check current usage. If usage is high, unload
+something before loading more.

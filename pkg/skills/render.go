@@ -2,13 +2,17 @@ package skills
 
 import (
 	"fmt"
+	"sort"
 	"strings"
-
-	"github.com/hugr-lab/hugen/interfaces"
 )
 
 // RenderCatalog builds the "## Available Skills" prompt block.
-func RenderCatalog(skills []interfaces.SkillMeta) string {
+// When a skill declares memory.yaml categories they are listed on a
+// second line with fully-qualified `<skill>.<cat>` names — the same
+// form stored in `memory_items.category`, so the model can pass them
+// directly to `memory_search(category: ...)` even before the skill is
+// loaded.
+func RenderCatalog(skills []SkillMeta) string {
 	if len(skills) == 0 {
 		return ""
 	}
@@ -20,6 +24,11 @@ func RenderCatalog(skills []interfaces.SkillMeta) string {
 			b.WriteString(fmt.Sprintf(" [%s]", strings.Join(s.Categories, ", ")))
 		}
 		b.WriteString("\n")
+		if len(s.MemoryCategories) > 0 {
+			b.WriteString("  memory: ")
+			b.WriteString(strings.Join(s.MemoryCategories, ", "))
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
 }
@@ -44,6 +53,35 @@ func RenderInstructions(sk *Skill, tools []string, loadedRefs []string) string {
 			b.WriteString("- `")
 			b.WriteString(t)
 			b.WriteString("`\n")
+		}
+	}
+
+	if sk.Memory != nil && len(sk.Memory.Categories) > 0 {
+		b.WriteString("\n\n### Memory categories\n\n")
+		b.WriteString("Pass these fully-qualified names as the `category` argument to `memory_search`, and aim for them when saving notes worth persisting past the session:\n\n")
+		// Sort for deterministic prompt output.
+		names := make([]string, 0, len(sk.Memory.Categories))
+		for name := range sk.Memory.Categories {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			cat := sk.Memory.Categories[name]
+			b.WriteString("- `")
+			b.WriteString(sk.Name)
+			b.WriteString(".")
+			b.WriteString(name)
+			b.WriteString("`")
+			if cat.Description != "" {
+				b.WriteString(" — ")
+				b.WriteString(strings.TrimSpace(cat.Description))
+			}
+			if cat.Volatility != "" {
+				b.WriteString(" (")
+				b.WriteString(cat.Volatility)
+				b.WriteString(")")
+			}
+			b.WriteString("\n")
 		}
 	}
 

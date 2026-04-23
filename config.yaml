@@ -1,9 +1,12 @@
-# ── Agent identity ──────────────────────────────────────────
+# ── Agent identity + runtime ────────────────────────────────
+# id/short_id/name/type read into local.Identity; constitution into
+# agent.Config. Both come from the same YAML key.
 agent:
   id: agt_ag01
   short_id: ag01
   name: hugr-data-agent
   type: hugr-data
+  constitution: constitution/base.md
 
 # ── Hugr connection (URL comes from .env:HUGR_URL) ──────────
 # auth: references an entry in `auth:` — used for the LLM client,
@@ -43,16 +46,20 @@ providers:
   - name: _memory
     type: system
     suite: memory
+  - name: _context
+    type: system
+    suite: context
   - name: hugr-main
     type: mcp
     endpoint: ${HUGR_MCP_URL}
     auth: hugr-auth
 
-# ── Embedded hugr engine ────────────────────────────────────
-# Attaches the memory DB as a RuntimeSource module "hub.db".
+# ── Local hub DB (embedded hugr engine) ─────────────────────
+# When enabled, provision + attach hub.db as a RuntimeSource module,
+# register local data sources below, and probe the embedding model.
 # Disable for hub mode (memory via remote Hugr).
-hugr_local:
-  enabled: true
+local_db_enabled: true
+local_db:
   db:
     path: .data/engine.db
     settings:
@@ -60,31 +67,72 @@ hugr_local:
       worker_threads: 2
       home_directory: data
       timezone: UTC
+  memory_path: .data/memory.db
+  # LLM/embedding data sources registered at startup.
+  # Path = full provider URL + query params. ${ENV_VAR} is expanded
+  # from .env / shell env. Type: llm-openai | llm-anthropic |
+  # llm-gemini | embedding.
+  models:
+    # LM Studio / OpenAI-compatible local LLMs
+    - name: gemma4-26b
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+    - name: gemma4-31b
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model="google/gemma-4-31b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+    - name: gpt-oss-20b
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model="openai/gpt-oss-20b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+    - name: gemma-small
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model=gemma-4-e2b-it&timeout=120s'
+    # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
+    - name: gemma-embedding
+      type: embedding
+      path: '${EMBED_LOCAL_URL}?model="text-embedding-embeddinggemma-300m-qat"&timeout=30s'
+    # Cloud LLMs (fill ${*_API_KEY} in .env before using)
+    - name: gemini-pro-3-1
+      type: llm-gemini
+      path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+    - name: claude-sonnet
+      type: llm-anthropic
+      path: 'https://api.anthropic.com/v1/messages?model=claude-sonnet-4-20250514&api_key="${ANTHROPIC_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=60s'
+    - name: chatgpt-5-4-mini
+      type: llm-openai
+      path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4-mini-2026-03-17"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+    - name: gpt-5-4
+      type: llm-openai
+      path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
 
-# ── Memory storage ──────────────────────────────────────────
+# ── Memory tuning ───────────────────────────────────────────
+# Runtime memory-management settings. Memory hub.db path lives in
+# local_db.memory_path; compaction threshold lives in `chatcontext:`
+# below; the old `mode` / `hugr_url` fields were dead and removed.
 memory:
-  mode: local            # local | remote
-  path: .data/memory.db
-  hugr_url: ""            # used only when mode=remote
   volatility_duration:
     stable: 8760h
     slow: 2160h
     moderate: 720h
     fast: 168h
     volatile: 24h
-  compaction_threshold: 0.7
   scheduler:
     interval: 5m
     review_delay: 30s
+    consolidation_at: "0 3 * * *"   # daily at 03:00; own-impl cron parser
   consolidation:
     hypothesis_expiry: 720h
 
+# ── Chat-context compaction ─────────────────────────────────
+# Budget threshold at which the chatcontext.Compactor starts
+# summarising old turns (fraction of the context window, 0..1).
+chatcontext:
+  compaction_threshold: 0.7
+
 # ── LLM routing ─────────────────────────────────────────────
-# mode=local registers each `models:` entry (type llm-*) in the embedded
-# engine. Switch AGENT_MODEL in .env (or override llm.model here) to
-# route to a different provider without restarting LM Studio.
+# Model/max_tokens/temperature are the default for the main LLM;
+# routes: selects a different registered model per intent. Override
+# AGENT_MODEL in .env to switch the default without touching yaml.
 llm:
-  mode: local
   model: gemini-pro-3-1
   max_tokens: 8096
   temperature: 0.4
@@ -106,37 +154,15 @@ embedding:
 skills:
   path: ./skills
 
-# ── LLM/Embedding data sources ──────────────────────────────
-# Registered in the local engine at startup. Path = full provider URL
-# + query params. ${ENV_VAR} is expanded from .env / shell env.
-# Type: llm-openai | llm-anthropic | llm-gemini | embedding
-models:
-  # LM Studio / OpenAI-compatible local LLMs
-  - name: gemma4-26b
-    type: llm-openai
-    path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
-  - name: gemma4-31b
-    type: llm-openai
-    path: '${LLM_LOCAL_URL}?model="google/gemma-4-31b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
-  - name: gpt-oss-20b
-    type: llm-openai
-    path: '${LLM_LOCAL_URL}?model="openai/gpt-oss-20b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
-  - name: gemma-small
-    type: llm-openai
-    path: '${LLM_LOCAL_URL}?model=gemma-4-e2b-it&timeout=120s'
+# ── Listeners ───────────────────────────────────────────────
+# a2a: public endpoints (invoke + auth callbacks).
+# devui: loopback-only dev UI + REST + /dev helpers.
+# Overridable via AGENT_PORT / AGENT_DEVUI_PORT / AGENT_BASE_URL /
+# AGENT_DEVUI_BASE_URL in .env.
+a2a:
+  port: 10000
+  base_url: http://localhost:10000
 
-  # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
-  - name: gemma-embedding
-    type: embedding
-    path: '${EMBED_LOCAL_URL}?model="embeddinggemma-300m"&timeout=30s'
-
-  # Cloud LLMs (fill ${*_API_KEY} in .env before using)
-  - name: gemini-pro-3-1
-    type: llm-gemini
-    path: 'https://generativelanguage.googleapis.com/v1beta?model=gemini-3.1-pro-preview&api_key="${GEMINI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
-  # - name: claude-sonnet
-  #   type: llm-anthropic
-  #   path: 'https://api.anthropic.com/v1/messages?model=claude-sonnet-4-20250514&api_key="${ANTHROPIC_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=60s'
-  # - name: chatgpt-5-4-mini
-  #   type: llm-openai
-  #   path: 'https://api.openai.com/v1/chat/completions?model="gpt-5.4-mini-2026-03-17"&api_key="${OPENAI_API_KEY}"&max_tokens=4096&thinking_budget=2048&timeout=120s'
+devui:
+  port: 10001
+  base_url: http://localhost:10001

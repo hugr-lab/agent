@@ -1,5 +1,6 @@
 ---
 name: hugr-data
+version: "0.1.0"
 description: >
   Work with Hugr Data Mesh platform via MCP. Hugr is a GraphQL-over-SQL engine federating
   PostgreSQL, DuckDB, Parquet, Iceberg, REST APIs into unified GraphQL schema.
@@ -12,7 +13,12 @@ description: >
   Even "show me the data" or "what data do we have" should trigger this if Hugr MCP is available.
 autoload: false
 providers:
-  - provider: hugr-main
+  - name: hugr
+    provider: hugr-main
+    tools:
+      - discovery-*
+      - schema-*
+      - data-*
 references:
   - name: start
     description: >

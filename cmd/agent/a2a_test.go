@@ -13,14 +13,12 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
-	testadapters "github.com/hugr-lab/hugen/adapters/test"
+	"github.com/hugr-lab/hugen/pkg/a2a"
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
-	"github.com/hugr-lab/hugen/pkg/tools/system"
-	"github.com/hugr-lab/hugen/pkg/tools/toolstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/adk/agent/llmagent"
@@ -66,7 +64,7 @@ func startTestA2AServer(t *testing.T, llmResponse string) *a2aclient.Client {
 	sessionSvc := adksession.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2aHandlers(a, sessionSvc, artifactSvc, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, sessionSvc, artifactSvc, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -142,7 +140,7 @@ func TestA2A_AgentCard(t *testing.T) {
 	defer listener.Close()
 
 	baseURL := "http://" + listener.Addr().String()
-	cardH, invokeH := a2aHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -169,15 +167,15 @@ func writeTestSkills(t *testing.T, specs map[string]string) string {
 
 // testHugrAgentConfig configures startTestHugrAgent.
 type testHugrAgentConfig struct {
-	llm          *testadapters.ScriptedLLM
+	llm          *models.ScriptedLLM
 	constitution string
 	skillsDir    string // optional; if set, used for skills.NewFileManager
-	tokens       *hugen.TokenEstimator
+	tokens       *models.TokenEstimator
 }
 
 // startTestHugrAgent builds the full HugrAgent stack (skills + tools +
 // session + agent) for tests and returns an a2aclient.Client.
-func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitution string) *a2aclient.Client {
+func startTestHugrAgent(t *testing.T, llm *models.ScriptedLLM, constitution string) *a2aclient.Client {
 	t.Helper()
 	client, _ := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
 		llm:          llm,
@@ -186,7 +184,7 @@ func startTestHugrAgent(t *testing.T, llm *testadapters.ScriptedLLM, constitutio
 	return client
 }
 
-func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *hugen.TokenEstimator) {
+func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2aclient.Client, *models.TokenEstimator) {
 	t.Helper()
 	logger := slog.Default()
 
@@ -199,27 +197,25 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	toolsMgr := tools.New(logger)
 
-	sessionMgr := session.New(session.Config{
+	sessionMgr, err := sessions.New(sessions.Config{
 		Skills:       skillsMgr,
 		Tools:        toolsMgr,
 		Constitution: cfg.constitution,
 		Logger:       logger,
 	})
+	require.NoError(t, err)
 
-	// Register _skills provider with the real system suite — matches
-	// production wiring where providers.BuildAll does this from config.
-	toolsMgr.AddProvider(toolstest.Provider{
-		N: "_skills",
-		T: system.NewSkillsSuite(sessionMgr),
-	})
+	// Register the real skills.Service so the test exercises the same
+	// provider wiring as production.
+	toolsMgr.AddProvider(skills.NewService(sessionMgr.SkillsAccessor()))
 
 	tokens := cfg.tokens
 	if tokens == nil {
-		tokens = hugen.NewTokenEstimator()
+		tokens = models.NewTokenEstimator()
 	}
 
-	router := intent.NewRouter(cfg.llm)
-	a, err := hugen.NewAgent(hugen.Config{
+	router := models.NewRouterWithDefault(cfg.llm)
+	a, err := hugen.NewAgent(hugen.Runtime{
 		Router:   router,
 		Sessions: sessionMgr,
 		Tokens:   tokens,
@@ -233,7 +229,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 	baseURL := "http://" + listener.Addr().String()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2aHandlers(a, sessionMgr, artifactSvc, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, sessionMgr, artifactSvc, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -249,7 +245,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 }
 
 func TestHugrAgent_SendMessage(t *testing.T) {
-	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
+	llm := models.NewScriptedLLM("test", []models.ScriptedResponse{
 		{Content: "Hello from HugrAgent!"},
 	})
 	client := startTestHugrAgent(t, llm, "You are a test agent.")
@@ -281,7 +277,7 @@ func TestHugrAgent_SendMessage(t *testing.T) {
 }
 
 func TestHugrAgent_TokenCalibration(t *testing.T) {
-	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
+	llm := models.NewScriptedLLM("test", []models.ScriptedResponse{
 		{Content: "Calibrated response"},
 	})
 	client, tokens := startTestHugrAgentWithConfig(t, testHugrAgentConfig{
@@ -306,9 +302,9 @@ func TestHugrAgent_TokenCalibration(t *testing.T) {
 
 func TestHugrAgent_SkillLifecycle(t *testing.T) {
 	// Scripted LLM: turn 1 → skill_list, turn 2 → skill_load, turn 3 → final.
-	llm := testadapters.NewScriptedLLM("test", []testadapters.ScriptedResponse{
-		{ToolCalls: []testadapters.ScriptedToolCall{{Name: "skill_list", Args: map[string]any{}}}},
-		{ToolCalls: []testadapters.ScriptedToolCall{{Name: "skill_load", Args: map[string]any{"name": "test-data"}}}},
+	llm := models.NewScriptedLLM("test", []models.ScriptedResponse{
+		{ToolCalls: []models.ScriptedToolCall{{Name: "skill_list", Args: map[string]any{}}}},
+		{ToolCalls: []models.ScriptedToolCall{{Name: "skill_load", Args: map[string]any{"name": "test-data"}}}},
 		{Content: "I loaded the test-data skill and I'm ready to help."},
 	})
 

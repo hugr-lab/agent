@@ -10,26 +10,40 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hugr-lab/hugen/interfaces"
-	"github.com/hugr-lab/hugen/pkg/llms/intent"
-	"github.com/hugr-lab/hugen/pkg/tools"
+	"github.com/hugr-lab/hugen/pkg/models"
+	"github.com/hugr-lab/hugen/pkg/sessions"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
 )
 
-// Config bundles agent dependencies.
-type Config struct {
+// Runtime bundles agent runtime dependencies (Router, Sessions,
+// Tokens, callbacks, InstructionProvider). Static YAML-driven settings
+// live in agent.Config.
+type Runtime struct {
 	// Router is the intent-based LLM router.
-	Router *intent.Router
+	Router *models.Router
 
 	// Sessions provides per-invocation Snapshot (prompt + tools) and
 	// session lifecycle. Required.
-	Sessions interfaces.SessionManager
+	Sessions *sessions.Manager
 
 	// Tokens is the calibrateable estimator used by the AfterModelCallback
 	// to track context usage per session. Optional.
-	Tokens *TokenEstimator
+	Tokens *models.TokenEstimator
+
+	// ExtraBeforeCallbacks are appended to the BeforeModelCallbacks
+	// chain after tools.Inject. Order matters: the runtime ships with
+	// [tools.Inject, chatcontext.Compactor.Callback()], ensuring the
+	// compactor operates on a tools-aware request and runs last before
+	// the model.
+	ExtraBeforeCallbacks []llmagent.BeforeModelCallback
+
+	// InstructionProvider overrides the default `Session.Snapshot().Prompt`
+	// provider. Runtime uses memory.WrapInstruction to append a
+	// "## Memory Status" block on top of the session's base prompt.
+	// When nil, the default (state-only Snapshot prompt) is used.
+	InstructionProvider llmagent.InstructionProvider
 
 	// Logger is optional; defaults to slog.Default.
 	Logger *slog.Logger
@@ -41,12 +55,17 @@ type Config struct {
 //   - AfterModelCallbacks → calibrateTokens(Tokens) (updates token stats)
 //   - Toolsets: nil — the Inject callback is the single source of truth
 //     for both req.Config.Tools and req.Tools.
-func NewAgent(cfg Config) (agent.Agent, error) {
+func NewAgent(cfg Runtime) (agent.Agent, error) {
 	if cfg.Sessions == nil {
 		return nil, fmt.Errorf("agent: Sessions required")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+
+	instruction := cfg.InstructionProvider
+	if instruction == nil {
+		instruction = BaseInstructionProvider(cfg.Sessions)
 	}
 
 	return llmagent.New(llmagent.Config{
@@ -55,21 +74,12 @@ func NewAgent(cfg Config) (agent.Agent, error) {
 		Model:       cfg.Router,
 		Toolsets:    nil,
 
-		InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
-			sid := ctx.SessionID()
-			if sid == "" {
-				return "", nil
-			}
-			sess, err := cfg.Sessions.Session(sid)
-			if err != nil {
-				return "", fmt.Errorf("agent: instruction provider: %w", err)
-			}
-			return sess.Snapshot().Prompt, nil
-		},
+		InstructionProvider: instruction,
 
-		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
-			tools.Inject(cfg.Sessions),
-		},
+		BeforeModelCallbacks: append(
+			[]llmagent.BeforeModelCallback{sessions.Inject(cfg.Sessions)},
+			cfg.ExtraBeforeCallbacks...,
+		),
 
 		AfterModelCallbacks: []llmagent.AfterModelCallback{
 			calibrateTokens(cfg),
@@ -77,9 +87,28 @@ func NewAgent(cfg Config) (agent.Agent, error) {
 	})
 }
 
+// BaseInstructionProvider returns the default instruction provider:
+// reads the current session's Snapshot().Prompt. Exposed so the
+// runtime can wrap it (e.g. memory.WrapInstruction for the memory
+// status hint) before handing the composed provider back via
+// Config.InstructionProvider.
+func BaseInstructionProvider(sm *sessions.Manager) llmagent.InstructionProvider {
+	return func(ctx agent.ReadonlyContext) (string, error) {
+		sid := ctx.SessionID()
+		if sid == "" {
+			return "", nil
+		}
+		sess, err := sm.Session(sid)
+		if err != nil {
+			return "", fmt.Errorf("agent: instruction provider: %w", err)
+		}
+		return sess.Snapshot().Prompt, nil
+	}
+}
+
 // calibrateTokens returns an AfterModelCallback that feeds LLM usage
 // metadata into the TokenEstimator.
-func calibrateTokens(cfg Config) llmagent.AfterModelCallback {
+func calibrateTokens(cfg Runtime) llmagent.AfterModelCallback {
 	return func(ctx agent.CallbackContext, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
 		if resp == nil || resp.UsageMetadata == nil || cfg.Tokens == nil {
 			return nil, nil
@@ -113,7 +142,7 @@ func calibrateTokens(cfg Config) llmagent.AfterModelCallback {
 
 // StartSessionCleanup launches a goroutine that periodically purges
 // sessions inactive for more than maxAge. Cancel ctx to stop it.
-func StartSessionCleanup(ctx context.Context, sm interfaces.SessionManager, maxAge time.Duration, logger *slog.Logger) {
+func StartSessionCleanup(ctx context.Context, sm *sessions.Manager, maxAge time.Duration, logger *slog.Logger) {
 	if sm == nil || maxAge <= 0 {
 		return
 	}

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/gorilla/mux"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 )
@@ -55,21 +54,11 @@ func registerAdminRoutes(mux Muxer, toolsMgr *tools.Manager, skillsMgr skills.Ma
 	}))
 }
 
-// Muxer is the subset of http.ServeMux / gorilla-mux used by the admin
-// route registration.
+// Muxer is the subset of http.ServeMux used by the admin route
+// registration. Kept as an interface so tests can plug in a
+// recording mux without pulling in net/http internals.
 type Muxer interface {
 	Handle(pattern string, handler http.Handler)
-}
-
-// muxShim adapts gorilla/mux.Router (whose Handle returns *Route) to
-// the plain http.ServeMux-shaped Handle(pattern, handler) used by
-// registerAdminRoutes.
-type muxShim struct {
-	router *mux.Router
-}
-
-func (m muxShim) Handle(pattern string, handler http.Handler) {
-	m.router.Handle(pattern, handler)
 }
 
 func writeJSON(w http.ResponseWriter, body any) {

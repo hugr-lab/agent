@@ -1,0 +1,30 @@
+# System-wide memory categories. These live on the _memory skill
+# because it is autoload=true — the categories are always available
+# regardless of which domain skill the session activated.
+
+categories:
+  user_preferences:
+    description: "User's language, format, detail level, tone, recurring workflow habits."
+    volatility: slow
+    initial_score: 0.85
+    tags_hint: "preference_type"
+  session_summary:
+    description: "High-level recap of what the user accomplished in a session — goal, outcome, key decisions."
+    volatility: moderate
+    initial_score: 0.6
+    tags_hint: "goal"
+
+review:
+  # Reviewer defaults come from agent-level config.Memory.Review;
+  # per-skill overrides go here if _memory wants distinct knobs.
+  enabled: true
+  min_tool_calls: 0  # session_summary can apply even to tool-less chats
+  exclude_event_types:
+    - compaction_summary
+    - reasoning
+    - error
+  prompt: |
+    Extract durable facts about the USER (preferences, working style,
+    recurring asks) and a short session_summary capturing the
+    conversation's goal + outcome + any persistent decisions. Skip
+    transient chitchat and retries.

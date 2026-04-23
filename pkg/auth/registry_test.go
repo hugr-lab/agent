@@ -38,90 +38,93 @@ func fakeHugr(t *testing.T) (hugrURL string) {
 	return srv.URL
 }
 
-func TestBuildStores_Hugr_TokenMode(t *testing.T) {
-	mux := http.NewServeMux()
-	out, err := BuildStores(context.Background(), []AuthSpec{
-		{
-			Name:        "primary",
-			Type:        "hugr",
-			AccessToken: "seed-token",
-			TokenURL:    "http://localhost:9999/token-exchange",
-		},
-	}, mux, nil)
+func TestBuildHugrSource_TokenMode(t *testing.T) {
+	src, err := BuildHugrSource(context.Background(), AuthSpec{
+		Name:        "hugr",
+		Type:        "hugr",
+		AccessToken: "seed",
+		TokenURL:    "http://localhost:9999/token-exchange",
+	}, nil)
 	require.NoError(t, err)
-	require.NotNil(t, out.Tokens["primary"])
-	// token mode doesn't register a callback handler, no PromptLogin.
-	assert.Empty(t, out.PromptLogin)
+	assert.Equal(t, "hugr", src.Name())
+	_, isRemote := src.(*RemoteStore)
+	assert.True(t, isRemote, "token mode yields RemoteStore")
+	assert.False(t, src.OwnsState("hugr.any"), "RemoteStore never owns state")
 }
 
-func TestBuildStores_Hugr_OIDCFallbackDiscovery(t *testing.T) {
+func TestBuildHugrSource_OIDCFallbackDiscovery(t *testing.T) {
 	hugrURL := fakeHugr(t)
-	mux := http.NewServeMux()
-
-	out, err := BuildStores(context.Background(), []AuthSpec{
-		{
-			Name:         "primary",
-			Type:         "hugr",
-			DiscoverURL:  hugrURL,
-			BaseURL:      "http://localhost:10000",
-			CallbackPath: "/auth/callback",
-		},
-	}, mux, nil)
+	src, err := BuildHugrSource(context.Background(), AuthSpec{
+		Name:        "hugr",
+		Type:        "hugr",
+		DiscoverURL: hugrURL,
+		BaseURL:     "http://localhost:10000",
+	}, nil)
 	require.NoError(t, err)
-	require.NotNil(t, out.Tokens["primary"])
-	require.Len(t, out.PromptLogin, 1)
-	// OIDC path registered both /auth/login and /auth/callback on mux.
-	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	// Should redirect to the IdP authorize endpoint, not 404.
-	assert.NotEqual(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "hugr", src.Name())
+	_, isOIDC := src.(*OIDCStore)
+	assert.True(t, isOIDC, "OIDC fallback yields OIDCStore")
 }
 
-func TestBuildStores_CallbackPathCollision(t *testing.T) {
-	hugrURL := fakeHugr(t)
-	mux := http.NewServeMux()
-	_, err := BuildStores(context.Background(), []AuthSpec{
-		{
-			Name:         "a",
-			Type:         "hugr",
-			DiscoverURL:  hugrURL,
-			BaseURL:      "http://localhost:10000",
-			CallbackPath: "/auth/callback",
-		},
-		{
-			Name:         "b",
-			Type:         "hugr",
-			DiscoverURL:  hugrURL,
-			BaseURL:      "http://localhost:10000",
-			CallbackPath: "/auth/callback", // same path
-		},
-	}, mux, nil)
+func TestBuildHugrSource_MissingName(t *testing.T) {
+	_, err := BuildHugrSource(context.Background(), AuthSpec{
+		Type: "hugr", AccessToken: "x", TokenURL: "y",
+	}, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "callback path")
+	assert.Contains(t, err.Error(), "empty name")
 }
 
-func TestBuildStores_UnknownType(t *testing.T) {
-	_, err := BuildStores(context.Background(), []AuthSpec{
+func TestBuildSources_UnknownType(t *testing.T) {
+	reg := NewSourceRegistry(nil)
+	primary, err := BuildHugrSource(context.Background(), AuthSpec{
+		Name: "hugr", Type: "hugr", AccessToken: "s", TokenURL: "http://x/t",
+	}, nil)
+	require.NoError(t, err)
+	require.NoError(t, reg.AddPrimary(primary))
+
+	err = BuildSources(context.Background(), []AuthSpec{
 		{Name: "weird", Type: "nope"},
-	}, http.NewServeMux(), nil)
+	}, reg, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported type")
 }
 
-func TestDerivedLoginPath(t *testing.T) {
-	tests := []struct {
-		callback string
-		explicit string
-		want     string
-	}{
-		{"/auth/callback", "", "/auth/login"},
-		{"/auth/callback", "/custom/login", "/custom/login"},
-		{"/auth/callback-staging", "", "/auth/callback-staging-login"},
-		{"/api/v1/auth/callback", "", "/api/v1/auth/login"},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, derivedLoginPath(tt.callback, tt.explicit),
-			"callback=%q explicit=%q", tt.callback, tt.explicit)
-	}
+func TestBuildSources_AliasHugrType(t *testing.T) {
+	// Seed registry with a primary Source (any name — alias lookup
+	// no longer depends on it being literally "hugr").
+	reg := NewSourceRegistry(nil)
+	primary, err := BuildHugrSource(context.Background(), AuthSpec{
+		Name: "my-hugr", Type: "hugr", AccessToken: "seed", TokenURL: "http://x/token",
+	}, nil)
+	require.NoError(t, err)
+	require.NoError(t, reg.AddPrimary(primary))
+
+	// A provider-auth entry of type=hugr should alias onto the primary.
+	require.NoError(t, BuildSources(context.Background(), []AuthSpec{
+		{Name: "mcp-inline", Type: "hugr"},
+	}, reg, nil))
+
+	got, ok := reg.Source("mcp-inline")
+	require.True(t, ok)
+	assert.Same(t, primary, got)
+}
+
+func TestBuildSources_HugrWithoutPrimary(t *testing.T) {
+	reg := NewSourceRegistry(nil)
+	err := BuildSources(context.Background(), []AuthSpec{
+		{Name: "mcp-inline", Type: "hugr"},
+	}, reg, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no primary Source registered")
+}
+
+func TestRegistry_AddPrimaryOnce(t *testing.T) {
+	reg := NewSourceRegistry(nil)
+	a, _ := BuildHugrSource(context.Background(), AuthSpec{Name: "a", Type: "hugr", AccessToken: "x", TokenURL: "y"}, nil)
+	b, _ := BuildHugrSource(context.Background(), AuthSpec{Name: "b", Type: "hugr", AccessToken: "x", TokenURL: "y"}, nil)
+	require.NoError(t, reg.AddPrimary(a))
+	err := reg.AddPrimary(b)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
+	assert.Equal(t, "a", reg.Primary())
 }

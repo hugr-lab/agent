@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hugr-lab/hugen/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,13 +20,16 @@ func setupCatalogue(t *testing.T) string {
 	require.NoError(t, os.MkdirAll(filepath.Join(skillDir, "references"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
 name: test-skill
+version: "0.1.0"
 description: A test skill
 categories: [test, unit]
 autoload: false
 providers:
-  - provider: hugr-main
+  - name: hugr-main
+    provider: hugr-main
     tools: [discovery-*]
-  - endpoint: http://localhost:8080/mcp
+  - name: inline-mcp
+    endpoint: http://localhost:8080/mcp
     tools: [x]
 ---
 
@@ -150,7 +152,82 @@ func TestFileManager_RenderCatalog(t *testing.T) {
 	assert.Contains(t, text, "test-skill")
 	assert.Contains(t, text, "simple-skill")
 
-	assert.Empty(t, m.RenderCatalog([]interfaces.SkillMeta{}))
+	assert.Empty(t, m.RenderCatalog([]SkillMeta{}))
+}
+
+func TestFileManager_LoadMemoryYAML(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "memory-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: memory-skill
+description: test memory parsing
+---
+
+Body.
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "memory.yaml"), []byte(`categories:
+  schema:
+    volatility: stable
+    initial_score: 0.8
+review:
+  enabled: true
+  min_tool_calls: 3
+  prompt: Extract schema facts.
+compaction:
+  preserve: [schema, numbers]
+  discard: [greetings]
+`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := m.Load(context.Background(), "memory-skill")
+	require.NoError(t, err)
+	require.NotNil(t, sk.Memory)
+	require.NotNil(t, sk.Memory.Categories["schema"])
+	assert.Equal(t, "stable", sk.Memory.Categories["schema"].Volatility)
+	assert.InDelta(t, 0.8, sk.Memory.Categories["schema"].InitialScore, 0.001)
+	assert.True(t, sk.Memory.Review.Enabled)
+	assert.Equal(t, 3, sk.Memory.Review.MinToolCalls)
+	assert.ElementsMatch(t, []string{"schema", "numbers"}, sk.Memory.Compaction.Preserve)
+}
+
+func TestFileManager_LoadMemoryYAML_MalformedGoesToNil(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "bad-memory-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: bad-memory-skill
+---
+
+Body.
+`), 0o644))
+	// Malformed YAML — reviewer should see Memory == nil, not a crash.
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "memory.yaml"), []byte("this: is: not valid: yaml: :::"), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := m.Load(context.Background(), "bad-memory-skill")
+	require.NoError(t, err)
+	assert.Nil(t, sk.Memory)
+}
+
+func TestFileManager_LoadMemoryYAML_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "no-memory-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: no-memory-skill
+---
+
+Body.
+`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := m.Load(context.Background(), "no-memory-skill")
+	require.NoError(t, err)
+	assert.Nil(t, sk.Memory)
 }
 
 func TestFileManager_EndpointEnvExpansion(t *testing.T) {
@@ -158,7 +235,7 @@ func TestFileManager_EndpointEnvExpansion(t *testing.T) {
 	skillDir := filepath.Join(dir, "env-skill")
 	require.NoError(t, os.MkdirAll(skillDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
-		[]byte("---\nname: env-skill\nproviders:\n  - endpoint: ${TEST_MCP_EP}\n---\ntext"), 0o644))
+		[]byte("---\nname: env-skill\nproviders:\n  - name: env\n    endpoint: ${TEST_MCP_EP}\n---\ntext"), 0o644))
 	t.Setenv("TEST_MCP_EP", "http://test:9090/mcp")
 
 	m, err := NewFileManager(dir)
@@ -167,4 +244,131 @@ func TestFileManager_EndpointEnvExpansion(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, s.Providers, 1)
 	assert.Equal(t, "http://test:9090/mcp", s.Providers[0].Endpoint)
+}
+
+// --- Commit #3 additions: Version, required Name, auth fields ---
+
+func TestFileManager_Load_VersionField(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "versioned")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: versioned
+version: "1.2.3"
+providers:
+  - name: p
+    provider: x
+---
+body`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	s, err := m.Load(context.Background(), "versioned")
+	require.NoError(t, err)
+	assert.Equal(t, "1.2.3", s.Version)
+}
+
+func TestFileManager_Load_EmptyVersionPreservesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "unversioned")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: unversioned
+providers:
+  - name: p
+    provider: x
+---
+body`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	s, err := m.Load(context.Background(), "unversioned")
+	require.NoError(t, err)
+	assert.Empty(t, s.Version, "absent version field → empty string")
+}
+
+func TestFileManager_Load_ProviderNameRequired(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "no-name")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: no-name
+providers:
+  - provider: hugr
+---
+body`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	_, err = m.Load(context.Background(), "no-name")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name is required")
+}
+
+func TestFileManager_Load_RejectsProviderAndEndpointTogether(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "both")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: both
+providers:
+  - name: p
+    provider: hugr
+    endpoint: http://x
+---
+body`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	_, err = m.Load(context.Background(), "both")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestFileManager_Load_RejectsNeither(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "neither")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: neither
+providers:
+  - name: p
+    tools: [x-*]
+---
+body`), 0o644))
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	_, err = m.Load(context.Background(), "neither")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "either provider or endpoint")
+}
+
+func TestFileManager_Load_HeaderAuthEnvExpansion(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "hdr")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: hdr
+providers:
+  - name: weather
+    endpoint: ${WX_URL}
+    auth_type: header
+    auth_header_name: X-API-Key
+    auth_header_value: ${WX_KEY}
+---
+body`), 0o644))
+	t.Setenv("WX_URL", "http://weather.example/mcp")
+	t.Setenv("WX_KEY", "k-42")
+
+	m, err := NewFileManager(dir)
+	require.NoError(t, err)
+	s, err := m.Load(context.Background(), "hdr")
+	require.NoError(t, err)
+	require.Len(t, s.Providers, 1)
+	p := s.Providers[0]
+	assert.Equal(t, "http://weather.example/mcp", p.Endpoint)
+	assert.Equal(t, "header", p.AuthType)
+	assert.Equal(t, "X-API-Key", p.AuthHeaderName)
+	assert.Equal(t, "k-42", p.AuthHeaderValue)
 }
