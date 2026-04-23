@@ -63,20 +63,9 @@ func NewAgent(cfg Runtime) (agent.Agent, error) {
 		cfg.Logger = slog.Default()
 	}
 
-	baseInstruction := func(ctx agent.ReadonlyContext) (string, error) {
-		sid := ctx.SessionID()
-		if sid == "" {
-			return "", nil
-		}
-		sess, err := cfg.Sessions.Session(sid)
-		if err != nil {
-			return "", fmt.Errorf("agent: instruction provider: %w", err)
-		}
-		return sess.Snapshot().Prompt, nil
-	}
 	instruction := cfg.InstructionProvider
 	if instruction == nil {
-		instruction = baseInstruction
+		instruction = BaseInstructionProvider(cfg.Sessions)
 	}
 
 	return llmagent.New(llmagent.Config{

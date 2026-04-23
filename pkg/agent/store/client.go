@@ -1,4 +1,4 @@
-// Package registry exposes hub.db agent + agent_types operations
+// Package store exposes hub.db agent + agent_types operations
 // through a typed Client.
 package store
 
