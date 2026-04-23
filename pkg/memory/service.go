@@ -130,7 +130,7 @@ func (t *memorySearchTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"category": {
 					Type:        "STRING",
-					Description: "Optional category filter, e.g. \"schema\", \"query_template\", \"anti_pattern\".",
+					Description: "Optional category filter. Valid category names are listed under each active skill's \"Memory categories\" block in the system prompt. Call memory_stats to see which categories currently have facts.",
 				},
 				"limit": {
 					Type:        "INTEGER",

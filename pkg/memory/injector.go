@@ -107,7 +107,7 @@ func renderStatus(ctx agent.ReadonlyContext, sid string, memory *memstore.Client
 			out += fmt.Sprintf(". Session notes: %d.", len(notes))
 		}
 	}
-	out += "\nUse memory_search(query, tags?) to retrieve. Use memory_note(content) to save."
+	out += "\nRun `memory_search` at the start of any new topic before exploring; `memory_note` durable findings as soon as you learn them."
 	return out
 }
 
