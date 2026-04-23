@@ -10,10 +10,3 @@ type Snapshot struct {
 	Prompt string
 	Tools  []tool.Tool
 }
-
-// MCPSpec is the endpoint information needed to stand up an MCP toolset
-// for a skill. Produced by skills.Manager.
-type MCPSpec struct {
-	SkillName string
-	Endpoint  string
-}

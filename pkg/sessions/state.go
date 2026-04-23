@@ -1,7 +1,7 @@
-// Package session implements the runtime SessionManager and Session, plus
-// the ADK session.Service so a single type owns both hugr-specific
-// session state (active skills, tools, refs) and ADK-visible conversation
-// state/events.
+// Package sessions implements the runtime SessionManager and Session,
+// plus the ADK session.Service so a single type owns both hugr-specific
+// session state (active skills, tools, refs) and ADK-visible
+// conversation state/events.
 package sessions
 
 import (

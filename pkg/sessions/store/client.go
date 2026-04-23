@@ -1,4 +1,4 @@
-// Package sessions exposes agent-scoped hub.db session operations
+// Package store exposes agent-scoped hub.db session operations
 // (sessions + session_events + session_notes + session_participants)
 // through a typed Client. Constructed by the caller with a
 // types.Querier.
