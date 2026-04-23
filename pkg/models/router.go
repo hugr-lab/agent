@@ -1,3 +1,8 @@
+// Package models owns the agent's LLM adapters and intent-based
+// router. The Router resolves an Intent to a concrete model.LLM from
+// a pool of providers (hugr-hosted or native SDKs), exposes a
+// TokenEstimator for prompt-size feedback, and provides scripted test
+// doubles for deterministic unit tests.
 package models
 
 import (

@@ -1,9 +1,7 @@
-// Package test provides deterministic adapters for testing.
 package models
 
 import (
 	"context"
-	"encoding/json"
 	"iter"
 
 	"google.golang.org/adk/model"
@@ -36,15 +34,6 @@ type ScriptedLLM struct {
 // NewScriptedLLM creates a scripted LLM from a sequence of responses.
 func NewScriptedLLM(name string, responses []ScriptedResponse) *ScriptedLLM {
 	return &ScriptedLLM{name: name, responses: responses}
-}
-
-// NewScriptedLLMFromJSON creates a scripted LLM from a JSON fixture.
-func NewScriptedLLMFromJSON(name string, data []byte) (*ScriptedLLM, error) {
-	var responses []ScriptedResponse
-	if err := json.Unmarshal(data, &responses); err != nil {
-		return nil, err
-	}
-	return NewScriptedLLM(name, responses), nil
 }
 
 func (m *ScriptedLLM) Name() string { return m.name }
