@@ -3,10 +3,12 @@
 package migrate_test
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -71,4 +73,111 @@ func TestEnsure_MatchingConfigOK(t *testing.T) {
 	// Second run with the same config is a no-op (schema up to date).
 	cfg.Seed = nil
 	require.NoError(t, migrate.Ensure(cfg))
+}
+
+// TestEnsure_v002_AdditiveColumns verifies the spec-006 (schema 0.0.2)
+// additive columns + indices land correctly on a fresh provision.
+func TestEnsure_v002_AdditiveColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	require.NoError(t, migrate.Ensure(migrate.Config{
+		Path:          path,
+		VectorSize:    384,
+		EmbedderModel: "gemma-embedding",
+		Seed: &migrate.SeedData{
+			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
+			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
+		},
+	}))
+
+	conn, err := sql.Open("duckdb", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	cases := []struct {
+		table  string
+		column string
+	}{
+		{"sessions", "session_type"},
+		{"sessions", "spawned_from_event_id"},
+		{"session_notes", "author_session_id"},
+		{"session_events", "embedding"},
+	}
+	for _, c := range cases {
+		t.Run(c.table+"."+c.column, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.columns
+                 WHERE table_name = ? AND column_name = ?`,
+				c.table, c.column,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected column %s.%s to exist", c.table, c.column)
+		})
+	}
+
+	// session_type default = 'root'
+	var defaultExpr sql.NullString
+	require.NoError(t, conn.QueryRow(
+		`SELECT column_default FROM information_schema.columns
+         WHERE table_name = 'sessions' AND column_name = 'session_type'`,
+	).Scan(&defaultExpr))
+	require.True(t, defaultExpr.Valid)
+	assert.Contains(t, strings.ToLower(defaultExpr.String), "root")
+
+	// Project convention: DuckDB has NO secondary indices (writes-heavy
+	// workload + scale doesn't justify the maintenance cost). Indices land
+	// only on Postgres deployments. We assert the absence here so a future
+	// edit that accidentally drops the {{ if isPostgres }} guard fails
+	// loudly on the CI DuckDB pass.
+	for _, name := range []string{"idx_sessions_type", "idx_notes_author", "session_events_vss"} {
+		t.Run("no-idx/"+name, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM duckdb_indexes WHERE index_name = ?`, name,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 0, n, "DuckDB should not provision the %s index", name)
+		})
+	}
+
+	// Schema version bumped.
+	var ver string
+	require.NoError(t, conn.QueryRow(
+		`SELECT version FROM version WHERE name = 'schema'`,
+	).Scan(&ver))
+	assert.Equal(t, "0.0.2", ver)
+}
+
+// TestEnsure_v002_NoVectorColumnWhenDisabled — when VectorSize == 0
+// the migration must skip the embedding column / HNSW index but still
+// add the discriminator columns.
+func TestEnsure_v002_NoVectorColumnWhenDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	require.NoError(t, migrate.Ensure(migrate.Config{
+		Path:       path,
+		VectorSize: 0, // embeddings disabled
+		Seed: &migrate.SeedData{
+			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
+			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
+		},
+	}))
+
+	conn, err := sql.Open("duckdb", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Discriminator + author columns still land.
+	var n int
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM information_schema.columns
+         WHERE table_name = 'sessions' AND column_name = 'session_type'`,
+	).Scan(&n))
+	assert.Equal(t, 1, n)
+
+	// embedding column should NOT exist.
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM information_schema.columns
+         WHERE table_name = 'session_events' AND column_name = 'embedding'`,
+	).Scan(&n))
+	assert.Equal(t, 0, n, "embedding column should not exist when VectorSize=0")
 }

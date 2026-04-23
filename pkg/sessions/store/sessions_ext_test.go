@@ -140,3 +140,140 @@ func TestSessions_CountToolCalls_NoEvents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 }
+
+// ----- spec 006 — session_type / spawned_from_event_id / notes chain -----
+
+// TestSessions_SubAgentLinkage covers Record's new spec-006 fields
+// (SessionType + SpawnedFromEventID): they're round-tripped through
+// CreateSession + GetSession unchanged.
+func TestSessions_SubAgentLinkage(t *testing.T) {
+	h := newClient(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+
+	// Coordinator (root) session.
+	_, err := h.CreateSession(ctx, sessstore.Record{
+		ID: "sess-coord", OwnerID: "u1", Status: "active",
+		SessionType: sessstore.SessionTypeRoot,
+	})
+	require.NoError(t, err)
+
+	// Append a tool_call event on the coord (the dispatch event id we'll
+	// link from the child).
+	dispatchEvent := sessstore.Event{
+		SessionID: "sess-coord", EventType: sessstore.EventTypeToolCall,
+		Author: "agent", Content: "subagent_hugr-data_schema_explorer",
+		ToolName: "subagent_hugr-data_schema_explorer",
+	}
+	dispatchEventID, err := h.AppendEvent(ctx, dispatchEvent)
+	require.NoError(t, err)
+
+	// Sub-agent (specialist) session.
+	_, err = h.CreateSession(ctx, sessstore.Record{
+		ID:                 "sess-spec",
+		OwnerID:            "u1",
+		Status:             "active",
+		ParentSessionID:    "sess-coord",
+		SessionType:        sessstore.SessionTypeSubAgent,
+		SpawnedFromEventID: dispatchEventID,
+		Mission:            "describe tf.incidents",
+	})
+	require.NoError(t, err)
+
+	got, err := h.GetSession(ctx, "sess-spec")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, sessstore.SessionTypeSubAgent, got.SessionType)
+	assert.Equal(t, "sess-coord", got.ParentSessionID)
+	assert.Equal(t, dispatchEventID, got.SpawnedFromEventID)
+	assert.Equal(t, "describe tf.incidents", got.Mission)
+
+	// Coordinator round-trip preserves session_type = "root".
+	gotCoord, err := h.GetSession(ctx, "sess-coord")
+	require.NoError(t, err)
+	require.NotNil(t, gotCoord)
+	assert.Equal(t, sessstore.SessionTypeRoot, gotCoord.SessionType)
+	assert.Empty(t, gotCoord.SpawnedFromEventID)
+	assert.Empty(t, gotCoord.ParentSessionID)
+}
+
+// TestSessions_NotesChain exercises ListNotesChain — sub-agent writes
+// a note targeted at the parent (scope=parent), root writes its own
+// note; the chain query from the sub-agent's vantage returns BOTH
+// own and parent's, ordered own-first.
+func TestSessions_NotesChain(t *testing.T) {
+	h := newClient(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+
+	// Coordinator + sub-agent sessions.
+	_, err := h.CreateSession(ctx, sessstore.Record{
+		ID: "sess-coord-2", OwnerID: "u1", Status: "active",
+		SessionType: sessstore.SessionTypeRoot,
+	})
+	require.NoError(t, err)
+	_, err = h.CreateSession(ctx, sessstore.Record{
+		ID: "sess-sub-2", OwnerID: "u1", Status: "active",
+		ParentSessionID: "sess-coord-2",
+		SessionType:     sessstore.SessionTypeSubAgent,
+	})
+	require.NoError(t, err)
+
+	// 1. Root writes its own note (scope=self → session_id == author == coord).
+	_, err = h.AddNote(ctx, sessstore.Note{
+		SessionID: "sess-coord-2",
+		Content:   "user wants BW Q1",
+	})
+	require.NoError(t, err)
+
+	// 2. Sub-agent writes a note "up" to the parent
+	//    (scope=parent → session_id = coord, author = sub).
+	_, err = h.AddNote(ctx, sessstore.Note{
+		SessionID:       "sess-coord-2",
+		AuthorSessionID: "sess-sub-2",
+		Content:         "station_id FK -> stations",
+	})
+	require.NoError(t, err)
+
+	// 3. Sub-agent writes a self-scoped note for its own working set.
+	_, err = h.AddNote(ctx, sessstore.Note{
+		SessionID: "sess-sub-2",
+		Content:   "20 fields discovered",
+	})
+	require.NoError(t, err)
+
+	// Chain query from the sub-agent's vantage: own (depth 0) +
+	// parent's (depth 1).
+	chain, err := h.ListNotesChain(ctx, "sess-sub-2")
+	require.NoError(t, err)
+	require.Len(t, chain, 3)
+
+	// Depth 0 first (own note).
+	assert.Equal(t, 0, chain[0].ChainDepth)
+	assert.Equal(t, "sess-sub-2", chain[0].SessionID)
+	assert.Equal(t, "20 fields discovered", chain[0].Content)
+
+	// Depth 1: two parent notes (rendered most-recent first).
+	assert.Equal(t, 1, chain[1].ChainDepth)
+	assert.Equal(t, 1, chain[2].ChainDepth)
+
+	// Authorship is preserved across the chain — the promoted note keeps
+	// AuthorSessionID = "sess-sub-2" even though SessionID = "sess-coord-2".
+	var foundPromoted bool
+	for _, n := range chain {
+		if n.Content == "station_id FK -> stations" {
+			foundPromoted = true
+			assert.Equal(t, "sess-coord-2", n.SessionID)
+			assert.Equal(t, "sess-sub-2", n.AuthorSessionID)
+		}
+	}
+	assert.True(t, foundPromoted, "promoted note from sub-agent should appear in chain")
+
+	// Chain query from the coordinator's vantage: only its own scope
+	// (sub-agent's self-note depth=1 NOT visible — it lives "below").
+	coordChain, err := h.ListNotesChain(ctx, "sess-coord-2")
+	require.NoError(t, err)
+	require.Len(t, coordChain, 2)
+	for _, n := range coordChain {
+		assert.Equal(t, 0, n.ChainDepth)
+		assert.Equal(t, "sess-coord-2", n.SessionID)
+	}
+}

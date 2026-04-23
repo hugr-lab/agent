@@ -26,10 +26,18 @@ func (c *Client) CreateSession(ctx context.Context, s Record) (string, error) {
 	if status == "" {
 		status = "active"
 	}
+	sessionType := s.SessionType
+	if sessionType == "" {
+		// Schema column is NOT NULL with default 'root'; explicit value here
+		// keeps the Hugr GraphQL mutation input check happy regardless of how
+		// the engine treats column defaults.
+		sessionType = SessionTypeRoot
+	}
 	data := map[string]any{
-		"id":       s.ID,
-		"agent_id": s.AgentID,
-		"status":   status,
+		"id":           s.ID,
+		"agent_id":     s.AgentID,
+		"status":       status,
+		"session_type": sessionType,
 	}
 	if s.OwnerID != "" {
 		data["owner_id"] = s.OwnerID
@@ -39,6 +47,9 @@ func (c *Client) CreateSession(ctx context.Context, s Record) (string, error) {
 	}
 	if s.ForkAfterSeq != nil {
 		data["fork_after_seq"] = *s.ForkAfterSeq
+	}
+	if s.SpawnedFromEventID != "" {
+		data["spawned_from_event_id"] = s.SpawnedFromEventID
 	}
 	if s.Mission != "" {
 		data["mission"] = s.Mission
@@ -79,22 +90,24 @@ func (c *Client) UpdateSessionStatus(ctx context.Context, id, status string) err
 // status="active". Used by SessionManager.RestoreOpen on startup.
 func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 	type row struct {
-		ID              string         `json:"id"`
-		AgentID         string         `json:"agent_id"`
-		OwnerID         string         `json:"owner_id"`
-		ParentSessionID string         `json:"parent_session_id"`
-		ForkAfterSeq    *int           `json:"fork_after_seq"`
-		Status          string         `json:"status"`
-		Mission         string         `json:"mission"`
-		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       time.Time         `json:"created_at"`
-		UpdatedAt       time.Time         `json:"updated_at"`
+		ID                 string         `json:"id"`
+		AgentID            string         `json:"agent_id"`
+		OwnerID            string         `json:"owner_id"`
+		ParentSessionID    string         `json:"parent_session_id"`
+		ForkAfterSeq       *int           `json:"fork_after_seq"`
+		SessionType        string         `json:"session_type"`
+		SpawnedFromEventID string         `json:"spawned_from_event_id"`
+		Status             string         `json:"status"`
+		Mission            string         `json:"mission"`
+		Metadata           map[string]any `json:"metadata"`
+		CreatedAt          time.Time      `json:"created_at"`
+		UpdatedAt          time.Time      `json:"updated_at"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, status: {eq: "active"}}) {
-					id agent_id owner_id parent_session_id fork_after_seq status mission metadata created_at updated_at
+					id agent_id owner_id parent_session_id fork_after_seq session_type spawned_from_event_id status mission metadata created_at updated_at
 				}
 			}}}
 		}`,
@@ -110,16 +123,18 @@ func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 	out := make([]Record, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Record{
-			ID:              r.ID,
-			AgentID:         r.AgentID,
-			OwnerID:         r.OwnerID,
-			ParentSessionID: r.ParentSessionID,
-			ForkAfterSeq:    r.ForkAfterSeq,
-			Status:          r.Status,
-			Mission:         r.Mission,
-			Metadata:        r.Metadata,
-			CreatedAt:       r.CreatedAt,
-			UpdatedAt:       r.UpdatedAt,
+			ID:                 r.ID,
+			AgentID:            r.AgentID,
+			OwnerID:            r.OwnerID,
+			ParentSessionID:    r.ParentSessionID,
+			ForkAfterSeq:       r.ForkAfterSeq,
+			SessionType:        r.SessionType,
+			SpawnedFromEventID: r.SpawnedFromEventID,
+			Status:             r.Status,
+			Mission:            r.Mission,
+			Metadata:           r.Metadata,
+			CreatedAt:          r.CreatedAt,
+			UpdatedAt:          r.UpdatedAt,
 		})
 	}
 	return out, nil
@@ -243,22 +258,24 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 // the session is not found.
 func (c *Client) GetSession(ctx context.Context, id string) (*Record, error) {
 	type row struct {
-		ID              string         `json:"id"`
-		AgentID         string         `json:"agent_id"`
-		OwnerID         string         `json:"owner_id"`
-		ParentSessionID string         `json:"parent_session_id"`
-		ForkAfterSeq    *int           `json:"fork_after_seq"`
-		Status          string         `json:"status"`
-		Mission         string         `json:"mission"`
-		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       time.Time         `json:"created_at"`
-		UpdatedAt       time.Time         `json:"updated_at"`
+		ID                 string         `json:"id"`
+		AgentID            string         `json:"agent_id"`
+		OwnerID            string         `json:"owner_id"`
+		ParentSessionID    string         `json:"parent_session_id"`
+		ForkAfterSeq       *int           `json:"fork_after_seq"`
+		SessionType        string         `json:"session_type"`
+		SpawnedFromEventID string         `json:"spawned_from_event_id"`
+		Status             string         `json:"status"`
+		Mission            string         `json:"mission"`
+		Metadata           map[string]any `json:"metadata"`
+		CreatedAt          time.Time      `json:"created_at"`
+		UpdatedAt          time.Time      `json:"updated_at"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $id: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, id: {eq: $id}}, limit: 1) {
-					id agent_id owner_id parent_session_id fork_after_seq status mission metadata created_at updated_at
+					id agent_id owner_id parent_session_id fork_after_seq session_type spawned_from_event_id status mission metadata created_at updated_at
 				}
 			}}}
 		}`,
@@ -276,16 +293,18 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Record, error) {
 	}
 	r := rows[0]
 	return &Record{
-		ID:              r.ID,
-		AgentID:         r.AgentID,
-		OwnerID:         r.OwnerID,
-		ParentSessionID: r.ParentSessionID,
-		ForkAfterSeq:    r.ForkAfterSeq,
-		Status:          r.Status,
-		Mission:         r.Mission,
-		Metadata:        r.Metadata,
-		CreatedAt:       r.CreatedAt,
-		UpdatedAt:       r.UpdatedAt,
+		ID:                 r.ID,
+		AgentID:            r.AgentID,
+		OwnerID:            r.OwnerID,
+		ParentSessionID:    r.ParentSessionID,
+		ForkAfterSeq:       r.ForkAfterSeq,
+		SessionType:        r.SessionType,
+		SpawnedFromEventID: r.SpawnedFromEventID,
+		Status:             r.Status,
+		Mission:            r.Mission,
+		Metadata:           r.Metadata,
+		CreatedAt:          r.CreatedAt,
+		UpdatedAt:          r.UpdatedAt,
 	}, nil
 }
 
@@ -293,22 +312,24 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Record, error) {
 // matches parentSessionID. Empty slice when none exist.
 func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) ([]Record, error) {
 	type row struct {
-		ID              string         `json:"id"`
-		AgentID         string         `json:"agent_id"`
-		OwnerID         string         `json:"owner_id"`
-		ParentSessionID string         `json:"parent_session_id"`
-		ForkAfterSeq    *int           `json:"fork_after_seq"`
-		Status          string         `json:"status"`
-		Mission         string         `json:"mission"`
-		Metadata        map[string]any `json:"metadata"`
-		CreatedAt       time.Time         `json:"created_at"`
-		UpdatedAt       time.Time         `json:"updated_at"`
+		ID                 string         `json:"id"`
+		AgentID            string         `json:"agent_id"`
+		OwnerID            string         `json:"owner_id"`
+		ParentSessionID    string         `json:"parent_session_id"`
+		ForkAfterSeq       *int           `json:"fork_after_seq"`
+		SessionType        string         `json:"session_type"`
+		SpawnedFromEventID string         `json:"spawned_from_event_id"`
+		Status             string         `json:"status"`
+		Mission            string         `json:"mission"`
+		Metadata           map[string]any `json:"metadata"`
+		CreatedAt          time.Time      `json:"created_at"`
+		UpdatedAt          time.Time      `json:"updated_at"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($agent: String!, $parent: String!) {
 			hub { db { agent {
 				sessions(filter: {agent_id: {eq: $agent}, parent_session_id: {eq: $parent}}) {
-					id agent_id owner_id parent_session_id fork_after_seq status mission metadata created_at updated_at
+					id agent_id owner_id parent_session_id fork_after_seq session_type spawned_from_event_id status mission metadata created_at updated_at
 				}
 			}}}
 		}`,
@@ -324,16 +345,18 @@ func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) 
 	out := make([]Record, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Record{
-			ID:              r.ID,
-			AgentID:         r.AgentID,
-			OwnerID:         r.OwnerID,
-			ParentSessionID: r.ParentSessionID,
-			ForkAfterSeq:    r.ForkAfterSeq,
-			Status:          r.Status,
-			Mission:         r.Mission,
-			Metadata:        r.Metadata,
-			CreatedAt:       r.CreatedAt,
-			UpdatedAt:       r.UpdatedAt,
+			ID:                 r.ID,
+			AgentID:            r.AgentID,
+			OwnerID:            r.OwnerID,
+			ParentSessionID:    r.ParentSessionID,
+			ForkAfterSeq:       r.ForkAfterSeq,
+			SessionType:        r.SessionType,
+			SpawnedFromEventID: r.SpawnedFromEventID,
+			Status:             r.Status,
+			Mission:            r.Mission,
+			Metadata:           r.Metadata,
+			CreatedAt:          r.CreatedAt,
+			UpdatedAt:          r.UpdatedAt,
 		})
 	}
 	return out, nil
@@ -447,11 +470,19 @@ func (c *Client) AddNote(ctx context.Context, note Note) (string, error) {
 	if note.AgentID == "" {
 		note.AgentID = c.agentID
 	}
+	// Default author to viewer (self-scope write) so existing callers that
+	// don't set AuthorSessionID continue to behave as before. memory_note's
+	// "parent" / "ancestors" scopes set this explicitly to the writing
+	// session so the note's authorship survives a cross-scope promotion.
+	if note.AuthorSessionID == "" {
+		note.AuthorSessionID = note.SessionID
+	}
 	data := map[string]any{
-		"id":         note.ID,
-		"agent_id":   note.AgentID,
-		"session_id": note.SessionID,
-		"content":    note.Content,
+		"id":                note.ID,
+		"agent_id":          note.AgentID,
+		"session_id":        note.SessionID,
+		"author_session_id": note.AuthorSessionID,
+		"content":           note.Content,
 	}
 	if err := queries.RunMutation(ctx, c.querier,
 		`mutation ($data: hub_db_session_notes_mut_input_data!) {
@@ -467,19 +498,27 @@ func (c *Client) AddNote(ctx context.Context, note Note) (string, error) {
 }
 
 // ListNotes returns every note in a session ordered by created_at ASC.
+//
+// Returns notes whose session_id matches sessionID — i.e. only notes
+// that are visible at this session's level. Cross-session notes
+// promoted up the chain via memory_note(scope: "parent" | "ancestors")
+// land here when sessionID is the chain target. To get the full chain
+// (own + ancestor notes addressed up here from below), use the
+// session_notes_chain view via ListNotesChain.
 func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error) {
 	type row struct {
-		ID        string `json:"id"`
-		AgentID   string `json:"agent_id"`
-		SessionID string `json:"session_id"`
-		Content   string `json:"content"`
-		CreatedAt time.Time `json:"created_at"`
+		ID              string    `json:"id"`
+		AgentID         string    `json:"agent_id"`
+		SessionID       string    `json:"session_id"`
+		AuthorSessionID string    `json:"author_session_id"`
+		Content         string    `json:"content"`
+		CreatedAt       time.Time `json:"created_at"`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier,
 		`query ($sid: String!) {
 			hub { db { agent {
 				session_notes(filter: {session_id: {eq: $sid}}, order_by: [{field: "created_at", direction: ASC}]) {
-					id agent_id session_id content created_at
+					id agent_id session_id author_session_id content created_at
 				}
 			}}}
 		}`,
@@ -495,11 +534,70 @@ func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error
 	out := make([]Note, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Note{
-			ID:        r.ID,
-			AgentID:   r.AgentID,
-			SessionID: r.SessionID,
-			Content:   r.Content,
-			CreatedAt: r.CreatedAt,
+			ID:              r.ID,
+			AgentID:         r.AgentID,
+			SessionID:       r.SessionID,
+			AuthorSessionID: r.AuthorSessionID,
+			Content:         r.Content,
+			CreatedAt:       r.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+// NoteWithDepth carries chain depth alongside a Note for callers that
+// query the session_notes_chain view (spec 006). chain_depth = 0
+// means "own note"; > 0 means "ancestor note visible because this
+// session is its scope target".
+type NoteWithDepth struct {
+	Note
+	ChainDepth int `json:"chain_depth"`
+}
+
+// ListNotesChain returns every note visible to the given session by
+// querying the session_notes_chain view (recursive walk over
+// parent_session_id, depth cap 8). Used by Session.Snapshot's
+// "## Session notes" block (spec 006). Ordering is the view's
+// (chain_depth ASC, created_at DESC) — own notes first.
+func (c *Client) ListNotesChain(ctx context.Context, sessionID string) ([]NoteWithDepth, error) {
+	type row struct {
+		ID              string    `json:"id"`
+		AgentID         string    `json:"agent_id"`
+		SessionID       string    `json:"session_id"`
+		AuthorSessionID string    `json:"author_session_id"`
+		Content         string    `json:"content"`
+		CreatedAt       time.Time `json:"created_at"`
+		ChainDepth      int       `json:"chain_depth"`
+	}
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
+		`query ($input: hub_db_session_notes_chain_input!) {
+			hub { db { agent {
+				session_notes_chain(args: $input) {
+					id agent_id session_id author_session_id content created_at chain_depth
+				}
+			}}}
+		}`,
+		map[string]any{"input": map[string]any{"session_id": sessionID}},
+		"hub.db.agent.session_notes_chain",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]NoteWithDepth, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, NoteWithDepth{
+			Note: Note{
+				ID:              r.ID,
+				AgentID:         r.AgentID,
+				SessionID:       r.SessionID,
+				AuthorSessionID: r.AuthorSessionID,
+				Content:         r.Content,
+				CreatedAt:       r.CreatedAt,
+			},
+			ChainDepth: r.ChainDepth,
 		})
 	}
 	return out, nil

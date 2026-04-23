@@ -179,21 +179,29 @@ CREATE INDEX IF NOT EXISTS idx_hyp_agent_status ON hypotheses (agent_id, status,
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id                VARCHAR   PRIMARY KEY,
-    agent_id          VARCHAR   NOT NULL,
-    owner_id          VARCHAR,
-    parent_session_id VARCHAR,
-    fork_after_seq    INTEGER,
-    status            VARCHAR   DEFAULT 'active',
-    mission           VARCHAR,
-    metadata          {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
-    created_at        {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }},
-    updated_at        {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }}
+    id                    VARCHAR   PRIMARY KEY,
+    agent_id              VARCHAR   NOT NULL,
+    owner_id              VARCHAR,
+    parent_session_id     VARCHAR,
+    fork_after_seq        INTEGER,
+    -- spec 006 (schema 0.0.2): explicit discriminator. 'root' = user
+    -- conversation, 'subagent' = agent-spawned specialist (own context),
+    -- 'fork' = reserved for future user-initiated fork.
+    session_type          VARCHAR   NOT NULL DEFAULT 'root',
+    -- spec 006: FK to the session_events row on the parent session that
+    -- spawned this child (non-empty only when session_type = 'subagent').
+    spawned_from_event_id VARCHAR,
+    status                VARCHAR   DEFAULT 'active',
+    mission               VARCHAR,
+    metadata              {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
+    created_at            {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }},
+    updated_at            {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }}
 );
 
 {{ if isPostgres }}
 CREATE INDEX IF NOT EXISTS idx_sessions_agent  ON sessions (agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions (parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_type   ON sessions (agent_id, session_type);
 {{ end }}
 
 -- ============================================================
@@ -230,6 +238,13 @@ CREATE TABLE IF NOT EXISTS session_events (
     tool_result VARCHAR,
     metadata    {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
     created_at  {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }}
+    -- spec 006 (schema 0.0.2): semantic embedding of content for semantic
+    -- search. NULL for lifecycle events / oversize / transient embedder
+    -- failures. Populated server-side via Hugr's `summary:` mutation
+    -- parameter on insert (see pkg/sessions/classifier.go).
+    {{ if gt .VectorSize 0 }}
+    ,embedding  {{ if isPostgres }}vector({{ .VectorSize }}){{ else }}FLOAT[{{ .VectorSize }}]{{ end }}
+    {{ end }}
     {{ if .IsTimescale }}, PRIMARY KEY (created_at, id){{ end }}
 );
 
@@ -242,20 +257,38 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON session_events (session_id, seq
 CREATE INDEX IF NOT EXISTS idx_events_type    ON session_events (session_id, event_type);
 {{ end }}
 
+{{ if gt .VectorSize 0 }}
+{{ if isPostgres }}
+CREATE INDEX IF NOT EXISTS session_events_vss
+    ON session_events USING hnsw (embedding vector_cosine_ops);
+{{ end }}
+-- DuckDB HNSW on persistent files needs hnsw_enable_experimental_persistence
+-- = true. We follow the existing convention from memory_items and skip the
+-- index on DuckDB; sequential vector scan is acceptable at single-agent scale
+-- and the engine can be upgraded later by toggling the pragma at startup.
+{{ end }}
+
 -- ============================================================
 -- Session notes
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS session_notes (
-    id          VARCHAR   PRIMARY KEY,
-    agent_id    VARCHAR   NOT NULL,
-    session_id  VARCHAR   NOT NULL,
-    content     VARCHAR   NOT NULL,
-    created_at  {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }}
+    id                VARCHAR   PRIMARY KEY,
+    agent_id          VARCHAR   NOT NULL,
+    session_id        VARCHAR   NOT NULL,
+    -- spec 006 (schema 0.0.2): session that AUTHORED the note. Equals
+    -- session_id for self-scoped writes; differs when a sub-agent
+    -- promotes a note up the parent chain via memory_note(scope:"parent"
+    -- or "ancestors"). Drives author-only delete authority at the LLM
+    -- tool surface (memory_clear_note in pkg/memory/service.go).
+    author_session_id VARCHAR,
+    content           VARCHAR   NOT NULL,
+    created_at        {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }}
 );
 
 {{ if isPostgres }}
 CREATE INDEX IF NOT EXISTS idx_notes_agent_session ON session_notes (agent_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_notes_author        ON session_notes (agent_id, author_session_id);
 {{ end }}
 
 -- ============================================================
