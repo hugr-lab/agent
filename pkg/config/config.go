@@ -50,12 +50,10 @@ type Config struct {
 	Providers []tools.ProviderConfig
 }
 
-// AuthConfig declares a named auth mechanism. Callers build a
-// TokenStore per config and mount any required HTTP callback routes on
-// the given mux. callback_path must be unique across all OIDC entries
-// in the same process.
-//
-// Remains in pkg/config pending a separate auth-focused refactor.
+// AuthConfig is the YAML-decoded form of an auth entry. It mirrors
+// pkg/auth.AuthSpec but carries mapstructure tags for viper — keeps
+// pkg/auth YAML-agnostic and lets cmd/agent/runtime.go translate one
+// to the other when wiring the SourceRegistry.
 type AuthConfig struct {
 	Name         string `mapstructure:"name"`
 	Type         string `mapstructure:"type"` // hugr | oidc
@@ -131,14 +129,13 @@ func LoadLocal(yamlPath string, boot *BootstrapConfig) (*Config, error) {
 			return nil, fmt.Errorf("config: load yaml %s: %w", yamlPath, err)
 		}
 	}
-
-	if cfg.MCP.TTL == 0 {
+	// If yamlPath was empty, we skipped applyYAML → apply the shared
+	// finalize step directly to fill MCP defaults for pure-env
+	// callers (tests).
+	if yamlPath == "" {
 		cfg.MCP.TTL = 60 * time.Second
-	}
-	if cfg.MCP.FetchTimeout == 0 {
 		cfg.MCP.FetchTimeout = 30 * time.Second
 	}
-
 	return cfg, nil
 }
 
@@ -174,12 +171,12 @@ func expandProvidersEnv(list []tools.ProviderConfig) {
 	}
 }
 
-// validateAuth enforces unique auth names + unique callback paths (for
-// oidc entries). Called at load time — failures abort startup so we
-// never get a silent route collision at first-request time.
+// validateAuth enforces unique auth names + supported types. The
+// old "unique callback_path" check went away with the single-/auth/
+// callback dispatcher — every Source now shares the same path and
+// routing happens on OAuth state prefix at request time.
 func validateAuth(list []AuthConfig) error {
 	seenNames := map[string]struct{}{}
-	seenPaths := map[string]string{}
 	for _, a := range list {
 		if a.Name == "" {
 			return fmt.Errorf("config: auth entry has empty name")
@@ -188,21 +185,9 @@ func validateAuth(list []AuthConfig) error {
 			return fmt.Errorf("config: duplicate auth name %q", a.Name)
 		}
 		seenNames[a.Name] = struct{}{}
-
 		switch a.Type {
 		case "hugr", "oidc":
-			// Both types may end up registering an OIDC callback —
-			// `hugr` only when it falls back to OIDC discovery. We
-			// reserve the path at config-parse time so two auth
-			// entries can't race for it at runtime.
-			path := a.CallbackPath
-			if path == "" {
-				path = "/auth/callback"
-			}
-			if owner, dup := seenPaths[path]; dup {
-				return fmt.Errorf("config: auth %q callback_path %q collides with auth %q", a.Name, path, owner)
-			}
-			seenPaths[path] = a.Name
+			// supported
 		default:
 			return fmt.Errorf("config: auth %q has unsupported type %q (want hugr|oidc)", a.Name, a.Type)
 		}
@@ -256,8 +241,15 @@ func applyYAML(cfg *Config, path string) error {
 	if err := y.ReadInConfig(); err != nil {
 		return err
 	}
+	return decodeAndFinalize(y, cfg)
+}
 
-	if err := unmarshalSections(y, cfg); err != nil {
+// decodeAndFinalize runs the full post-source-read pipeline shared by
+// YAML and remote paths: unmarshal every section, expand ${ENV_VAR}
+// in auth + providers, validate both lists, and apply MCP defaults.
+// Callers only need to seed the viper with their source data.
+func decodeAndFinalize(v *viper.Viper, cfg *Config) error {
+	if err := unmarshalSections(v, cfg); err != nil {
 		return err
 	}
 	expandAuthEnv(cfg.Auth)
@@ -267,6 +259,63 @@ func applyYAML(cfg *Config, path string) error {
 	}
 	if err := validateProviders(cfg.Providers, cfg.Auth); err != nil {
 		return err
+	}
+	if cfg.MCP.TTL == 0 {
+		cfg.MCP.TTL = 60 * time.Second
+	}
+	if cfg.MCP.FetchTimeout == 0 {
+		cfg.MCP.FetchTimeout = 30 * time.Second
+	}
+	return nil
+}
+
+// unmarshalSections is the per-section UnmarshalKey chain that both
+// YAML and remote paths feed. Identity + constitution are both read
+// from the `agent:` key — unmarshal-by-tag keeps them from
+// conflicting.
+func unmarshalSections(v *viper.Viper, cfg *Config) error {
+	if err := v.UnmarshalKey("agent", &cfg.Identity); err != nil {
+		return fmt.Errorf("unmarshal agent (identity): %w", err)
+	}
+	if c := v.GetString("agent.constitution"); c != "" {
+		cfg.Agent.Constitution = c
+	}
+	if err := v.UnmarshalKey("skills", &cfg.Skills); err != nil {
+		return fmt.Errorf("unmarshal skills: %w", err)
+	}
+	if err := v.UnmarshalKey("a2a", &cfg.A2A); err != nil {
+		return fmt.Errorf("unmarshal a2a: %w", err)
+	}
+	if err := v.UnmarshalKey("devui", &cfg.DevUI); err != nil {
+		return fmt.Errorf("unmarshal devui: %w", err)
+	}
+	cfg.LocalDBEnabled = v.GetBool("local_db_enabled")
+	if err := v.UnmarshalKey("local_db", &cfg.LocalDB); err != nil {
+		return fmt.Errorf("unmarshal local_db: %w", err)
+	}
+	if err := v.UnmarshalKey("memory", &cfg.Memory); err != nil {
+		return fmt.Errorf("unmarshal memory: %w", err)
+	}
+	if err := v.UnmarshalKey("chatcontext", &cfg.ChatContext); err != nil {
+		return fmt.Errorf("unmarshal chatcontext: %w", err)
+	}
+	if err := v.UnmarshalKey("llm", &cfg.LLM); err != nil {
+		return fmt.Errorf("unmarshal llm: %w", err)
+	}
+	if err := v.UnmarshalKey("embedding", &cfg.Embedding); err != nil {
+		return fmt.Errorf("unmarshal embedding: %w", err)
+	}
+	if err := v.UnmarshalKey("mcp", &cfg.MCP); err != nil {
+		return fmt.Errorf("unmarshal mcp: %w", err)
+	}
+	if a := v.GetString("hugr.auth"); a != "" {
+		cfg.Hugr.Auth = a
+	}
+	if err := v.UnmarshalKey("auth", &cfg.Auth); err != nil {
+		return fmt.Errorf("unmarshal auth: %w", err)
+	}
+	if err := v.UnmarshalKey("providers", &cfg.Providers); err != nil {
+		return fmt.Errorf("unmarshal providers: %w", err)
 	}
 	return nil
 }

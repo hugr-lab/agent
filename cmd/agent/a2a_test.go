@@ -207,7 +207,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 
 	// Register the real skills.Service so the test exercises the same
 	// provider wiring as production.
-	toolsMgr.AddProvider(skills.NewService(skillsSessionAdapter{sm: sessionMgr}))
+	toolsMgr.AddProvider(skills.NewService(sessionMgr.SkillsAccessor()))
 
 	tokens := cfg.tokens
 	if tokens == nil {

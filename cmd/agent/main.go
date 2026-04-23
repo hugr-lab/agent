@@ -149,6 +149,35 @@ func bootstrap(ctx context.Context, boot *config.BootstrapConfig, logger *slog.L
 	}, nil
 }
 
+// registerProviderAuth is Phase B.5: adds cfg.Auth provider entries
+// (excluding the already-registered hugr Source) to the existing
+// registry. Entries with type=hugr become aliases.
+func registerProviderAuth(ctx context.Context, cfg *config.Config, reg *auth.SourceRegistry, logger *slog.Logger) error {
+	specs := make([]auth.AuthSpec, 0, len(cfg.Auth))
+	for _, a := range cfg.Auth {
+		if a.Name == "hugr" {
+			// The primary hugr Source is already registered — skip
+			// to avoid a duplicate-name error. Provider entries that
+			// want to reuse it should declare a distinct name and
+			// type=hugr (alias resolution in BuildSources).
+			continue
+		}
+		specs = append(specs, auth.AuthSpec{
+			Name:         a.Name,
+			Type:         a.Type,
+			Issuer:       a.Issuer,
+			ClientID:     a.ClientID,
+			CallbackPath: a.CallbackPath,
+			LoginPath:    a.LoginPath,
+			BaseURL:      cfg.A2A.BaseURL,
+			AccessToken:  a.AccessToken,
+			TokenURL:     a.TokenURL,
+			DiscoverURL:  cfg.Hugr.URL,
+		})
+	}
+	return auth.BuildSources(ctx, specs, reg, logger)
+}
+
 // ---------------------------------------------------------------------
 // Mode dispatch
 // ---------------------------------------------------------------------

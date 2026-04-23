@@ -171,6 +171,21 @@ func (m *Manager) Session(id string) (*Session, error) {
 	return s, nil
 }
 
+// SkillsAccessor wraps the Manager to satisfy skills.SessionAccessor.
+// Go method-return covariance is strict — Manager.Session(id) returns
+// *Session (concrete) rather than skills.Session (interface), so a
+// tiny adapter is the cleanest bridge. Lives in pkg/sessions because
+// the adapter is session-domain glue, not a cmd-level concern.
+func (m *Manager) SkillsAccessor() skills.SessionAccessor {
+	return skillsAccessor{m: m}
+}
+
+type skillsAccessor struct{ m *Manager }
+
+func (a skillsAccessor) Session(id string) (skills.Session, error) {
+	return a.m.Session(id)
+}
+
 // Cleanup removes sessions inactive for more than olderThan.
 func (m *Manager) Cleanup(olderThan time.Duration) int {
 	cutoff := time.Now().Add(-olderThan)

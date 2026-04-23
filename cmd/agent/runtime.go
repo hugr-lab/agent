@@ -50,16 +50,6 @@ type agentRuntime struct {
 	bgCancel   context.CancelFunc
 }
 
-// skillsSessionAdapter bridges *sessions.Manager (concrete) to
-// skills.SessionAccessor (consumer-defined interface whose Session()
-// method returns skills.Session). Go's method-return covariance is
-// strict, so we need the tiny wrapper to return the interface.
-type skillsSessionAdapter struct{ sm *sessions.Manager }
-
-func (a skillsSessionAdapter) Session(id string) (skills.Session, error) {
-	return a.sm.Session(id)
-}
-
 func (r *agentRuntime) close(logger *slog.Logger) {
 	// Signal every background worker to stop.
 	if r.bgCancel != nil {
@@ -108,10 +98,10 @@ func (r *agentRuntime) close(logger *slog.Logger) {
 	}
 }
 
-// buildComponents bundles the non-hub pieces built during startup:
+// runtimeArtifacts bundles the non-hub pieces built during startup:
 // hugr client, skills/tools managers, constitution, token estimator.
 // The router is built separately because it needs both queriers.
-type buildComponents struct {
+type runtimeArtifacts struct {
 	hugrClient   *client.Client
 	skills       skills.Manager
 	tools        *tools.Manager
@@ -119,7 +109,11 @@ type buildComponents struct {
 	tokens       *models.TokenEstimator
 }
 
-func buildComponentsFromConfig(_ context.Context, cfg *config.Config, hugrClient *client.Client, logger *slog.Logger) (*buildComponents, error) {
+// assembleRuntimeArtifacts loads the constitution, constructs the
+// skills + tools managers, and packages them alongside the incoming
+// hugr client + a token estimator. Called once at the top of
+// buildRuntime; separated to keep the pipeline body short.
+func assembleRuntimeArtifacts(_ context.Context, cfg *config.Config, hugrClient *client.Client, logger *slog.Logger) (*runtimeArtifacts, error) {
 	// Default HUGR_MCP_URL so inline endpoint specs in skills can still
 	// reference ${HUGR_MCP_URL} if they want an anonymous MCP binding.
 	if os.Getenv("HUGR_MCP_URL") == "" {
@@ -141,7 +135,7 @@ func buildComponentsFromConfig(_ context.Context, cfg *config.Config, hugrClient
 	}
 	toolsMgr := tools.New(logger)
 
-	return &buildComponents{
+	return &runtimeArtifacts{
 		hugrClient:   hugrClient,
 		skills:       skillsMgr,
 		tools:        toolsMgr,
@@ -203,35 +197,6 @@ func loadFullConfig(ctx context.Context, boot *config.BootstrapConfig, hugrClien
 	return cfg, nil
 }
 
-// registerProviderAuth is Phase B.5: adds cfg.Auth provider entries
-// (excluding the already-registered hugr Source) to the existing
-// registry. Entries with type=hugr become aliases.
-func registerProviderAuth(ctx context.Context, cfg *config.Config, reg *auth.SourceRegistry, logger *slog.Logger) error {
-	specs := make([]auth.AuthSpec, 0, len(cfg.Auth))
-	for _, a := range cfg.Auth {
-		if a.Name == "hugr" {
-			// The primary hugr Source is already registered — skip
-			// to avoid a duplicate-name error. Provider entries that
-			// want to reuse it should declare a distinct name and
-			// type=hugr (alias resolution in BuildSources).
-			continue
-		}
-		specs = append(specs, auth.AuthSpec{
-			Name:         a.Name,
-			Type:         a.Type,
-			Issuer:       a.Issuer,
-			ClientID:     a.ClientID,
-			CallbackPath: a.CallbackPath,
-			LoginPath:    a.LoginPath,
-			BaseURL:      cfg.A2A.BaseURL,
-			AccessToken:  a.AccessToken,
-			TokenURL:     a.TokenURL,
-			DiscoverURL:  cfg.Hugr.URL,
-		})
-	}
-	return auth.BuildSources(ctx, specs, reg, logger)
-}
-
 // buildRuntime wires together local engine + hugr client → queriers →
 // router / services / session manager → ADK agent. Caller owns
 // runtime.close() in the shutdown path.
@@ -243,7 +208,7 @@ func buildRuntime(
 	authReg *auth.SourceRegistry,
 	hugrClient *client.Client,
 ) (*agentRuntime, error) {
-	components, err := buildComponentsFromConfig(ctx, cfg, hugrClient, logger)
+	components, err := assembleRuntimeArtifacts(ctx, cfg, hugrClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("build components: %w", err)
 	}
@@ -447,7 +412,7 @@ func buildRuntime(
 		rt.close(logger)
 		return nil, fmt.Errorf("build memory service: %w", err)
 	}
-	components.tools.AddProvider(skills.NewService(skillsSessionAdapter{sm: sessionMgr}))
+	components.tools.AddProvider(skills.NewService(sessionMgr.SkillsAccessor()))
 	components.tools.AddProvider(memService)
 	components.tools.AddProvider(chat.Provider())
 	logger.Info("internal services registered",
