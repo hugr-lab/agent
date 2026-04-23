@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -65,13 +66,32 @@ func (m *fileManager) List(_ context.Context) ([]SkillMeta, error) {
 		if name == "" {
 			name = e.Name()
 		}
+		skillDir := filepath.Join(m.path, e.Name())
 		out = append(out, SkillMeta{
-			Name:        name,
-			Description: fm.Description,
-			Categories:  append([]string(nil), fm.Categories...),
+			Name:             name,
+			Description:      fm.Description,
+			Categories:       append([]string(nil), fm.Categories...),
+			MemoryCategories: memoryCategoryNames(name, skillDir),
 		})
 	}
 	return out, nil
+}
+
+// memoryCategoryNames returns the fully-qualified `<skill>.<cat>`
+// names from the skill's memory.yaml, sorted for stable output.
+// Returns nil when the file is absent or malformed — List degrades to
+// the no-category catalog entry in those cases.
+func memoryCategoryNames(skillName, skillDir string) []string {
+	cfg := loadSkillMemory(skillDir)
+	if cfg == nil || len(cfg.Categories) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.Categories))
+	for cat := range cfg.Categories {
+		out = append(out, skillName+"."+cat)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // AutoloadNames returns every skill name whose frontmatter has

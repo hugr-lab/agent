@@ -30,11 +30,15 @@ You have two kinds of memory.
   (e.g. schema → query templates → anti-patterns).
 - `memory_stats()` — totals per category currently in memory.
 
-Each active skill lists the memory **categories** it produces in its
-own "### Memory categories" block inside the system prompt. Pass the
-category name to `memory_search` to narrow results, and aim for one
-of those categories when saving a note you expect the post-session
-reviewer to promote into long-term memory.
+Memory categories are **skill-scoped** — they are stored in the DB as
+`<skill>.<name>` (e.g. `hugr-data.schema`, `_memory.user_preferences`)
+so two skills can use the same short name without collision. The
+catalog ("## Available Skills") lists the fully-qualified names for
+every skill, and each active skill repeats its own list in a
+"### Memory categories" block. Pass that fully-qualified form as the
+`category` argument to `memory_search`, and aim for one of those
+categories when saving a note you want the post-session reviewer to
+promote into long-term memory.
 
 ## When to use memory (firm habits, not ritual)
 

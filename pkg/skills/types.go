@@ -6,10 +6,16 @@
 package skills
 
 // SkillMeta is a compact catalog entry for prompt injection (~50 tokens per skill).
+//
+// MemoryCategories lists the fully-qualified `<skill>.<cat>` names the
+// skill contributes to long-term memory (from its memory.yaml). Stored
+// in the catalog so the model can pick the right `category` filter for
+// `memory_search` even before the skill is loaded.
 type SkillMeta struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Categories  []string `json:"categories"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Categories       []string `json:"categories"`
+	MemoryCategories []string `json:"memory_categories,omitempty"`
 }
 
 // SkillRefMeta describes an available reference document within a skill.

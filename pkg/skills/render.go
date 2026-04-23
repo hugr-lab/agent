@@ -7,6 +7,11 @@ import (
 )
 
 // RenderCatalog builds the "## Available Skills" prompt block.
+// When a skill declares memory.yaml categories they are listed on a
+// second line with fully-qualified `<skill>.<cat>` names — the same
+// form stored in `memory_items.category`, so the model can pass them
+// directly to `memory_search(category: ...)` even before the skill is
+// loaded.
 func RenderCatalog(skills []SkillMeta) string {
 	if len(skills) == 0 {
 		return ""
@@ -19,6 +24,11 @@ func RenderCatalog(skills []SkillMeta) string {
 			b.WriteString(fmt.Sprintf(" [%s]", strings.Join(s.Categories, ", ")))
 		}
 		b.WriteString("\n")
+		if len(s.MemoryCategories) > 0 {
+			b.WriteString("  memory: ")
+			b.WriteString(strings.Join(s.MemoryCategories, ", "))
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
 }
@@ -48,7 +58,7 @@ func RenderInstructions(sk *Skill, tools []string, loadedRefs []string) string {
 
 	if sk.Memory != nil && len(sk.Memory.Categories) > 0 {
 		b.WriteString("\n\n### Memory categories\n\n")
-		b.WriteString("Use these with `memory_search(category: ...)` and aim for them when saving notes worth persisting past the session:\n\n")
+		b.WriteString("Pass these fully-qualified names as the `category` argument to `memory_search`, and aim for them when saving notes worth persisting past the session:\n\n")
 		// Sort for deterministic prompt output.
 		names := make([]string, 0, len(sk.Memory.Categories))
 		for name := range sk.Memory.Categories {
@@ -58,6 +68,8 @@ func RenderInstructions(sk *Skill, tools []string, loadedRefs []string) string {
 		for _, name := range names {
 			cat := sk.Memory.Categories[name]
 			b.WriteString("- `")
+			b.WriteString(sk.Name)
+			b.WriteString(".")
 			b.WriteString(name)
 			b.WriteString("`")
 			if cat.Description != "" {
