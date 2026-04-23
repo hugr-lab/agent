@@ -83,50 +83,37 @@ func baseURL(configured string, port int) string {
 	return fmt.Sprintf("http://localhost:%d", port)
 }
 
-// Load reads configuration from .env, environment variables, and
-// config.yaml. yamlPath may be empty to skip YAML loading.
+// Load is the back-compat single-shot loader: it composes
+// LoadBootstrap + LoadLocal and returns the full Config. New
+// callers should use LoadBootstrap directly and then dispatch to
+// LoadLocal or LoadRemote depending on boot.Remote().
 func Load(yamlPath string) (*Config, error) {
-	v := viper.New()
-	v.SetConfigFile(".env")
-	v.SetConfigType("env")
-	v.AutomaticEnv()
+	boot, err := LoadBootstrap(".env")
+	if err != nil {
+		return nil, err
+	}
+	return LoadLocal(yamlPath, boot)
+}
 
-	v.SetDefault("HUGR_URL", "http://localhost:15000")
+// LoadLocal returns the full Config derived from .env env-defaults
+// (carried in boot) plus the YAML file at yamlPath. Passing "" for
+// yamlPath skips YAML loading (tests).
+func LoadLocal(yamlPath string, boot *BootstrapConfig) (*Config, error) {
+	if boot == nil {
+		return nil, fmt.Errorf("config: LoadLocal requires BootstrapConfig")
+	}
+	v := viper.New()
+	v.AutomaticEnv()
 	v.SetDefault("AGENT_MODEL", "gemma4-26b")
 	v.SetDefault("AGENT_CONSTITUTION", "constitution/base.md")
 	v.SetDefault("AGENT_SKILLS_PATH", "./skills")
 	v.SetDefault("AGENT_MAX_TOKENS", 0)
-	v.SetDefault("AGENT_PORT", 10000)
-	v.SetDefault("AGENT_DEVUI_PORT", 10001)
-
-	_ = v.ReadInConfig()
-
-	// Propagate .env values into the process environment so os.ExpandEnv
-	// in config.yaml paths (${API_KEY}, ${LLM_URL}, …) resolves them.
-	for _, key := range v.AllKeys() {
-		upper := strings.ToUpper(key)
-		if _, set := os.LookupEnv(upper); set {
-			continue
-		}
-		os.Setenv(upper, v.GetString(key))
-	}
-
-	hugrURL := strings.TrimRight(v.GetString("HUGR_URL"), "/")
-	port := v.GetInt("AGENT_PORT")
-	devUIPort := v.GetInt("AGENT_DEVUI_PORT")
-
-	// Default HUGR_MCP_URL before yaml expansion so ${HUGR_MCP_URL}
-	// in providers:/auth: resolves even when the operator didn't set
-	// it explicitly in .env.
-	if os.Getenv("HUGR_MCP_URL") == "" && hugrURL != "" {
-		os.Setenv("HUGR_MCP_URL", hugrURL+"/mcp")
-	}
 
 	cfg := &Config{
-		Hugr: HugrConfig{
-			URL:    hugrURL,
-			MCPUrl: hugrURL + "/mcp",
-		},
+		Hugr:     boot.Hugr,
+		A2A:      boot.A2A,
+		DevUI:    boot.DevUI,
+		Identity: boot.Identity,
 		Agent: agent.Config{
 			Constitution: v.GetString("AGENT_CONSTITUTION"),
 		},
@@ -136,14 +123,6 @@ func Load(yamlPath string) (*Config, error) {
 		LLM: models.Config{
 			Model:     v.GetString("AGENT_MODEL"),
 			MaxTokens: v.GetInt("AGENT_MAX_TOKENS"),
-		},
-		A2A: a2a.Config{
-			Port:    port,
-			BaseURL: baseURL(v.GetString("AGENT_BASE_URL"), port),
-		},
-		DevUI: devui.Config{
-			Port:    devUIPort,
-			BaseURL: baseURL(v.GetString("AGENT_DEVUI_BASE_URL"), devUIPort),
 		},
 	}
 
@@ -278,67 +257,8 @@ func applyYAML(cfg *Config, path string) error {
 		return err
 	}
 
-	// agent: contains both Identity (id/short_id/name/type) and
-	// agent.Config (constitution). Read both from the same key.
-	if err := y.UnmarshalKey("agent", &cfg.Identity); err != nil {
-		return fmt.Errorf("unmarshal agent (identity): %w", err)
-	}
-	if c := y.GetString("agent.constitution"); c != "" {
-		cfg.Agent.Constitution = c
-	}
-
-	if err := y.UnmarshalKey("skills", &cfg.Skills); err != nil {
-		return fmt.Errorf("unmarshal skills: %w", err)
-	}
-
-	if err := y.UnmarshalKey("a2a", &cfg.A2A); err != nil {
-		return fmt.Errorf("unmarshal a2a: %w", err)
-	}
-	if err := y.UnmarshalKey("devui", &cfg.DevUI); err != nil {
-		return fmt.Errorf("unmarshal devui: %w", err)
-	}
-
-	// Local DB gate + section
-	cfg.LocalDBEnabled = y.GetBool("local_db_enabled")
-	if err := y.UnmarshalKey("local_db", &cfg.LocalDB); err != nil {
-		return fmt.Errorf("unmarshal local_db: %w", err)
-	}
-
-	// Memory (YAML schema: volatility_duration / consolidation /
-	// scheduler — mode/hugr_url/compaction_threshold removed).
-	if err := y.UnmarshalKey("memory", &cfg.Memory); err != nil {
-		return fmt.Errorf("unmarshal memory: %w", err)
-	}
-
-	// Chatcontext (own block — compaction threshold).
-	if err := y.UnmarshalKey("chatcontext", &cfg.ChatContext); err != nil {
-		return fmt.Errorf("unmarshal chatcontext: %w", err)
-	}
-
-	// LLM routing + defaults.
-	if err := y.UnmarshalKey("llm", &cfg.LLM); err != nil {
-		return fmt.Errorf("unmarshal llm: %w", err)
-	}
-
-	// Embedding (top-level).
-	if err := y.UnmarshalKey("embedding", &cfg.Embedding); err != nil {
-		return fmt.Errorf("unmarshal embedding: %w", err)
-	}
-
-	if err := y.UnmarshalKey("mcp", &cfg.MCP); err != nil {
-		return fmt.Errorf("unmarshal mcp: %w", err)
-	}
-
-	// Hugr block auth-ref (URL stays from env).
-	if a := y.GetString("hugr.auth"); a != "" {
-		cfg.Hugr.Auth = a
-	}
-
-	if err := y.UnmarshalKey("auth", &cfg.Auth); err != nil {
-		return fmt.Errorf("unmarshal auth: %w", err)
-	}
-	if err := y.UnmarshalKey("providers", &cfg.Providers); err != nil {
-		return fmt.Errorf("unmarshal providers: %w", err)
+	if err := unmarshalSections(y, cfg); err != nil {
+		return err
 	}
 	expandAuthEnv(cfg.Auth)
 	expandProvidersEnv(cfg.Providers)
@@ -348,12 +268,5 @@ func applyYAML(cfg *Config, path string) error {
 	if err := validateProviders(cfg.Providers, cfg.Auth); err != nil {
 		return err
 	}
-	if cfg.MCP.TTL == 0 {
-		cfg.MCP.TTL = 60 * time.Second
-	}
-	if cfg.MCP.FetchTimeout == 0 {
-		cfg.MCP.FetchTimeout = 30 * time.Second
-	}
-
 	return nil
 }

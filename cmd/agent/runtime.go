@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/chatcontext"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/memory"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/models/embedding"
@@ -99,13 +100,7 @@ type buildComponents struct {
 	tokens       *models.TokenEstimator
 }
 
-func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *slog.Logger, hugrTransport http.RoundTripper) (*buildComponents, error) {
-	_ = ctx
-	hugrClient := client.NewClient(
-		cfg.Hugr.URL+"/ipc",
-		client.WithTransport(hugrTransport),
-	)
-
+func buildComponentsFromConfig(_ context.Context, cfg *config.Config, hugrClient *client.Client, logger *slog.Logger) (*buildComponents, error) {
 	// Default HUGR_MCP_URL so inline endpoint specs in skills can still
 	// reference ${HUGR_MCP_URL} if they want an anonymous MCP binding.
 	if os.Getenv("HUGR_MCP_URL") == "" {
@@ -136,12 +131,72 @@ func buildComponentsFromConfig(ctx context.Context, cfg *config.Config, logger *
 	}, nil
 }
 
-// buildAuthStores converts cfg.Auth into auth.Stores, registering each
-// OIDC callback on mux. Returns the stores + the slice of PromptLogin
-// triggers to fire after the HTTP listener is bound.
-func buildAuthStores(ctx context.Context, cfg *config.Config, logger *slog.Logger, mux *http.ServeMux) (*auth.Stores, error) {
+// buildAuthForBootstrap is Phase A+B.1: builds the single hugr
+// Source declared by .env, wires it into a fresh SourceRegistry,
+// mounts the shared /auth/callback dispatcher, and returns the
+// RoundTripper the hugr client + engine should use.
+func buildAuthForBootstrap(ctx context.Context, boot *config.BootstrapConfig, mux *http.ServeMux, logger *slog.Logger) (*auth.SourceRegistry, http.RoundTripper, error) {
+	reg := auth.NewSourceRegistry(logger)
+
+	hugrSrc, err := auth.BuildHugrSource(ctx, auth.AuthSpec{
+		Name:        boot.HugrAuth.Name,
+		Type:        boot.HugrAuth.Type,
+		AccessToken: boot.HugrAuth.AccessToken,
+		TokenURL:    boot.HugrAuth.TokenURL,
+		Issuer:      boot.HugrAuth.Issuer,
+		ClientID:    boot.HugrAuth.ClientID,
+		BaseURL:     boot.A2A.BaseURL,
+		DiscoverURL: boot.Hugr.URL,
+	}, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hugr source: %w", err)
+	}
+	if err := reg.Add(hugrSrc); err != nil {
+		return nil, nil, err
+	}
+	if oidc, ok := hugrSrc.(*auth.OIDCStore); ok {
+		reg.RegisterPromptLogin(oidc.PromptLogin)
+	}
+	reg.Mount(mux)
+
+	return reg, auth.Transport(hugrSrc, http.DefaultTransport), nil
+}
+
+// loadFullConfig is Phase B.3: chooses between local YAML and
+// remote hub pull based on boot.Remote(). In remote mode it also
+// resolves agent_id via whoami before the GraphQL fetch.
+func loadFullConfig(ctx context.Context, boot *config.BootstrapConfig, hugrClient *client.Client, logger *slog.Logger) (*config.Config, error) {
+	if !boot.Remote() {
+		return config.LoadLocal("config.yaml", boot)
+	}
+	who, err := identity.ResolveFromHugr(ctx, hugrClient)
+	if err != nil {
+		return nil, fmt.Errorf("remote identity: %w", err)
+	}
+	boot.Identity.ID = who.UserID
+	boot.Identity.Name = who.UserName
+	logger.Info("remote identity resolved", "agent_id", who.UserID, "name", who.UserName)
+
+	cfg, err := config.LoadRemote(ctx, hugrClient, boot.Identity.ID, boot)
+	if err != nil {
+		return nil, fmt.Errorf("remote config: %w", err)
+	}
+	return cfg, nil
+}
+
+// registerProviderAuth is Phase B.5: adds cfg.Auth provider entries
+// (excluding the already-registered hugr Source) to the existing
+// registry. Entries with type=hugr become aliases.
+func registerProviderAuth(ctx context.Context, cfg *config.Config, reg *auth.SourceRegistry, logger *slog.Logger) error {
 	specs := make([]auth.AuthSpec, 0, len(cfg.Auth))
 	for _, a := range cfg.Auth {
+		if a.Name == "hugr" {
+			// The primary hugr Source is already registered — skip
+			// to avoid a duplicate-name error. Provider entries that
+			// want to reuse it should declare a distinct name and
+			// type=hugr (alias resolution in BuildSources).
+			continue
+		}
 		specs = append(specs, auth.AuthSpec{
 			Name:         a.Name,
 			Type:         a.Type,
@@ -155,24 +210,7 @@ func buildAuthStores(ctx context.Context, cfg *config.Config, logger *slog.Logge
 			DiscoverURL:  cfg.Hugr.URL,
 		})
 	}
-	return auth.BuildStores(ctx, specs, mux, logger)
-}
-
-// resolveHugrTransport returns the RoundTripper used by the hugr LLM
-// client + engine connection. The auth entry is picked by name from
-// cfg.Hugr.Auth; empty / unknown name yields an unauthenticated
-// transport with a warning.
-func resolveHugrTransport(cfg *config.Config, stores *auth.Stores, logger *slog.Logger) http.RoundTripper {
-	if cfg.Hugr.Auth == "" {
-		logger.Warn("hugr: no auth configured — requests to hugr will be unauthenticated")
-		return http.DefaultTransport
-	}
-	store, ok := stores.Tokens[cfg.Hugr.Auth]
-	if !ok || store == nil {
-		logger.Warn("hugr: auth not found in auth store pool — unauthenticated", "name", cfg.Hugr.Auth)
-		return http.DefaultTransport
-	}
-	return auth.Transport(store, http.DefaultTransport)
+	return auth.BuildSources(ctx, specs, reg, logger)
 }
 
 // buildRuntime wires together local engine + hugr client → queriers →
@@ -180,12 +218,13 @@ func resolveHugrTransport(cfg *config.Config, stores *auth.Stores, logger *slog.
 // runtime.close() in the shutdown path.
 func buildRuntime(
 	ctx context.Context,
+	boot *config.BootstrapConfig,
 	cfg *config.Config,
 	logger *slog.Logger,
-	authStores *auth.Stores,
-	hugrTransport http.RoundTripper,
+	authReg *auth.SourceRegistry,
+	hugrClient *client.Client,
 ) (*agentRuntime, error) {
-	components, err := buildComponentsFromConfig(ctx, cfg, logger, hugrTransport)
+	components, err := buildComponentsFromConfig(ctx, cfg, hugrClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("build components: %w", err)
 	}
@@ -237,8 +276,11 @@ func buildRuntime(
 		logger.Info("intent route configured", "intent", intentName, "model", modelName)
 	}
 
-	// Agent-registry client — used for registerAgentInstance in local mode.
-	if cfg.LocalDBEnabled {
+	// Agent-registry self-upsert runs only in fully local mode: the
+	// agent owns its own registry row when there's no hub in the
+	// picture. In remote mode hub already holds agent_types + agents
+	// — our job is just to run, not to register.
+	if !boot.Remote() && cfg.LocalDBEnabled {
 		reg, err := agentstore.New(memoryQuerier, agentstore.Options{
 			AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
 		})
@@ -353,15 +395,18 @@ func buildRuntime(
 		Logger:       logger,
 		Classifier:   cls,
 		Scheduler:    reviewer,
-		InlineBuilder: func(name, endpoint, authName string, lg *slog.Logger) (tools.Provider, error) {
+		InlineBuilder: func(name, endpoint string, a sessions.InlineProviderAuth, lg *slog.Logger) (tools.Provider, error) {
 			return tools.NewMCPProvider(tools.MCPSpec{
-				Name:          name,
-				Endpoint:      endpoint,
-				Auth:          authName,
-				AuthStores:    authStores.Tokens,
-				BaseTransport: http.DefaultTransport,
-				Config:        cfg.MCP,
-				Logger:        lg,
+				Name:            name,
+				Endpoint:        endpoint,
+				Auth:            a.Name,
+				AuthType:        a.Type,
+				AuthHeaderName:  a.HeaderName,
+				AuthHeaderValue: a.HeaderValue,
+				AuthStores:      authReg.TokenStores(),
+				BaseTransport:   http.DefaultTransport,
+				Config:          cfg.MCP,
+				Logger:          lg,
 			})
 		},
 	})
@@ -400,17 +445,20 @@ func buildRuntime(
 		}
 		base := http.DefaultTransport
 		p, err := tools.NewMCPProvider(tools.MCPSpec{
-			Name:          pc.Name,
-			Endpoint:      pc.Endpoint,
-			Transport:     pc.Transport,
-			Command:       pc.Command,
-			Args:          pc.Args,
-			Env:           pc.Env,
-			Auth:          pc.Auth,
-			AuthStores:    authStores.Tokens,
-			BaseTransport: base,
-			Config:        cfg.MCP,
-			Logger:        logger,
+			Name:            pc.Name,
+			Endpoint:        pc.Endpoint,
+			Transport:       pc.Transport,
+			Command:         pc.Command,
+			Args:            pc.Args,
+			Env:             pc.Env,
+			Auth:            pc.Auth,
+			AuthType:        pc.AuthType,
+			AuthHeaderName:  pc.AuthHeaderName,
+			AuthHeaderValue: pc.AuthHeaderValue,
+			AuthStores:      authReg.TokenStores(),
+			BaseTransport:   base,
+			Config:          cfg.MCP,
+			Logger:          logger,
 		})
 		if err != nil {
 			rt.close(logger)

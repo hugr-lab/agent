@@ -17,7 +17,14 @@ import (
 // The provider itself handles refresh logic — it always holds a valid token.
 // If the provider hasn't refreshed yet, it may return the same (old) token,
 // so RemoteStore retries with backoff: 5s, 30s, 150s.
+//
+// Implements Source: Token refreshes via the exchange URL; Login is a
+// no-op (there's no browser flow); OwnsState always returns false and
+// HandleCallback returns 400 — the SourceRegistry dispatcher will never
+// route a callback here because no state is ever issued with the
+// RemoteStore name as prefix.
 type RemoteStore struct {
+	name     string
 	tokenURL string
 	client   *http.Client
 
@@ -28,13 +35,29 @@ type RemoteStore struct {
 
 // NewRemoteStore creates a RemoteStore with the initial access token
 // and the URL of the token exchange service.
-func NewRemoteStore(accessToken, tokenURL string) *RemoteStore {
+func NewRemoteStore(name, accessToken, tokenURL string) *RemoteStore {
 	return &RemoteStore{
+		name:      name,
 		tokenURL:  tokenURL,
 		token:     accessToken,
 		expiresAt: time.Now().Add(30 * time.Second), // use initial token briefly before first refresh
 		client:    &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// Name implements Source.
+func (s *RemoteStore) Name() string { return s.name }
+
+// Login is a no-op: RemoteStore refreshes via HTTP exchange, no browser flow.
+func (s *RemoteStore) Login(_ context.Context) error { return nil }
+
+// OwnsState always returns false — RemoteStore never participates in
+// OAuth callback dispatch.
+func (s *RemoteStore) OwnsState(string) bool { return false }
+
+// HandleCallback rejects any callback — RemoteStore is never an owner.
+func (s *RemoteStore) HandleCallback(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "remote store has no OAuth callback", http.StatusBadRequest)
 }
 
 func (s *RemoteStore) Token(ctx context.Context) (string, error) {

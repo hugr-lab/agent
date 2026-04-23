@@ -70,8 +70,8 @@ func TestBuildStores_Hugr_OIDCFallbackDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, out.Tokens["primary"])
 	require.Len(t, out.PromptLogin, 1)
-	// OIDC path registered both /auth/login and /auth/callback on mux.
-	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	// OIDC path registered /auth/login/<name> and /auth/callback on mux.
+	req := httptest.NewRequest(http.MethodGet, "/auth/login/primary", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	// Should redirect to the IdP authorize endpoint, not 404.
@@ -109,19 +109,48 @@ func TestBuildStores_UnknownType(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported type")
 }
 
-func TestDerivedLoginPath(t *testing.T) {
-	tests := []struct {
-		callback string
-		explicit string
-		want     string
-	}{
-		{"/auth/callback", "", "/auth/login"},
-		{"/auth/callback", "/custom/login", "/custom/login"},
-		{"/auth/callback-staging", "", "/auth/callback-staging-login"},
-		{"/api/v1/auth/callback", "", "/api/v1/auth/login"},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, derivedLoginPath(tt.callback, tt.explicit),
-			"callback=%q explicit=%q", tt.callback, tt.explicit)
-	}
+// Derivation of login paths moved into OIDCStore.LoginPath — default
+// is "/auth/login/<Name>". The separate derivedLoginPath helper
+// retired with the single-/auth/callback dispatcher.
+
+func TestBuildHugrSource_TokenMode(t *testing.T) {
+	src, err := BuildHugrSource(context.Background(), AuthSpec{
+		Name:        "hugr",
+		Type:        "hugr",
+		AccessToken: "seed",
+		TokenURL:    "http://localhost:9999/token-exchange",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "hugr", src.Name())
+	_, isRemote := src.(*RemoteStore)
+	assert.True(t, isRemote, "token mode yields RemoteStore")
+	assert.False(t, src.OwnsState("hugr.any"), "RemoteStore never owns state")
+}
+
+func TestBuildSources_AliasHugrType(t *testing.T) {
+	// Seed registry with a primary hugr Source (RemoteStore).
+	reg := NewSourceRegistry(nil)
+	primary, err := BuildHugrSource(context.Background(), AuthSpec{
+		Name: "hugr", Type: "hugr", AccessToken: "seed", TokenURL: "http://x/token",
+	}, nil)
+	require.NoError(t, err)
+	require.NoError(t, reg.Add(primary))
+
+	// A provider-auth entry of type=hugr should alias.
+	require.NoError(t, BuildSources(context.Background(), []AuthSpec{
+		{Name: "mcp-inline", Type: "hugr"},
+	}, reg, nil))
+
+	got, ok := reg.Source("mcp-inline")
+	require.True(t, ok)
+	assert.Same(t, primary, got)
+}
+
+func TestBuildSources_HugrWithoutPrimary(t *testing.T) {
+	reg := NewSourceRegistry(nil)
+	err := BuildSources(context.Background(), []AuthSpec{
+		{Name: "mcp-inline", Type: "hugr"},
+	}, reg, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no hugr Source registered")
 }

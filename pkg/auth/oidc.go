@@ -20,45 +20,36 @@ import (
 
 // OIDCConfig configures the OIDC browser flow.
 type OIDCConfig struct {
+	// Name is the Source identifier. Used for state prefix and
+	// registry lookup. Required.
+	Name        string
 	IssuerURL   string // e.g. http://localhost:8080/realms/hugr
 	ClientID    string // Keycloak public client ID
 	RedirectURL string // e.g. http://localhost:10000/auth/callback
-	// CallbackPath is the path portion that RegisterCallbackRoute
-	// mounts on the provided mux. Must match the path segment of
-	// RedirectURL. Empty defaults to "/auth/callback".
-	CallbackPath string
 	// LoginPath is the path that starts the flow (redirect to IdP).
-	// Empty defaults to "/auth/login".
+	// Empty defaults to "/auth/login/<Name>".
 	LoginPath string
 	Logger    *slog.Logger
 }
 
-// callbackPath returns the effective callback path, applying defaults.
-func (c OIDCConfig) callbackPath() string {
-	if c.CallbackPath == "" {
-		return "/auth/callback"
-	}
-	return c.CallbackPath
-}
-
-// loginPath returns the effective login path, applying defaults.
-func (c OIDCConfig) loginPath() string {
-	if c.LoginPath == "" {
-		return "/auth/login"
-	}
-	return c.LoginPath
-}
-
-// OIDCStore implements TokenStore using Authorization Code + PKCE flow.
-// On first Token() call it blocks until the user completes browser login.
-// After that it refreshes transparently using the refresh token.
+// OIDCStore implements Source using Authorization Code + PKCE flow.
+// On first Token() call it blocks until the user completes browser
+// login. After that it refreshes transparently using the refresh
+// token.
 type OIDCStore struct {
 	cfg      OIDCConfig
 	logger   *slog.Logger
 	authURL  string // authorization_endpoint
 	tokenURL string // token_endpoint
 
-	mu           sync.Mutex
+	// Per-in-flight-login state. The dispatcher resolves the Source
+	// by state prefix; HandleCallback looks up the verifier by the
+	// state's nonce suffix. Map gets pruned on use.
+	loginMu   sync.Mutex
+	inFlight  map[string]string // state -> codeVerifier
+	lastLogin string            // most recently issued state (for PromptLogin URL)
+
+	tokenMu      sync.Mutex
 	accessToken  string
 	refreshToken string
 	expiresAt    time.Time
@@ -82,8 +73,13 @@ type oidcTokenResponse struct {
 }
 
 // NewOIDCStore creates a store and discovers OIDC endpoints.
-// Call RegisterCallbackRoute to mount the /auth/* routes on your mux.
+// The callback route is mounted by SourceRegistry.Mount on the
+// shared /auth/callback path; the login route is mounted per-Source
+// at LoginPath() (defaulting to /auth/login/<Name>).
 func NewOIDCStore(ctx context.Context, cfg OIDCConfig) (*OIDCStore, error) {
+	if cfg.Name == "" {
+		return nil, fmt.Errorf("oidc: Name is required")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -98,106 +94,141 @@ func NewOIDCStore(ctx context.Context, cfg OIDCConfig) (*OIDCStore, error) {
 		logger:   cfg.Logger,
 		authURL:  disc.AuthorizationEndpoint,
 		tokenURL: disc.TokenEndpoint,
+		inFlight: make(map[string]string),
 		ready:    make(chan struct{}),
 	}, nil
 }
 
+// Name implements Source.
+func (s *OIDCStore) Name() string { return s.cfg.Name }
+
 // Token returns a valid access token. On first call it blocks until
-// the user completes browser login. After that it refreshes automatically.
+// the user completes browser login. After that it refreshes
+// automatically.
 func (s *OIDCStore) Token(ctx context.Context) (string, error) {
-	// Wait for initial login.
 	select {
 	case <-s.ready:
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
 
 	if time.Now().Before(s.expiresAt) {
 		return s.accessToken, nil
 	}
-
 	return s.refresh(ctx)
 }
 
-// RegisterCallbackRoute adds /auth/login and /auth/callback to the mux.
-// Must be called before the HTTP server starts.
-func (s *OIDCStore) RegisterCallbackRoute(mux *http.ServeMux) {
-	// Per-login PKCE state.
-	var (
-		mu            sync.Mutex
-		codeVerifier  string
-		expectedState string
-	)
+// Login implements Source — prints the login URL and opens the
+// browser. Safe to call multiple times.
+func (s *OIDCStore) Login(ctx context.Context) error {
+	loginURL := s.loginEndpointURL()
+	s.logger.Info("OIDC login required — open in browser",
+		"name", s.cfg.Name, "url", loginURL, "client", s.cfg.ClientID)
+	fmt.Printf("\n  Login (%s): %s\n\n", s.cfg.Name, loginURL)
+	_ = openBrowser(loginURL)
+	return nil
+}
 
-	mux.HandleFunc(s.cfg.loginPath(), func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		codeVerifier = generateCodeVerifier()
-		expectedState = generateState()
-		mu.Unlock()
+// OwnsState implements Source using the "<name>.<nonce>" encoding.
+func (s *OIDCStore) OwnsState(state string) bool {
+	return StateOwnedBy(s.cfg.Name, state)
+}
 
-		challenge := computeCodeChallenge(codeVerifier)
+// LoginPath returns the path that starts the browser flow.
+// Registered on the shared mux by SourceRegistry.Mount.
+func (s *OIDCStore) LoginPath() string {
+	if s.cfg.LoginPath != "" {
+		return s.cfg.LoginPath
+	}
+	return "/auth/login/" + s.cfg.Name
+}
 
-		params := url.Values{
-			"response_type":         {"code"},
-			"client_id":             {s.cfg.ClientID},
-			"redirect_uri":          {s.cfg.RedirectURL},
-			"scope":                 {"openid"},
-			"state":                 {expectedState},
-			"code_challenge":        {challenge},
-			"code_challenge_method": {"S256"},
-		}
+// HandleLogin implements LoginHandler — starts the OIDC flow.
+func (s *OIDCStore) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	nonce := generateNonce()
+	state := EncodeState(s.cfg.Name, nonce)
+	codeVerifier := generateCodeVerifier()
 
-		http.Redirect(w, r, s.authURL+"?"+params.Encode(), http.StatusFound)
-	})
+	s.loginMu.Lock()
+	s.inFlight[state] = codeVerifier
+	s.lastLogin = state
+	s.loginMu.Unlock()
 
-	mux.HandleFunc(s.cfg.callbackPath(), func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		cv := codeVerifier
-		es := expectedState
-		mu.Unlock()
+	challenge := computeCodeChallenge(codeVerifier)
+	params := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {s.cfg.ClientID},
+		"redirect_uri":          {s.cfg.RedirectURL},
+		"scope":                 {"openid"},
+		"state":                 {state},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	http.Redirect(w, r, s.authURL+"?"+params.Encode(), http.StatusFound)
+}
 
-		if errParam := r.URL.Query().Get("error"); errParam != "" {
-			http.Error(w, fmt.Sprintf("OIDC error: %s — %s", errParam, r.URL.Query().Get("error_description")), http.StatusBadRequest)
-			return
-		}
+// HandleCallback completes the OIDC flow for this Source. Called
+// by the SourceRegistry dispatcher when OwnsState matches.
+func (s *OIDCStore) HandleCallback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if errParam := q.Get("error"); errParam != "" {
+		http.Error(w, fmt.Sprintf("OIDC error: %s — %s", errParam, q.Get("error_description")), http.StatusBadRequest)
+		return
+	}
 
-		code := r.URL.Query().Get("code")
-		state := r.URL.Query().Get("state")
-		if code == "" || state != es {
-			http.Error(w, "invalid callback", http.StatusBadRequest)
-			return
-		}
+	code := q.Get("code")
+	state := q.Get("state")
+	if code == "" || state == "" {
+		http.Error(w, "invalid callback", http.StatusBadRequest)
+		return
+	}
 
-		tokens, err := s.exchangeCode(r.Context(), code, cv)
-		if err != nil {
-			http.Error(w, "token exchange failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	s.loginMu.Lock()
+	codeVerifier, ok := s.inFlight[state]
+	if ok {
+		delete(s.inFlight, state)
+	}
+	s.loginMu.Unlock()
 
-		s.mu.Lock()
-		s.accessToken = tokens.AccessToken
-		s.refreshToken = tokens.RefreshToken
-		s.expiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
-		s.mu.Unlock()
+	if !ok {
+		http.Error(w, "unknown state", http.StatusBadRequest)
+		return
+	}
 
-		// Signal that first login is complete.
-		s.readyOnce.Do(func() { close(s.ready) })
+	tokens, err := s.exchangeCode(r.Context(), code, codeVerifier)
+	if err != nil {
+		http.Error(w, "token exchange failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-		s.logger.Info("OIDC login successful")
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<html><body><h2>Login successful</h2><p>You can close this tab.</p></body></html>`)
-	})
+	s.tokenMu.Lock()
+	s.accessToken = tokens.AccessToken
+	s.refreshToken = tokens.RefreshToken
+	s.expiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
+	s.tokenMu.Unlock()
+
+	s.readyOnce.Do(func() { close(s.ready) })
+
+	s.logger.Info("OIDC login successful", "name", s.cfg.Name)
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprint(w, `<html><body><h2>Login successful</h2><p>You can close this tab.</p></body></html>`)
 }
 
 // PromptLogin prints the login URL and optionally opens the browser.
+// Kept for callers that want the same startup hook as before.
 func (s *OIDCStore) PromptLogin() {
-	loginURL := strings.TrimSuffix(s.cfg.RedirectURL, s.cfg.callbackPath()) + s.cfg.loginPath()
-	s.logger.Info("OIDC login required — open in browser", "url", loginURL, "client", s.cfg.ClientID)
-	fmt.Printf("\n  Login: %s\n\n", loginURL)
-	_ = openBrowser(loginURL)
+	_ = s.Login(context.Background())
+}
+
+// loginEndpointURL derives the public URL where HandleLogin is
+// mounted — RedirectURL host + LoginPath.
+func (s *OIDCStore) loginEndpointURL() string {
+	base := strings.TrimSuffix(s.cfg.RedirectURL, "/auth/callback")
+	base = strings.TrimRight(base, "/")
+	return base + s.LoginPath()
 }
 
 func (s *OIDCStore) exchangeCode(ctx context.Context, code, codeVerifier string) (*oidcTokenResponse, error) {
@@ -290,7 +321,7 @@ func discover(ctx context.Context, issuerURL string) (*oidcDiscovery, error) {
 
 func generateCodeVerifier() string {
 	b := make([]byte, 32)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
@@ -299,9 +330,9 @@ func computeCodeChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
-func generateState() string {
+func generateNonce() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
