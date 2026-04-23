@@ -343,11 +343,17 @@ func buildRuntime(
 	chat, err := chatcontext.New(chatcontext.Options{
 		Querier: memoryQuerier,
 		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID,
-		Logger:          logger,
-		Memory:          memHub,
-		Sessions:        sessHub,
-		Router:          router,
-		Tokens:          components.tokens,
+		Logger:   logger,
+		Memory:   memHub,
+		Sessions: sessHub,
+		Router:   router,
+		Tokens:   components.tokens,
+		// Spec 006 §1: coordinator's compactor sizes against the
+		// strong-model window (router resolves IntentDefault to
+		// cfg.LLM.Model). Sub-agent dispatch builds its own per-
+		// mission compactor with the role's intent so a cheap-model
+		// specialist compacts at the cheap-model window.
+		Intent:          models.IntentDefault,
 		Threshold:       cfg.ChatContext.CompactionThreshold,
 		LoadSkillMemory: loadSkillMemory,
 	})

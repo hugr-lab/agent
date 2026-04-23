@@ -56,6 +56,15 @@ type Options struct {
 	Router *models.Router
 	Tokens *models.TokenEstimator
 
+	// Intent picks which model's context budget the compactor's
+	// trigger threshold tracks (spec 006 §1). Empty defaults to
+	// models.IntentDefault — the coordinator's strong-model budget,
+	// which preserves the pre-006 behaviour. Sub-agent dispatch
+	// constructs its own per-mission compactor with the role's
+	// intent so cheap-model specialists compact at the cheap-model
+	// window.
+	Intent models.Intent
+
 	Threshold float64
 	MinTurns  int
 
@@ -74,6 +83,7 @@ func New(opts Options) (*ChatContext, error) {
 		AgentShort:      opts.AgentShort,
 		Router:          opts.Router,
 		Tokens:          opts.Tokens,
+		Intent:          opts.Intent,
 		Threshold:       opts.Threshold,
 		MinTurns:        opts.MinTurns,
 		Logger:          opts.Logger,

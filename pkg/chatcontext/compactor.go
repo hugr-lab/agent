@@ -31,10 +31,16 @@ import (
 //     describing the fold so the post-session reviewer can still see
 //     how many turns were summarised.
 type Compactor struct {
-	memory          *memstore.Client
-	sessions        *sessstore.Client
-	router          *models.Router
-	tokens          *models.TokenEstimator
+	memory   *memstore.Client
+	sessions *sessstore.Client
+	router   *models.Router
+	tokens   *models.TokenEstimator
+	// intent picks which model's context budget the compactor sizes
+	// itself against. Coordinator wiring passes IntentDefault; the
+	// sub-agent dispatcher (spec 006 phase 1) will pass the role's
+	// intent so a cheap-model specialist compacts at the cheap-model
+	// budget instead of the strong-model one.
+	intent          models.Intent
 	threshold       float64
 	minTurns        int
 	logger          *slog.Logger
@@ -53,6 +59,14 @@ type CompactorOptions struct {
 	Threshold  float64 // default 0.70
 	MinTurns   int     // minimum turn groups retained after compaction; default 4
 	Logger     *slog.Logger
+
+	// Intent picks which model's context budget this compactor sizes
+	// itself against. Empty defaults to models.IntentDefault — the
+	// pre-006 behaviour preserved for the coordinator wiring. Sub-
+	// agent dispatch passes the specialist role's intent so the
+	// compactor's threshold tracks the cheap-model window instead of
+	// the strong-model one.
+	Intent models.Intent
 
 	// Memory / Sessions are optional pre-built clients. When set, the
 	// compactor skips its internal New() calls. Preferred wiring from
@@ -87,6 +101,10 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 	if opts.MinTurns <= 0 {
 		opts.MinTurns = 4
 	}
+	intent := opts.Intent
+	if intent == "" {
+		intent = models.IntentDefault
+	}
 	memC := opts.Memory
 	if memC == nil {
 		c, err := memstore.New(opts.Querier, memstore.Options{
@@ -112,6 +130,7 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 		sessions:        sessC,
 		router:          opts.Router,
 		tokens:          opts.Tokens,
+		intent:          intent,
 		threshold:       opts.Threshold,
 		minTurns:        opts.MinTurns,
 		logger:          opts.Logger,
@@ -270,9 +289,15 @@ func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merg
 }
 
 // usageRatio estimates how close the current req.Contents is to the
-// model's context budget. Uses the calibrated models.TokenEstimator on a
-// concatenated string view — heuristic, good enough to trigger
+// model's context budget. Uses the calibrated models.TokenEstimator
+// on a concatenated string view — heuristic, good enough to trigger
 // compaction without reaching for a precise tokenizer.
+//
+// Spec 006 §1: the budget comes from Router.BudgetFor(c.intent) so a
+// 50 000-token cheap model triggers at ~37 500 estimated tokens
+// while a 1 000 000-token strong model triggers at ~750 000. Falls
+// back to the historical 128 000 floor when neither config nor the
+// router know the model (BudgetFor's last-resort branch).
 func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
 	var chars int
 	for _, ct := range req.Contents {
@@ -291,11 +316,14 @@ func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
 		}
 	}
 	est := c.tokens.Estimate(strings.Repeat("x", chars))
-	// Budget: 128k context assumed when not known. Better heuristic
-	// would read config; compactor consumers can pass a tighter
-	// estimator if they know the model's window.
-	const defaultBudget = 128_000
-	return float64(est) / float64(defaultBudget)
+	budget := c.router.BudgetFor(c.intent)
+	if budget <= 0 {
+		// Defensive belt-and-braces — Router.BudgetFor never returns
+		// 0 in practice, but a misconstructed router (no default
+		// model + no budgets) would. Keep the historical floor.
+		budget = 128_000
+	}
+	return float64(est) / float64(budget)
 }
 
 // Callback returns the compactor as a llmagent.BeforeModelCallback
