@@ -15,6 +15,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
+
 // Manager is the central tool registry. Goroutine-safe.
 type Manager struct {
 	mu        sync.RWMutex
@@ -76,50 +77,6 @@ func (m *Manager) ProviderTools(name string) ([]tool.Tool, error) {
 	return p.Tools(), nil
 }
 
-// Tools returns a flat tool list.
-//
-//   - names empty: every tool from every provider, in provider-registration
-//     order with per-provider stable order.
-//   - names given: only tools whose Name() matches (providers are scanned in
-//     registration order; the first match wins). Unknown names are silently
-//     dropped — callers are expected to have validated them, and returning
-//     a partial list is better than blowing up the whole LLM turn.
-func (m *Manager) Tools(names ...string) ([]tool.Tool, error) {
-	m.mu.RLock()
-	providers := make([]Provider, 0, len(m.providers))
-	for _, p := range m.providers {
-		providers = append(providers, p)
-	}
-	m.mu.RUnlock()
-
-	if len(names) == 0 {
-		var all []tool.Tool
-		for _, p := range providers {
-			all = append(all, p.Tools()...)
-		}
-		return all, nil
-	}
-
-	want := make(map[string]struct{}, len(names))
-	for _, n := range names {
-		want[n] = struct{}{}
-	}
-
-	var out []tool.Tool
-	seen := make(map[string]bool, len(names))
-	for _, p := range providers {
-		for _, t := range p.Tools() {
-			n := t.Name()
-			if _, ok := want[n]; !ok || seen[n] {
-				continue
-			}
-			out = append(out, t)
-			seen[n] = true
-		}
-	}
-	return out, nil
-}
-
 // InvalidateProvider clears the cache of the named provider if it
 // implements CacheableProvider. Returns an error if the name is unknown;
 // a plain Provider without caching is a no-op (nil).
@@ -159,26 +116,6 @@ func (m *Manager) ProviderNames() []string {
 	out := make([]string, 0, len(m.providers))
 	for name := range m.providers {
 		out = append(out, name)
-	}
-	return out
-}
-
-// AllNames returns every tool name currently offered by every provider.
-// Order matches Tools(): provider-registration-order, dedup by name.
-func (m *Manager) AllNames() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	seen := make(map[string]bool)
-	var out []string
-	for _, p := range m.providers {
-		for _, t := range p.Tools() {
-			n := t.Name()
-			if seen[n] {
-				continue
-			}
-			seen[n] = true
-			out = append(out, n)
-		}
 	}
 	return out
 }

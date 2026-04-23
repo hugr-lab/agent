@@ -7,15 +7,15 @@ package skills
 
 // SkillMeta is a compact catalog entry for prompt injection (~50 tokens per skill).
 type SkillMeta struct {
-	Name        string   `json:"name" yaml:"name"`
-	Description string   `json:"description" yaml:"description"`
-	Categories  []string `json:"categories" yaml:"categories"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Categories  []string `json:"categories"`
 }
 
 // SkillRefMeta describes an available reference document within a skill.
 type SkillRefMeta struct {
-	Name        string `json:"name" yaml:"name"`
-	Description string `json:"description" yaml:"description"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 // DescriptorMeta bundles the reference list and workflow hint that

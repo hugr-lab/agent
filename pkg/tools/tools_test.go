@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/adk/tool"
 )
 
 // cacheable wraps FakeProvider with a counting Invalidate to prove
@@ -78,42 +77,6 @@ func TestManager_ProviderTools(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestManager_Tools_AllVsFiltered(t *testing.T) {
-	m := New(nil)
-	m.AddProvider(FakeProvider{N: "a", T: FakeTools("x", "y")})
-	m.AddProvider(FakeProvider{N: "b", T: FakeTools("y", "z")})
-
-	all, err := m.Tools()
-	require.NoError(t, err)
-	names := collectNames(all)
-	// Tools() across providers does NOT dedup — returns the full flat
-	// list; dedup happens only in the filtered path. This keeps the
-	// LLM-facing catalogue honest about duplicate-name tools.
-	assert.ElementsMatch(t, []string{"x", "y", "y", "z"}, names)
-
-	// Filtered: dedup by name, first occurrence wins.
-	filtered, err := m.Tools("y", "z")
-	require.NoError(t, err)
-	names = collectNames(filtered)
-	assert.ElementsMatch(t, []string{"y", "z"}, names)
-
-	// Unknown names silently dropped.
-	filtered, err = m.Tools("ghost", "x")
-	require.NoError(t, err)
-	names = collectNames(filtered)
-	assert.Equal(t, []string{"x"}, names)
-}
-
-func TestManager_AllNames_Dedup(t *testing.T) {
-	m := New(nil)
-	m.AddProvider(FakeProvider{N: "a", T: FakeTools("x", "y")})
-	m.AddProvider(FakeProvider{N: "b", T: FakeTools("y", "z")})
-
-	names := m.AllNames()
-	sort.Strings(names)
-	assert.Equal(t, []string{"x", "y", "z"}, names)
-}
-
 func TestManager_ProviderNames(t *testing.T) {
 	m := New(nil)
 	m.AddProvider(FakeProvider{N: "a"})
@@ -158,11 +121,3 @@ func TestManager_InvalidateAll(t *testing.T) {
 	assert.Equal(t, 1, c2.invalidated)
 }
 
-// collectNames extracts tool names in order for assertions.
-func collectNames(ts []tool.Tool) []string {
-	out := make([]string, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, t.Name())
-	}
-	return out
-}

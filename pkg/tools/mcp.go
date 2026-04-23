@@ -1,6 +1,6 @@
-// Package mcp wires an MCP endpoint into a tools.Provider. Providers
-// are built lazily (on first skill_load) and support streamable-http,
-// SSE, and stdio transports. Tools() is TTL-cached; the cache is also
+// mcp.go wires an MCP endpoint into a tools.Provider. Providers are
+// built lazily (on first skill_load) and support streamable-http, SSE,
+// and stdio transports. Tools() is TTL-cached; the cache is also
 // dropped on explicit Invalidate() and on an MCP
 // "notifications/tools/list_changed" push from the server.
 package tools
