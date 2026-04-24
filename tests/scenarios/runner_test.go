@@ -149,8 +149,8 @@ func drainClassifier(t *testing.T, a *harness.Agent, budget time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	if err := a.Runtime.Classifier.Drain(ctx, budget); err != nil {
-		t.Logf("classifier drain: %v", err)
+	if err := a.Runtime.Classifier.Flush(ctx, budget); err != nil {
+		t.Logf("classifier flush: %v", err)
 	}
 }
 

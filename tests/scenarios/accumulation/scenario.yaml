@@ -46,7 +46,9 @@ steps:
           query {
             jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | .[-1].id") {
               hub { db { agent {
-                sessions(order_by: [{field: "created_at", direction: ASC}]) { id session_type }
+                sessions(order_by: [{field: "created_at", direction: ASC}]) {
+                  id session_type created_at
+                }
               }}}
             }
           }

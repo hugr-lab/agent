@@ -39,7 +39,7 @@ steps:
             jq(query: ".hub.db.agent.session_events | map({seq, type: .event_type, author, tool: .tool_name, has_embedding: (.embedding != null)})") {
               hub { db { agent {
                 session_events(
-                  filter: {event_type: {neq: "skill_loaded"}}
+                  filter: {_not: {event_type: {eq: "skill_loaded"}}}
                   order_by: [{field: "seq", direction: ASC}]
                 ) { seq event_type author tool_name }
               }}}

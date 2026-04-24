@@ -5,7 +5,7 @@ config_override: config_override.yaml
 # The override shrinks the context window to 6k and the compaction
 # threshold to 0.3 (so ~1800 tokens trigger a compaction cycle). After
 # three to four meaty turns the Compactor callback should fold the
-# oldest group into a compaction_summary event.
+# oldest group into a compaction event.
 
 steps:
   - say: |
@@ -35,10 +35,10 @@ steps:
       - name: compaction_events
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map(select(.event_type == \"compaction_summary\")) | {count: length, seqs: map(.seq)}") {
+            jq(query: ".hub.db.agent.session_events | map(select(.event_type == \"compaction\")) | {count: length, seqs: map(.seq)}") {
               hub { db { agent {
                 session_events(
-                  filter: {session_id: {eq: $sid}, event_type: {eq: "compaction_summary"}}
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "compaction"}}
                   order_by: [{field: "seq", direction: ASC}]
                 ) { seq event_type content }
               }}}

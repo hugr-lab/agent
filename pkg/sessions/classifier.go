@@ -51,6 +51,11 @@ type Classifier struct {
 	ch      chan Envelope
 	dropped atomic.Int64
 
+	// inflight tracks envelopes that have been accepted onto the
+	// channel but not yet fully processed by handle(). Flush() polls
+	// this to wait for queue quiescence without closing the channel.
+	inflight atomic.Int64
+
 	stopped chan struct{}
 	stopMu  sync.Mutex
 	closed  bool
@@ -115,6 +120,7 @@ func (c *Classifier) C() chan<- Envelope { return c.ch }
 func (c *Classifier) Publish(env Envelope) bool {
 	select {
 	case c.ch <- env:
+		c.inflight.Add(1)
 		return true
 	default:
 		n := c.dropped.Add(1)
@@ -166,6 +172,7 @@ func (c *Classifier) Run(ctx context.Context) {
 // (empty summary → NULL embedding) so the transcript row always
 // lands, and a WARN log points a backfill worker at the gap.
 func (c *Classifier) handle(ctx context.Context, env Envelope) {
+	defer c.inflight.Add(-1)
 	rows := Classify(env)
 	if c.hub == nil && c.manager == nil {
 		return
@@ -419,6 +426,33 @@ func nonEmpty(v, fallback string) string {
 
 // Done returns a channel closed when Run() exits.
 func (c *Classifier) Done() <-chan struct{} { return c.stopped }
+
+// Flush waits up to `budget` for every envelope currently in-flight
+// (queued + being handled) to finish processing, WITHOUT closing the
+// channel. Use this between scenario steps / before polling the
+// session_events table to make sure async-classified events have
+// been persisted. Unlike Drain, the classifier keeps accepting
+// Publish calls after Flush returns.
+//
+// Returns context.DeadlineExceeded on timeout. Safe against concurrent
+// Publish: the counter may rise again after return; callers using
+// Flush are expected to have no outstanding RunTurn at the moment.
+func (c *Classifier) Flush(ctx context.Context, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	for c.inflight.Load() > 0 {
+		if time.Now().After(deadline) {
+			c.logger.Warn("classifier flush timed out",
+				"inflight", c.inflight.Load(),
+				"queued", len(c.ch))
+			return context.DeadlineExceeded
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
+}
 
 // Drain closes the input channel and waits up to `timeout` for the
 // consumer goroutine to finish draining it. Returns context.DeadlineExceeded
