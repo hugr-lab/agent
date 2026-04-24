@@ -6,21 +6,31 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
+	"github.com/hugr-lab/hugen/pkg/tools"
 )
+
+// SubAgentProviderName is the tools.Manager provider key the
+// _system skill references via `providers: [{provider: _subagent}]`.
+// Registered in cmd/agent/runtime.go alongside the other autoload
+// providers (_skills, _memory, _context).
+const SubAgentProviderName = "_subagent"
 
 // Dispatcher (spec 006 §4) opens a child session for a sub-agent
 // dispatch, builds a transient llmagent wired to the cheap-model
@@ -457,4 +467,244 @@ func MarshalDispatchResult(r DispatchResult) (string, error) {
 		return "", fmt.Errorf("subagent: marshal result: %w", err)
 	}
 	return string(b), nil
+}
+
+// ============================================================================
+// Tools provider — exposes subagent_dispatch + subagent_list to the
+// coordinator LLM (spec 006 phase 1 §T103). Registered under the
+// provider name SubAgentProviderName and referenced by the _system
+// skill's frontmatter so the tools ride along with the rest of the
+// skill-management surface (skill_load / skill_list / ...).
+// ============================================================================
+
+// SubAgentService is the tools.Provider that exposes the sub-agent
+// dispatch tools to the coordinator LLM.
+//
+// Two tools ship:
+//
+//   - subagent_list() — returns the specialist roles declared by
+//     every currently-loaded skill on the calling session, so the
+//     LLM can discover what's available before deciding to delegate.
+//   - subagent_dispatch(skill, role, task, notes?) — runs the
+//     specialist through the Dispatcher and returns DispatchResult.
+//
+// The service itself carries no state — it's a thin wrapper around
+// a shared Dispatcher. One instance per runtime.
+type SubAgentService struct {
+	dispatcher *Dispatcher
+	sessions   *sessions.Manager
+	skills     skills.Manager
+	tools      []tool.Tool
+}
+
+// NewSubAgentService constructs the provider.
+func NewSubAgentService(d *Dispatcher, sm *sessions.Manager, sk skills.Manager) (*SubAgentService, error) {
+	if d == nil {
+		return nil, errors.New("subagent: service requires Dispatcher")
+	}
+	if sm == nil {
+		return nil, errors.New("subagent: service requires SessionManager")
+	}
+	if sk == nil {
+		return nil, errors.New("subagent: service requires skills.Manager")
+	}
+	s := &SubAgentService{dispatcher: d, sessions: sm, skills: sk}
+	s.tools = []tool.Tool{
+		&subagentListTool{sm: sm, skills: sk},
+		&subagentDispatchTool{dispatcher: d, sm: sm, skills: sk},
+	}
+	return s, nil
+}
+
+// Name implements tools.Provider.
+func (s *SubAgentService) Name() string { return SubAgentProviderName }
+
+// Tools implements tools.Provider.
+func (s *SubAgentService) Tools() []tool.Tool { return s.tools }
+
+// sessionForTool is the tool-context session resolver. Duplicated
+// here rather than importing chatcontext's sessionFor to keep
+// pkg/agent free of an additional package dep.
+func sessionForTool(ctx tool.Context, sm *sessions.Manager) (*sessions.Session, error) {
+	sid := ctx.SessionID()
+	if sid == "" {
+		return nil, fmt.Errorf("no session id in tool context")
+	}
+	return sm.Session(sid)
+}
+
+// ----- subagent_list -----
+
+type subagentListTool struct {
+	sm     *sessions.Manager
+	skills skills.Manager
+}
+
+func (t *subagentListTool) Name() string { return "subagent_list" }
+func (t *subagentListTool) Description() string {
+	return "Lists the specialist sub-agent roles declared by every currently-loaded skill on this session. Returns {available: [{skill, role, description, intent}]}. Call before subagent_dispatch when unsure which role fits the task."
+}
+func (t *subagentListTool) IsLongRunning() bool { return false }
+
+func (t *subagentListTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+	}
+}
+
+func (t *subagentListTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *subagentListTool) Run(ctx tool.Context, _ any) (map[string]any, error) {
+	sess, err := sessionForTool(ctx, t.sm)
+	if err != nil {
+		return nil, fmt.Errorf("subagent_list: %w", err)
+	}
+
+	type entry struct {
+		Skill       string `json:"skill"`
+		Role        string `json:"role"`
+		Description string `json:"description"`
+		Intent      string `json:"intent,omitempty"`
+	}
+	var out []entry
+	for _, skillName := range sess.ActiveSkills() {
+		sk, err := t.skills.Load(ctx, skillName)
+		if err != nil || sk == nil {
+			continue
+		}
+		for role, spec := range sk.SubAgents {
+			out = append(out, entry{
+				Skill:       sk.Name,
+				Role:        role,
+				Description: spec.Description,
+				Intent:      spec.Intent,
+			})
+		}
+	}
+	// Stable order: (skill, role) lexicographic.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Skill != out[j].Skill {
+			return out[i].Skill < out[j].Skill
+		}
+		return out[i].Role < out[j].Role
+	})
+	return map[string]any{"available": out}, nil
+}
+
+// ----- subagent_dispatch -----
+
+type subagentDispatchTool struct {
+	dispatcher *Dispatcher
+	sm         *sessions.Manager
+	skills     skills.Manager
+}
+
+func (t *subagentDispatchTool) Name() string { return "subagent_dispatch" }
+func (t *subagentDispatchTool) Description() string {
+	return "Delegates a narrow task to a specialist sub-agent running in an isolated context. Returns {summary, child_session, turns_used, truncated, error}. The specialist runs under the role's configured model (often a cheaper one) and writes its transcript to its own session — the coordinator's prompt only sees the capped summary. Call subagent_list first to discover available roles."
+}
+func (t *subagentDispatchTool) IsLongRunning() bool { return true }
+
+func (t *subagentDispatchTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"skill": {
+					Type:        "STRING",
+					Description: "Name of a loaded skill that declares sub_agents. Must be currently active on this session — call skill_load first if needed.",
+				},
+				"role": {
+					Type:        "STRING",
+					Description: "Specialist role declared under sub_agents in the skill's frontmatter (e.g. \"schema_explorer\"). Use subagent_list to discover.",
+				},
+				"task": {
+					Type:        "STRING",
+					Description: "Natural-language task description for the specialist. Keep it focused — a specialist runs one mission.",
+				},
+				"notes": {
+					Type:        "STRING",
+					Description: "Optional extra context or constraints for the specialist (e.g. data filters, timeframe).",
+				},
+			},
+			Required: []string{"skill", "role", "task"},
+		},
+	}
+}
+
+func (t *subagentDispatchTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *subagentDispatchTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("subagent_dispatch: unexpected args: %T", args)
+	}
+	skillName, _ := m["skill"].(string)
+	role, _ := m["role"].(string)
+	task, _ := m["task"].(string)
+	notes, _ := m["notes"].(string)
+
+	if strings.TrimSpace(skillName) == "" || strings.TrimSpace(role) == "" || strings.TrimSpace(task) == "" {
+		return nil, fmt.Errorf("subagent_dispatch: skill, role, and task are required")
+	}
+
+	parent, err := sessionForTool(ctx, t.sm)
+	if err != nil {
+		return nil, fmt.Errorf("subagent_dispatch: %w", err)
+	}
+
+	// Guard: the named skill must be active on this session. Prevents
+	// a coordinator from dispatching into a skill it hasn't loaded
+	// (which would silently expose a different toolset to the
+	// specialist than the user expects).
+	if !parent.HasSkill(skillName) {
+		return nil, fmt.Errorf("subagent_dispatch: skill %q is not loaded on this session; call skill_load first", skillName)
+	}
+
+	sk, err := t.skills.Load(ctx, skillName)
+	if err != nil {
+		return nil, fmt.Errorf("subagent_dispatch: load skill %q: %w", skillName, err)
+	}
+	spec, ok := sk.SubAgents[role]
+	if !ok {
+		return nil, fmt.Errorf("subagent_dispatch: skill %q has no sub_agent role %q (call subagent_list to see available roles)", skillName, role)
+	}
+
+	// spawnEventID linkage to the coordinator's dispatching tool_call
+	// event is recorded via spec 006 migration 0.0.2
+	// (sessions.spawned_from_event_id). ADK's tool.Context doesn't
+	// expose the invoking function-call id today, so we leave it
+	// empty here — the child's parent_session_id + metadata already
+	// record enough linkage for Phase 1. A post-Phase-2 follow-up can
+	// read the id from the session's last tool_call event (single SQL
+	// query at dispatch time) once the classifier is writing it.
+	res, runErr := t.dispatcher.Run(
+		ctx,
+		parent.ID(), "",
+		skillName, role,
+		spec,
+		task, notes,
+	)
+	if runErr != nil {
+		// Shouldn't happen — Dispatcher.Run funnels everything through
+		// DispatchResult. Surface as a tool error so the LLM sees it.
+		return nil, fmt.Errorf("subagent_dispatch: %w", runErr)
+	}
+
+	return map[string]any{
+		"summary":       res.Summary,
+		"child_session": res.ChildSessionID,
+		"turns_used":    res.TurnsUsed,
+		"truncated":     res.Truncated,
+		"error":         res.Error,
+	}, nil
 }

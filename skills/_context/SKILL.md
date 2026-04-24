@@ -1,10 +1,13 @@
 ---
 name: _context
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Tools for managing your own conversation context: check current
   usage, see what's loaded, and trigger compaction when needed.
+  Useful for both the user-facing coordinator and any specialist
+  sub-agent — compaction tracks each session's own model budget.
 autoload: true
+autoload_for: [root, subagent]
 providers:
   - name: _context
     provider: _context

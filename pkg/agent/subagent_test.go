@@ -188,6 +188,56 @@ func TestDispatcher_Run_TruncatesSummary(t *testing.T) {
 	assert.Empty(t, res.Error)
 }
 
+// ----- T103: SubAgentService tool declarations -----
+
+func TestSubAgentService_ProviderShape(t *testing.T) {
+	h := newDispatchHarness(t, nil)
+	svc, err := NewSubAgentService(h.dispatcher, h.manager, h.skills)
+	require.NoError(t, err)
+
+	assert.Equal(t, SubAgentProviderName, svc.Name())
+	toolsList := svc.Tools()
+	require.Len(t, toolsList, 2)
+
+	names := map[string]bool{}
+	for _, tl := range toolsList {
+		names[tl.Name()] = true
+		assert.NotEmpty(t, tl.Description(),
+			"tool %q missing description", tl.Name())
+	}
+	assert.True(t, names["subagent_list"], "subagent_list tool missing")
+	assert.True(t, names["subagent_dispatch"], "subagent_dispatch tool missing")
+
+	// subagent_dispatch declares params so the LLM knows the schema.
+	// Concrete type assertion — tool.Tool interface alone doesn't
+	// expose Declaration (it's on the internal runnableTool shape).
+	var dispatch *subagentDispatchTool
+	for _, tl := range toolsList {
+		if d, ok := tl.(*subagentDispatchTool); ok {
+			dispatch = d
+		}
+	}
+	require.NotNil(t, dispatch)
+	decl := dispatch.Declaration()
+	require.NotNil(t, decl)
+	assert.Equal(t, "subagent_dispatch", decl.Name)
+	require.NotNil(t, decl.Parameters)
+	assert.EqualValues(t, "OBJECT", decl.Parameters.Type)
+	assert.ElementsMatch(t, []string{"skill", "role", "task"}, decl.Parameters.Required)
+	assert.Contains(t, decl.Parameters.Properties, "skill")
+	assert.Contains(t, decl.Parameters.Properties, "role")
+	assert.Contains(t, decl.Parameters.Properties, "task")
+	assert.Contains(t, decl.Parameters.Properties, "notes")
+
+	// IsLongRunning: dispatch yes, list no.
+	assert.True(t, dispatch.IsLongRunning())
+	for _, tl := range toolsList {
+		if tl.Name() == "subagent_list" {
+			assert.False(t, tl.IsLongRunning())
+		}
+	}
+}
+
 // ----- T114: pre-flight refusal -----
 
 func TestDispatcher_Run_PreflightRefusesOversizeTask(t *testing.T) {

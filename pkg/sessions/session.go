@@ -731,6 +731,41 @@ func inlineName(skill, providerName string) string {
 // Touch is for tests/infra that need to flag activity.
 func (s *Session) Touch() { s.touch() }
 
+// ActiveSkills returns the names of skills currently loaded on this
+// session. Snapshot is the single source of truth for what the LLM
+// sees; this accessor lets tool handlers make short decisions
+// (is skill X loaded?) without re-rendering the snapshot.
+func (s *Session) ActiveSkills() []string {
+	if s == nil || s.state == nil {
+		return nil
+	}
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	if len(s.state.Skills) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.state.Skills))
+	copy(out, s.state.Skills)
+	return out
+}
+
+// HasSkill reports whether the named skill is currently loaded on
+// this session. Used by the subagent_dispatch tool to refuse
+// dispatches into skills that weren't loaded by the coordinator.
+func (s *Session) HasSkill(name string) bool {
+	if s == nil || s.state == nil || name == "" {
+		return false
+	}
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	for _, n := range s.state.Skills {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 // SkillDescriptorMeta is what skill_load needs to shape its response —
 // references with descriptions + the author-provided workflow hint.
 // ListSkills returns the current skill catalogue.

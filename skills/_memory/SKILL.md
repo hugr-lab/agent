@@ -1,10 +1,13 @@
 ---
 name: _memory
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Persistent memory tools. Save notes during the session, search
-  long-term facts learned from previous sessions.
+  long-term facts learned from previous sessions. Also the
+  entry-point for spec-006 scoped notes: memory_note(content, scope?)
+  lets a specialist promote findings up to the coordinator chain.
 autoload: true
+autoload_for: [root, subagent]
 providers:
   - name: _memory
     provider: _memory

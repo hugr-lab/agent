@@ -421,8 +421,33 @@ func buildRuntime(
 	components.tools.AddProvider(skills.NewService(sessionMgr.SkillsAccessor()))
 	components.tools.AddProvider(memService)
 	components.tools.AddProvider(chat.Provider())
+
+	// Spec 006 phase 1: Dispatcher + its tools.Provider. The Provider
+	// is referenced by the _system skill (providers: [{provider:
+	// _subagent}]) so subagent_dispatch / subagent_list ride along
+	// with skill_load / skill_list at autoload time.
+	dispatcher, err := hugen.NewDispatcher(hugen.DispatcherConfig{
+		Sessions: sessionMgr,
+		Skills:   components.skills,
+		Router:   router,
+		Logger:   logger,
+	})
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build sub-agent dispatcher: %w", err)
+	}
+	subagentSvc, err := hugen.NewSubAgentService(dispatcher, sessionMgr, components.skills)
+	if err != nil {
+		rt.close(logger)
+		return nil, fmt.Errorf("build sub-agent service: %w", err)
+	}
+	components.tools.AddProvider(subagentSvc)
+
 	logger.Info("internal services registered",
-		"providers", []string{skills.ServiceName, memory.ServiceName, chatcontext.ServiceName})
+		"providers", []string{
+			skills.ServiceName, memory.ServiceName, chatcontext.ServiceName,
+			hugen.SubAgentProviderName,
+		})
 
 	// External providers from config.yaml. Internal services (type=system)
 	// are registered programmatically above — skip their YAML
