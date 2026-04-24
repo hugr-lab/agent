@@ -117,21 +117,45 @@ type Skill struct {
 //   - SummaryMaxTok: cap on the final assistant text returned to the
 //     coordinator (rune count, NOT a token estimate). Defaults to
 //     800; rejected if explicitly set to <= 0.
+//   - AsyncHint (spec 007): the role's preferred dispatch mode when the
+//     coordinator has a choice. One of "sync" | "async" | "auto"
+//     (default "auto" — coordinator decides per request). Parser rejects
+//     any other value.
+//   - CanSpawn (spec 007): authorises the role to spawn further missions
+//     via the `spawn_sub_mission` tool. Default false. The tool registers
+//     on the role's session only when this is true.
+//   - MaxDepth (spec 007): cap on spawning depth measured from the root
+//     coordinator. 0 means "use the agent-wide cap"; positive values
+//     override downward only. Must be >= 0.
 type SubAgentSpec struct {
-	Description    string   `yaml:"description"    json:"description"     mapstructure:"description"`
-	Intent         string   `yaml:"intent"         json:"intent,omitempty" mapstructure:"intent"`
-	Instructions   string   `yaml:"instructions"   json:"instructions"    mapstructure:"instructions"`
-	Tools          []string `yaml:"tools"          json:"tools,omitempty"          mapstructure:"tools"`
-	ToolAllowlist  []string `yaml:"tool_allowlist" json:"tool_allowlist,omitempty" mapstructure:"tool_allowlist"`
-	MaxTurns       int      `yaml:"max_turns"      json:"max_turns,omitempty"      mapstructure:"max_turns"`
-	SummaryMaxTok  int      `yaml:"summary_max_tokens" json:"summary_max_tokens,omitempty" mapstructure:"summary_max_tokens"`
+	Description   string   `yaml:"description"    json:"description"     mapstructure:"description"`
+	Intent        string   `yaml:"intent"         json:"intent,omitempty" mapstructure:"intent"`
+	Instructions  string   `yaml:"instructions"   json:"instructions"    mapstructure:"instructions"`
+	Tools         []string `yaml:"tools"          json:"tools,omitempty"          mapstructure:"tools"`
+	ToolAllowlist []string `yaml:"tool_allowlist" json:"tool_allowlist,omitempty" mapstructure:"tool_allowlist"`
+	MaxTurns      int      `yaml:"max_turns"      json:"max_turns,omitempty"      mapstructure:"max_turns"`
+	SummaryMaxTok int      `yaml:"summary_max_tokens" json:"summary_max_tokens,omitempty" mapstructure:"summary_max_tokens"`
+
+	// Phase-2 additions (spec 007). Additive; phase-1 skills load unchanged.
+	AsyncHint string `yaml:"async_hint" json:"async_hint,omitempty" mapstructure:"async_hint"`
+	CanSpawn  bool   `yaml:"can_spawn"  json:"can_spawn,omitempty"  mapstructure:"can_spawn"`
+	MaxDepth  int    `yaml:"max_depth"  json:"max_depth,omitempty"  mapstructure:"max_depth"`
 }
+
+// Valid values for SubAgentSpec.AsyncHint. The parser treats empty
+// string as DefaultSubAgentAsyncHint.
+const (
+	SubAgentAsyncHintSync  = "sync"
+	SubAgentAsyncHintAsync = "async"
+	SubAgentAsyncHintAuto  = "auto"
+)
 
 // Default sub-agent spec values used by the frontmatter parser when a
 // field is omitted by the skill author.
 const (
 	defaultSubAgentMaxTurns      = 15
 	defaultSubAgentSummaryMaxTok = 800
+	defaultSubAgentAsyncHint     = SubAgentAsyncHintAuto
 )
 
 // SkillProviderSpec is one tool-source binding declared by a skill.

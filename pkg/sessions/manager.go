@@ -127,7 +127,9 @@ type Manager struct {
 	constitution  string
 	logger        *slog.Logger
 	inlineBuilder    InlineProviderFactory
-	subagentBuilder  SubAgentToolBuilder
+	subagentBuilder SubAgentToolBuilder
+
+	closeHooks []func(string) // fires at the end of Delete; registered via OnSessionClose
 	classifier       *Classifier
 	scheduler        ReviewQueuer
 }
@@ -357,7 +359,8 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 			switch k {
 			case stateKeyParentSessionID, stateKeyMission, stateKeyForkAfterSeq,
 				stateKeySessionType, stateKeySpawnedFromEventID,
-				stateKeySkill, stateKeyRole:
+				stateKeySkill, stateKeyRole,
+				stateKeyCoordSessionID, stateKeyDependsOn:
 				continue
 			}
 			_ = sess.state.Set(k, v)
@@ -375,6 +378,27 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 			}
 			if v, ok := req.State[stateKeyRole].(string); ok && v != "" {
 				meta["role"] = v
+			}
+			if v, ok := req.State[stateKeyCoordSessionID].(string); ok && v != "" {
+				meta["coord_session_id"] = v
+			}
+			if raw, ok := req.State[stateKeyDependsOn]; ok {
+				switch d := raw.(type) {
+				case []string:
+					if len(d) > 0 {
+						meta["depends_on"] = d
+					}
+				case []any:
+					arr := make([]string, 0, len(d))
+					for _, e := range d {
+						if s, ok := e.(string); ok && s != "" {
+							arr = append(arr, s)
+						}
+					}
+					if len(arr) > 0 {
+						meta["depends_on"] = arr
+					}
+				}
 			}
 		}
 		row := sessstore.Record{
@@ -455,7 +479,30 @@ func (m *Manager) Delete(ctx context.Context, req *adksession.DeleteRequest) err
 	if m.scheduler != nil {
 		m.scheduler.QueueReview(req.SessionID)
 	}
+	// Spec 007: dispatch the close hook AFTER all persistence so
+	// subscribers (Planner cache drop, Executor.AbandonCoordinator)
+	// see terminal state in their own reads.
+	m.mu.RLock()
+	hooks := make([]func(string), len(m.closeHooks))
+	copy(hooks, m.closeHooks)
+	m.mu.RUnlock()
+	for _, h := range hooks {
+		h(req.SessionID)
+	}
 	return nil
+}
+
+// OnSessionClose registers a callback fired synchronously at the
+// end of Delete. Useful for releasing per-session state held
+// outside the Manager (missions.Planner cache, executor dags, etc).
+// Callbacks run in registration order, all on the Delete goroutine.
+func (m *Manager) OnSessionClose(fn func(sessionID string)) {
+	if fn == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closeHooks = append(m.closeHooks, fn)
 }
 
 // UpdateSessionStatus proxies to the hub session-status update so
@@ -556,6 +603,13 @@ const (
 	// notes can render a "[from <skill>/<role>]" provenance prefix.
 	stateKeySkill = "__skill__"
 	stateKeyRole  = "__role__"
+	// Spec 007: mission-graph linkage. CoordSessionID points at the
+	// root coordinator for the graph this mission belongs to (may
+	// differ from parent_session_id for deeper-than-2 graphs).
+	// DependsOn lists upstream mission session ids whose terminal
+	// status gated this mission's promotion. Both land in metadata.
+	stateKeyCoordSessionID = "__coord_session_id__"
+	stateKeyDependsOn      = "__depends_on__"
 )
 
 // linkageFromState reads the five well-known CreateRequest.State keys

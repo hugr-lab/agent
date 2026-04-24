@@ -33,6 +33,10 @@ import (
 	"github.com/hugr-lab/hugen/pkg/memory"
 	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/hugen/pkg/missions"
+	missionsexec "github.com/hugr-lab/hugen/pkg/missions/executor"
+	missionsplan "github.com/hugr-lab/hugen/pkg/missions/planner"
+	missionsstore "github.com/hugr-lab/hugen/pkg/missions/store"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/sessions"
@@ -58,6 +62,10 @@ type Runtime struct {
 	Tools      *tools.Manager
 	Classifier *sessions.Classifier
 	Scheduler  *scheduler.Scheduler
+
+	// Missions is the phase-2 mission graph executor. Nil when no
+	// missions-config was provided at runtime.Build.
+	Missions *missionsexec.Executor
 
 	// Engine is the embedded query-engine (nil in hub-only mode).
 	Engine *qe.Service
@@ -351,10 +359,54 @@ func Build(
 	}
 	toolsMgr.AddProvider(subagentSvc)
 
+	// Spec 007 — mission graph runtime. Planner + Store + Executor
+	// share the same sessstore client; the driver adapts Dispatcher
+	// to the Executor's MissionDriver surface. The tools.Provider
+	// (missions.Service) is registered in toolsMgr under the
+	// ServiceName key, and skills that want mission_plan /
+	// mission_status declare `provider: _mission_tools` in their
+	// frontmatter — same pattern as _memory / _context / _system.
+	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
+	missionsPlanner := missionsplan.New(router, logger, missionsplan.Options{})
+	missionsDriver := &dispatcherMissionDriver{
+		dispatcher: dispatcher,
+		skills:     skillsMgr,
+		logger:     logger,
+	}
+	missionsExec := missionsexec.New(missionsexec.Config{
+		Store:       missionsStore,
+		Events:      sessHub,
+		Driver:      missionsDriver,
+		Logger:      logger,
+		Parallelism: 4,
+	})
+	missionsSvc := missions.NewService(missions.Config{
+		Planner:  missionsPlanner,
+		Executor: missionsExec,
+		Sessions: sessionMgr,
+		Skills:   skillsMgr,
+	})
+	toolsMgr.AddProvider(missionsSvc)
+	rt.Missions = missionsExec
+	// Drop cached plans when the coordinator session closes so a
+	// restarted conversation never serves stale DAG ids.
+	sessionMgr.OnSessionClose(missionsPlanner.OnCoordinatorClose)
+
+	// Drive the scheduler every 2s — the Executor reconciles its
+	// in-memory DAGs + promotes ready missions to running + drains
+	// terminal goroutines on each tick. TryLock guards overlap.
+	if err := sched.Every("missions-tick", 2*time.Second, func(ctx context.Context) error {
+		missionsExec.Tick(ctx)
+		return nil
+	}); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: register missions-tick: %w", err)
+	}
+
 	logger.Info("runtime: internal services registered",
 		"providers", []string{
 			skills.ServiceName, memory.ServiceName, chatcontext.ServiceName,
-			hugen.SubAgentProviderName,
+			hugen.SubAgentProviderName, missions.ServiceName,
 		})
 
 	for _, pc := range cfg.Providers {

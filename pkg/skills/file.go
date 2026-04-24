@@ -310,6 +310,18 @@ func normalizeSubAgents(skillName string, providers []SkillProviderSpec, raw map
 		case spec.SummaryMaxTok < 0:
 			return nil, fmt.Errorf("skills: %q sub_agent %q: summary_max_tokens must be > 0 (got %d)", skillName, role, spec.SummaryMaxTok)
 		}
+		// Phase-2 additions (spec 007): async_hint / can_spawn / max_depth.
+		switch strings.TrimSpace(spec.AsyncHint) {
+		case "":
+			spec.AsyncHint = defaultSubAgentAsyncHint
+		case SubAgentAsyncHintSync, SubAgentAsyncHintAsync, SubAgentAsyncHintAuto:
+			// accepted as-is
+		default:
+			return nil, fmt.Errorf("skills: %q sub_agent %q: async_hint must be one of sync|async|auto (got %q)", skillName, role, spec.AsyncHint)
+		}
+		if spec.MaxDepth < 0 {
+			return nil, fmt.Errorf("skills: %q sub_agent %q: max_depth must be >= 0 (got %d)", skillName, role, spec.MaxDepth)
+		}
 		out[role] = spec
 	}
 	return out, nil

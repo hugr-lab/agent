@@ -133,12 +133,48 @@ type DispatchResult struct {
 // `parentSessionID` is the coordinator's session id. `spawnEventID`
 // is the id of the tool_call event on the parent that triggered the
 // dispatch (empty in tests; production wiring sets it).
+// DispatchOverrides lets the Executor (spec 007) pre-assign the
+// child session id and inject mission-graph metadata into the row
+// Manager.Create persists. Zero-value is fine for phase-1 callers —
+// Run() builds overrides internally when invoked without this struct.
+type DispatchOverrides struct {
+	ChildSessionID string
+	CoordSessionID string
+	DependsOn      []string
+}
+
 func (d *Dispatcher) Run(
 	ctx context.Context,
 	parentSessionID, spawnEventID string,
 	parentSkill, role string,
 	spec skills.SubAgentSpec,
 	task, notes string,
+) (DispatchResult, error) {
+	return d.runInternal(ctx, parentSessionID, spawnEventID, parentSkill, role, spec, task, notes, DispatchOverrides{})
+}
+
+// RunMission is the Executor-facing entry point. Unlike Run, it
+// accepts a pre-assigned child session id and mission-graph metadata
+// (coord_session_id + depends_on) that land in the hub row's
+// metadata. Identical turn-driving semantics otherwise.
+func (d *Dispatcher) RunMission(
+	ctx context.Context,
+	parentSessionID, spawnEventID string,
+	parentSkill, role string,
+	spec skills.SubAgentSpec,
+	task, notes string,
+	overrides DispatchOverrides,
+) (DispatchResult, error) {
+	return d.runInternal(ctx, parentSessionID, spawnEventID, parentSkill, role, spec, task, notes, overrides)
+}
+
+func (d *Dispatcher) runInternal(
+	ctx context.Context,
+	parentSessionID, spawnEventID string,
+	parentSkill, role string,
+	spec skills.SubAgentSpec,
+	task, notes string,
+	overrides DispatchOverrides,
 ) (DispatchResult, error) {
 	if strings.TrimSpace(task) == "" {
 		return DispatchResult{Error: "task is empty"}, nil
@@ -166,23 +202,34 @@ func (d *Dispatcher) Run(
 	runCtx, cancel := context.WithTimeout(ctx, d.Timeout)
 	defer cancel()
 
-	// Step 2 — open child session via Manager.Create with the five
-	// well-known State keys. Manager.Create handles linkage + hub
-	// row + autoload (filtered to subagent-applicable skills).
-	childID := newDispatchSessionID()
+	// Step 2 — open child session via Manager.Create. childID is
+	// Executor-assigned for mission-graph dispatches (spec 007) so
+	// in-memory DAG ids match persisted row ids; legacy phase-1 Run
+	// generates a fresh one.
+	childID := overrides.ChildSessionID
+	if childID == "" {
+		childID = newDispatchSessionID()
+	}
+	state := map[string]any{
+		"__session_type__":          sessstore.SessionTypeSubAgent,
+		"__parent_session_id__":     parentSessionID,
+		"__spawned_from_event_id__": spawnEventID,
+		"__mission__":               task,
+		"__skill__":                 parentSkill,
+		"__role__":                  role,
+		// __fork_after_seq__ omitted — sub-agents always have own context.
+	}
+	if overrides.CoordSessionID != "" {
+		state["__coord_session_id__"] = overrides.CoordSessionID
+	}
+	if len(overrides.DependsOn) > 0 {
+		state["__depends_on__"] = overrides.DependsOn
+	}
 	createReq := &adksession.CreateRequest{
 		AppName:   sessionAppName(d.sessions, parentSessionID),
 		UserID:    sessionUserID(d.sessions, parentSessionID),
 		SessionID: childID,
-		State: map[string]any{
-			"__session_type__":          sessstore.SessionTypeSubAgent,
-			"__parent_session_id__":     parentSessionID,
-			"__spawned_from_event_id__": spawnEventID,
-			"__mission__":               task,
-			"__skill__":                 parentSkill,
-			"__role__":                  role,
-			// __fork_after_seq__ omitted — sub-agents always have own context.
-		},
+		State:     state,
 	}
 	if _, err := d.sessions.Create(runCtx, createReq); err != nil {
 		return DispatchResult{
