@@ -31,10 +31,11 @@ const (
 // within one session, concurrent calls for the same (goal, skills)
 // pair collapse to a single LLM call.
 type Planner struct {
-	router  *models.Router
-	logger  *slog.Logger
-	cache   *planCache
-	timeout time.Duration
+	router       *models.Router
+	logger       *slog.Logger
+	cache        *planCache
+	timeout      time.Duration
+	promptHeader string
 }
 
 // Options tune the Planner at construction. Zero values map to
@@ -43,6 +44,11 @@ type Options struct {
 	CacheTTL    time.Duration
 	CacheCap    int
 	CallTimeout time.Duration
+
+	// PromptHeader is the operator-editable instruction prose loaded
+	// from skills/_coordinator/planner-prompt.md. Empty falls back to
+	// defaultPromptHeader so unit tests stay filesystem-free.
+	PromptHeader string
 }
 
 // New builds a Planner with an internal idempotency cache.
@@ -59,11 +65,16 @@ func New(router *models.Router, logger *slog.Logger, opts Options) *Planner {
 	if opts.CallTimeout <= 0 {
 		opts.CallTimeout = defaultCallTimeout
 	}
+	header := strings.TrimSpace(opts.PromptHeader)
+	if header == "" {
+		header = defaultPromptHeader
+	}
 	return &Planner{
-		router:  router,
-		logger:  logger,
-		cache:   newPlanCache(opts.CacheTTL, opts.CacheCap),
-		timeout: opts.CallTimeout,
+		router:       router,
+		logger:       logger,
+		cache:        newPlanCache(opts.CacheTTL, opts.CacheCap),
+		timeout:      opts.CallTimeout,
+		promptHeader: header,
 	}
 }
 
@@ -132,7 +143,7 @@ func (p *Planner) planUncached(
 		return graph.PlanResult{}, fmt.Errorf("missions: router returned nil model")
 	}
 
-	prompt := BuildPrompt(catalog, goal)
+	prompt := BuildPrompt(p.promptHeader, catalog, goal)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{
 			Role:  "user",

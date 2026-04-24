@@ -369,7 +369,14 @@ func Build(
 	// mission_status declare `provider: _mission_tools` in their
 	// frontmatter — same pattern as _memory / _context / _system.
 	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
-	missionsPlanner := missionsplan.New(router, logger, missionsplan.Options{})
+	plannerHeader, err := loadCoordinatorPrompt(skillsPath, "planner-prompt.md", logger)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: load planner prompt: %w", err)
+	}
+	missionsPlanner := missionsplan.New(router, logger, missionsplan.Options{
+		PromptHeader: plannerHeader,
+	})
 	missionsDriver := &dispatcherMissionDriver{
 		dispatcher: dispatcher,
 		skills:     skillsMgr,
@@ -459,7 +466,7 @@ func Build(
 	// cfg.Missions.FollowUpEnabled when the behaviour needs tuning.
 	// Classification rules live in skills/_coordinator/followup-
 	// classifier.md so operators edit prompt prose without rebuilding.
-	followupHeader, err := loadFollowupHeader(skillsPath, logger)
+	followupHeader, err := loadCoordinatorPrompt(skillsPath, "followup-classifier.md", logger)
 	if err != nil {
 		closeOnErr()
 		return nil, fmt.Errorf("runtime: load followup classifier prompt: %w", err)
@@ -583,20 +590,21 @@ func readConstitution(cfg *config.Config) (string, error) {
 	return string(data), nil
 }
 
-// loadFollowupHeader reads the followup classifier prompt prose from
-// skills/_coordinator/followup-classifier.md, when present. Missing
-// file is fine — the router falls back to its embedded default. Read
-// errors other than not-found are surfaced so a corrupted file is
-// noticed at boot rather than masked.
-func loadFollowupHeader(skillsPath string, logger *slog.Logger) (string, error) {
+// loadCoordinatorPrompt reads an operator-editable prompt prose file
+// from skills/_coordinator/<name>. Missing file is fine — callers
+// fall back to their embedded defaults. Read errors other than
+// not-found are surfaced so a corrupted file is noticed at boot
+// rather than masked.
+func loadCoordinatorPrompt(skillsPath, name string, logger *slog.Logger) (string, error) {
 	if skillsPath == "" {
 		return "", nil
 	}
-	path := filepath.Join(skillsPath, "_coordinator", "followup-classifier.md")
+	path := filepath.Join(skillsPath, "_coordinator", name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			logger.Info("runtime: followup classifier prompt not found, using embedded default", "path", path)
+			logger.Info("runtime: coordinator prompt not found, using embedded default",
+				"path", path)
 			return "", nil
 		}
 		return "", fmt.Errorf("read %s: %w", path, err)

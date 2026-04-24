@@ -47,20 +47,20 @@ func BuildRoleCatalog(loaded []*skills.Skill) []RoleEntry {
 	return out
 }
 
-// buildInstruction is the verbatim instruction block prepended to the
-// coordinator's goal. Strict JSON; parser uses DisallowUnknown — any
-// deviation fails closed (see contracts/planner.md §2).
-func buildInstruction(catalog []RoleEntry) string {
+// defaultPromptHeader is the embedded fallback used when the runtime
+// hasn't supplied a header (typically: unit tests with no filesystem).
+// Production loads the prose from skills/_coordinator/planner-prompt.md
+// so operators can edit the planning rules without rebuilding.
+const defaultPromptHeader = `You plan a mission graph for the coordinator. Return EXACTLY one JSON object with keys ` + "`missions`" + ` (array) and ` + "`edges`" + ` (array). Each mission has ` + "`{id, skill, role, task}`" + ` where ` + "`id`" + ` is a sequential integer 1..N and ` + "`skill`" + ` and ` + "`role`" + ` reference a registered (skill, role) pair from the list below. Each edge has ` + "`{from, to}`" + ` referencing mission ids; it means ` + "`from`" + ` must reach status ` + "`done`" + ` before ` + "`to`" + ` can start. Do not emit prose, markdown, or any keys other than those listed.`
+
+// buildInstruction renders the operator-supplied instruction header
+// followed by the dynamic role catalog. Header is verbatim; catalog
+// formatting + the empty-catalog refuse rule live in code so the
+// strict JSON contract stays stable across operator edits.
+func buildInstruction(header string, catalog []RoleEntry) string {
 	var b bytes.Buffer
-	b.WriteString("You plan a mission graph for the coordinator. Return EXACTLY ")
-	b.WriteString("one JSON object with keys `missions` (array) and `edges` (array). ")
-	b.WriteString("Each mission has `{id, skill, role, task}` where `id` is a ")
-	b.WriteString("sequential integer 1..N and `skill` and `role` reference a ")
-	b.WriteString("registered (skill, role) pair from the list below. Each edge has ")
-	b.WriteString("`{from, to}` referencing mission ids; it means `from` must reach ")
-	b.WriteString("status `done` before `to` can start. Do not emit prose, markdown, ")
-	b.WriteString("or any keys other than those listed.\n\n")
-	b.WriteString("Registered specialist roles (skill : role — description):\n")
+	b.WriteString(strings.TrimSpace(header))
+	b.WriteString("\n\nRegistered specialist roles (skill : role — description):\n")
 	if len(catalog) == 0 {
 		b.WriteString("  (none — the coordinator has no specialist roles loaded; refuse the plan by returning an empty missions array.)\n")
 	}
@@ -72,10 +72,14 @@ func buildInstruction(catalog []RoleEntry) string {
 
 // BuildPrompt concatenates the instruction block with the user's
 // goal. Returns one string ready to ship as the prompt body; caller
-// wraps it in the ADK LLMRequest.
-func BuildPrompt(catalog []RoleEntry, goal string) string {
+// wraps it in the ADK LLMRequest. Empty header falls back to the
+// embedded default (unit-test path).
+func BuildPrompt(header string, catalog []RoleEntry, goal string) string {
+	if strings.TrimSpace(header) == "" {
+		header = defaultPromptHeader
+	}
 	var b bytes.Buffer
-	b.WriteString(buildInstruction(catalog))
+	b.WriteString(buildInstruction(header, catalog))
 	b.WriteString("\nGoal to plan:\n  ")
 	b.WriteString(strings.TrimSpace(goal))
 	b.WriteString("\n")
