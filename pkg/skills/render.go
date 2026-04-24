@@ -19,9 +19,9 @@ func RenderCatalog(skills []SkillMeta) string {
 	var b strings.Builder
 	b.WriteString("## Available Skills\n\n")
 	for _, s := range skills {
-		b.WriteString(fmt.Sprintf("- **%s**: %s", s.Name, s.Description))
+		fmt.Fprintf(&b, "- **%s**: %s", s.Name, s.Description)
 		if len(s.Categories) > 0 {
-			b.WriteString(fmt.Sprintf(" [%s]", strings.Join(s.Categories, ", ")))
+			fmt.Fprintf(&b, " [%s]", strings.Join(s.Categories, ", "))
 		}
 		b.WriteString("\n")
 		if len(s.MemoryCategories) > 0 {

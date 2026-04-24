@@ -119,14 +119,7 @@ func (c *Client) ListLog(ctx context.Context, opts ListLogOpts) ([]LogEntry, err
 	}
 	out := make([]LogEntry, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, LogEntry{
-			EventTime:    r.EventTime,
-			EventType:    r.EventType,
-			MemoryItemID: r.MemoryItemID,
-			SessionID:    r.SessionID,
-			AgentID:      r.AgentID,
-			Details:      r.Details,
-		})
+		out = append(out, LogEntry(r))
 	}
 	return out, nil
 }
@@ -167,14 +160,7 @@ func (c *Client) GetLog(ctx context.Context, memoryItemID string, limit int) ([]
 	}
 	out := make([]LogEntry, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, LogEntry{
-			EventTime:    r.EventTime,
-			EventType:    r.EventType,
-			MemoryItemID: r.MemoryItemID,
-			SessionID:    r.SessionID,
-			AgentID:      r.AgentID,
-			Details:      r.Details,
-		})
+		out = append(out, LogEntry(r))
 	}
 	return out, nil
 }

@@ -1,0 +1,54 @@
+name: accumulation
+session_id: scenario-accumulation-1
+
+steps:
+  - say: |
+      Delegate to `subagent_domain_summariser` with the task: "summarise
+      'context engineering' in one sentence, and save the key insight as
+      a parent-scoped memory_note so it's reusable next turn." Return
+      the specialist's answer.
+
+    queries:
+      - name: parent_notes_after_turn1
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_notes_chain | map({session: .session_id, author: .author_session_id, depth: .chain_depth, content})") {
+              hub { db { agent {
+                session_notes_chain(args: {session_id: $sid}) {
+                  session_id author_session_id chain_depth content
+                }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-accumulation-1
+
+  - say: |
+      Now delegate to `subagent_domain_summariser` again: "recap in one
+      sentence — use any parent notes we've already collected." Return
+      the specialist's answer.
+
+    queries:
+      - name: subagent_count
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | {total: length, ids: map(.id)}") {
+              hub { db { agent {
+                sessions(order_by: [{field: "created_at", direction: ASC}]) {
+                  id session_type created_at
+                }
+              }}}
+            }
+          }
+
+      - name: notes_visible_to_second_sub
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | .[-1].id") {
+              hub { db { agent {
+                sessions(order_by: [{field: "created_at", direction: ASC}]) {
+                  id session_type created_at
+                }
+              }}}
+            }
+          }

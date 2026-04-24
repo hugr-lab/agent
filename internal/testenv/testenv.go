@@ -7,7 +7,11 @@ package testenv
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	hugr "github.com/hugr-lab/query-engine"
@@ -22,9 +26,16 @@ import (
 )
 
 // Opts tunes Engine for tests that need vector search.
+//
+// When EmbedderURL is non-empty, Engine registers an "embedding" data
+// source pointing at that OpenAI-compatible endpoint; this is what
+// lights up the `@embeddings` directive + `semantic:` / `summary:`
+// arguments on session_events / memory_items. Leave it empty for
+// tests that only exercise the no-embedder path.
 type Opts struct {
 	VectorDim     int
 	EmbedderModel string
+	EmbedderURL   string
 }
 
 // Engine spins up an embedded hugr engine with hub.db attached, seeded
@@ -74,11 +85,94 @@ func Engine(t *testing.T, opt ...Opts) (*hugr.Service, string) {
 	require.NoError(t, service.AttachRuntimeSource(ctx, source))
 	require.NoError(t, service.Init(ctx))
 
+	if o.EmbedderURL != "" && o.EmbedderModel != "" {
+		path := fmt.Sprintf("%s?model=%s&timeout=30s", o.EmbedderURL, o.EmbedderModel)
+		require.NoError(t, service.RegisterDataSource(ctx, types.DataSource{
+			Name:    o.EmbedderModel,
+			Type:    types.DataSourceType("embedding"),
+			Prefix:  o.EmbedderModel,
+			Path:    path,
+			Sources: []types.CatalogSource{},
+		}))
+	}
+
 	t.Cleanup(func() {
 		_ = service.Close()
 	})
 
 	return service, hubPath
+}
+
+// EnvOrSkip returns the value of the named env variable; when unset
+// (or empty) the test is skipped with a helpful message. Handles the
+// common "we need a live local model for this test" pattern so
+// individual tests don't repeat the check.
+func EnvOrSkip(t *testing.T, name string) string {
+	t.Helper()
+	LoadDotEnv()
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		t.Skipf("%s not set; skipping test that requires a live local service", name)
+	}
+	return v
+}
+
+// LoadDotEnv walks upward from the current working directory looking
+// for a `.env` file and os.Setenv's every KEY=VALUE it finds into the
+// process environment (without overwriting already-set vars). Safe to
+// call repeatedly — loads once per process. Mirrors what
+// cmd/agent/main.go + pkg/config/LoadBootstrap do at boot time so
+// tests pick up the same EMBED_LOCAL_URL / LLM_LOCAL_URL as prod.
+func LoadDotEnv() {
+	dotEnvOnce.Do(loadDotEnv)
+}
+
+var dotEnvOnce sync.Once
+
+func loadDotEnv() {
+	dir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	for i := 0; i < 8; i++ {
+		candidate := filepath.Join(dir, ".env")
+		if data, err := os.ReadFile(candidate); err == nil {
+			applyEnvFile(string(data))
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
+}
+
+func applyEnvFile(body string) {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		// Strip wrapping quotes (both single + double) to match viper's
+		// .env handling.
+		if len(val) >= 2 {
+			first, last := val[0], val[len(val)-1]
+			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		if _, set := os.LookupEnv(key); set {
+			continue
+		}
+		_ = os.Setenv(key, val)
+	}
 }
 
 // MustQuery runs a GraphQL query and fails the test on transport or

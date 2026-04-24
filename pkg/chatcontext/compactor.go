@@ -31,10 +31,20 @@ import (
 //     describing the fold so the post-session reviewer can still see
 //     how many turns were summarised.
 type Compactor struct {
-	memory          *memstore.Client
-	sessions        *sessstore.Client
-	router          *models.Router
-	tokens          *models.TokenEstimator
+	memory   *memstore.Client
+	sessions *sessstore.Client
+	// writer routes `compaction` transcript events through the
+	// per-session write lock. nil in tests that spin up the compactor
+	// with a bare hub client — those fall back to direct hub writes.
+	writer   transcriptWriter
+	router   *models.Router
+	tokens   *models.TokenEstimator
+	// intent picks which model's context budget the compactor sizes
+	// itself against. Coordinator wiring passes IntentDefault; the
+	// sub-agent dispatcher (spec 006 phase 1) will pass the role's
+	// intent so a cheap-model specialist compacts at the cheap-model
+	// budget instead of the strong-model one.
+	intent          models.Intent
 	threshold       float64
 	minTurns        int
 	logger          *slog.Logger
@@ -53,6 +63,14 @@ type CompactorOptions struct {
 	Threshold  float64 // default 0.70
 	MinTurns   int     // minimum turn groups retained after compaction; default 4
 	Logger     *slog.Logger
+
+	// Intent picks which model's context budget this compactor sizes
+	// itself against. Empty defaults to models.IntentDefault — the
+	// pre-006 behaviour preserved for the coordinator wiring. Sub-
+	// agent dispatch passes the specialist role's intent so the
+	// compactor's threshold tracks the cheap-model window instead of
+	// the strong-model one.
+	Intent models.Intent
 
 	// Memory / Sessions are optional pre-built clients. When set, the
 	// compactor skips its internal New() calls. Preferred wiring from
@@ -87,6 +105,10 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 	if opts.MinTurns <= 0 {
 		opts.MinTurns = 4
 	}
+	intent := opts.Intent
+	if intent == "" {
+		intent = models.IntentDefault
+	}
 	memC := opts.Memory
 	if memC == nil {
 		c, err := memstore.New(opts.Querier, memstore.Options{
@@ -112,6 +134,7 @@ func NewCompactor(opts CompactorOptions) (*Compactor, error) {
 		sessions:        sessC,
 		router:          opts.Router,
 		tokens:          opts.Tokens,
+		intent:          intent,
 		threshold:       opts.Threshold,
 		minTurns:        opts.MinTurns,
 		logger:          opts.Logger,
@@ -161,19 +184,41 @@ func (c *Compactor) before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 	newContents = append(newContents, tail...)
 	req.Contents = newContents
 
-	if sid != "" && c.sessions != nil {
-		_, _ = c.sessions.AppendEvent(ctx, sessstore.Event{
+	if sid != "" {
+		ev := sessstore.Event{
 			SessionID: sid,
-			EventType: "compaction",
+			EventType: sessstore.EventTypeCompactionSummary,
 			Author:    "system",
 			Content:   summary,
 			Metadata: map[string]any{
 				"original_turns": len(oldest),
 				"summary_tokens": c.tokens.Estimate(summary),
 			},
-		})
+		}
+		switch {
+		case c.writer != nil:
+			_, _ = c.writer.PublishHubEvent(ctx, sid, ev, "")
+		case c.sessions != nil:
+			_, _ = c.sessions.AppendEvent(ctx, ev)
+		}
 	}
 	return nil, nil
+}
+
+// transcriptWriter is the narrow interface the compactor needs to
+// hand a transcript event to whoever owns per-session write
+// serialisation. Implemented by *sessions.Manager via PublishHubEvent.
+type transcriptWriter interface {
+	PublishHubEvent(ctx context.Context, sessionID string, ev sessstore.Event, summary string) (string, error)
+}
+
+// AttachWriter wires the compactor to a per-session-locking writer
+// (typically *sessions.Manager). Called once at runtime startup via
+// ChatContext.AttachSessions.
+func (c *Compactor) AttachWriter(w transcriptWriter) {
+	if c.writer == nil {
+		c.writer = w
+	}
 }
 
 // splitAtSafeBoundary walks backwards from idx until it lands at a
@@ -270,12 +315,60 @@ func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merg
 }
 
 // usageRatio estimates how close the current req.Contents is to the
-// model's context budget. Uses the calibrated models.TokenEstimator on a
-// concatenated string view — heuristic, good enough to trigger
+// model's context budget. Uses the calibrated models.TokenEstimator
+// on a concatenated string view — heuristic, good enough to trigger
 // compaction without reaching for a precise tokenizer.
+//
+// Spec 006 §1: the budget comes from Router.BudgetFor(c.intent) so a
+// 50 000-token cheap model triggers at ~37 500 estimated tokens
+// while a 1 000 000-token strong model triggers at ~750 000. Falls
+// back to the historical 128 000 floor when neither config nor the
+// router know the model (BudgetFor's last-resort branch).
 func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
-	var chars int
-	for _, ct := range req.Contents {
+	chars := contentChars(req.Contents...)
+	// System prompt + tool definitions are billed against the same
+	// context window the model has to fit the prompt into, so size the
+	// compaction trigger against them too. On hugr-agent the system
+	// prompt routinely carries constitution + memory hint + autoloaded
+	// skill bodies — easily 1 500–5 000 tokens that the ratio used to
+	// miss entirely.
+	if req.Config != nil {
+		if req.Config.SystemInstruction != nil {
+			chars += contentChars(req.Config.SystemInstruction)
+		}
+		// Tool schemas inflate the request too. Each function
+		// declaration's name + description + parameters round-trips as
+		// JSON on the wire; estimate via the text payload and bump a
+		// small flat overhead per tool for the parameters schema.
+		for _, t := range req.Config.Tools {
+			if t == nil {
+				continue
+			}
+			for _, fd := range t.FunctionDeclarations {
+				if fd == nil {
+					continue
+				}
+				chars += len(fd.Name) + len(fd.Description) + 200
+			}
+		}
+	}
+	est := c.tokens.Estimate(strings.Repeat("x", chars))
+	budget := c.router.BudgetFor(c.intent)
+	if budget <= 0 {
+		// Defensive belt-and-braces — Router.BudgetFor never returns
+		// 0 in practice, but a misconstructed router (no default
+		// model + no budgets) would. Keep the historical floor.
+		budget = 128_000
+	}
+	return float64(est) / float64(budget)
+}
+
+// contentChars sums the visible text chars across one or more
+// genai.Content values, treating FunctionResponse parts as ~2 KB
+// (rough approximation of the JSON payload once serialised).
+func contentChars(cts ...*genai.Content) int {
+	var n int
+	for _, ct := range cts {
 		if ct == nil {
 			continue
 		}
@@ -283,19 +376,13 @@ func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
 			if p == nil {
 				continue
 			}
-			chars += len(p.Text)
+			n += len(p.Text)
 			if p.FunctionResponse != nil {
-				// Rough approximation: assume JSON payload ~ 2x text
-				chars += 2000
+				n += 2000
 			}
 		}
 	}
-	est := c.tokens.Estimate(strings.Repeat("x", chars))
-	// Budget: 128k context assumed when not known. Better heuristic
-	// would read config; compactor consumers can pass a tighter
-	// estimator if they know the model's window.
-	const defaultBudget = 128_000
-	return float64(est) / float64(defaultBudget)
+	return n
 }
 
 // Callback returns the compactor as a llmagent.BeforeModelCallback

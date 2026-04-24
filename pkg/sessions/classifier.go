@@ -41,12 +41,33 @@ type Classifier struct {
 	hub    *sessstore.Client
 	logger *slog.Logger
 
+	// manager is an optional *Manager reference used to route
+	// transcript writes through Session.AppendEvent so the per-session
+	// write lock serialises classifier events against synchronous
+	// writers (LoadSkill, compactor). Left nil in standalone tests —
+	// writes go direct to hub with best-effort seq.
+	manager *Manager
+
 	ch      chan Envelope
 	dropped atomic.Int64
+
+	// inflight tracks envelopes that have been accepted onto the
+	// channel but not yet fully processed by handle(). Flush() polls
+	// this to wait for queue quiescence without closing the channel.
+	inflight atomic.Int64
 
 	stopped chan struct{}
 	stopMu  sync.Mutex
 	closed  bool
+}
+
+// AttachManager wires the Classifier to the session manager so
+// transcript writes take the per-session lock. Safe to call once,
+// after construction, before Run(ctx). No-op when called repeatedly.
+func (c *Classifier) AttachManager(m *Manager) {
+	if c.manager == nil {
+		c.manager = m
+	}
 }
 
 // NewClassifier constructs a Classifier with the given channel capacity.
@@ -99,6 +120,7 @@ func (c *Classifier) C() chan<- Envelope { return c.ch }
 func (c *Classifier) Publish(env Envelope) bool {
 	select {
 	case c.ch <- env:
+		c.inflight.Add(1)
 		return true
 	default:
 		n := c.dropped.Add(1)
@@ -143,18 +165,122 @@ func (c *Classifier) Run(ctx context.Context) {
 // handle classifies a single envelope and persists any rows it
 // produced. Errors are logged, never returned — the classifier
 // consumer loop is best-effort.
+//
+// Spec 006 §2: eligible event types carry a `summary:` payload that
+// Hugr embeds server-side on insert. Embedder failures surface as
+// mutation errors — the classifier falls back to a plain insert
+// (empty summary → NULL embedding) so the transcript row always
+// lands, and a WARN log points a backfill worker at the gap.
 func (c *Classifier) handle(ctx context.Context, env Envelope) {
+	defer c.inflight.Add(-1)
 	rows := Classify(env)
-	if c.hub == nil {
+	if c.hub == nil && c.manager == nil {
 		return
 	}
 	for _, row := range rows {
 		row.SessionID = env.SessionID
-		if _, err := c.hub.AppendEvent(ctx, row); err != nil {
+		summary := buildSummary(row)
+		_, err := c.appendEvent(ctx, env.SessionID, row, summary)
+		if err == nil {
+			continue
+		}
+		if summary == "" {
 			c.logger.Warn("classifier: AppendEvent failed",
+				"session", env.SessionID, "type", row.EventType, "err", err)
+			continue
+		}
+		// Embedder-or-other failure on the summary path: retry once
+		// WITHOUT summary so the row still persists with NULL embedding.
+		c.logger.Warn("classifier: embed insert failed, retrying without summary",
+			"session", env.SessionID, "type", row.EventType, "err", err)
+		if _, err := c.appendEvent(ctx, env.SessionID, row, ""); err != nil {
+			c.logger.Warn("classifier: AppendEvent retry failed",
 				"session", env.SessionID, "type", row.EventType, "err", err)
 		}
 	}
+}
+
+// appendEvent routes the write through Manager (session-scoped lock)
+// when available, and falls back to the bare hub client otherwise.
+// Tests that construct a Classifier with hub only keep the plain path.
+func (c *Classifier) appendEvent(ctx context.Context, sessionID string, row sessstore.Event, summary string) (string, error) {
+	if c.manager != nil {
+		return c.manager.PublishHubEvent(ctx, sessionID, row, summary)
+	}
+	return c.hub.AppendEventWithSummary(ctx, row, summary)
+}
+
+// buildSummary returns the text Hugr should embed for the given row,
+// or "" when the event type is ineligible (spec 006 contract
+// session-events-semantic.md §2 eligibility table).
+//
+// | type                  | payload                                     |
+// |-----------------------|---------------------------------------------|
+// | user_message          | row.Content                                 |
+// | llm_response          | row.Content                                 |
+// | agent_message         | row.Content (phase-2 producer)              |
+// | tool_call             | fmt "%s(%s)" name + compact args, ≤200 runes|
+// | tool_result           | row.ToolResult, non-empty ≤ 64 KiB, first 2048|
+// | compaction_summary    | row.Content                                 |
+// | agent_result (phase2) | metadata.summary                            |
+// | other                 | ""                                          |
+func buildSummary(row sessstore.Event) string {
+	switch row.EventType {
+	case sessstore.EventTypeUserMessage,
+		sessstore.EventTypeLLMResponse,
+		sessstore.EventTypeAgentMessage,
+		sessstore.EventTypeCompactionSummary:
+		return row.Content
+	case sessstore.EventTypeToolCall:
+		return toolCallDigest(row.ToolName, row.ToolArgs)
+	case sessstore.EventTypeToolResult:
+		if row.ToolResult == "" {
+			return ""
+		}
+		// AppendEvent already caps the persisted payload at
+		// maxToolResultBytes (64 KiB). The embedding summary is an
+		// even tighter window — the first 2 048 runes stay cheap for
+		// the embedder call without losing the tool's intent.
+		return truncateRunes(row.ToolResult, 2048)
+	case sessstore.EventTypeAgentResult:
+		if row.Metadata == nil {
+			return ""
+		}
+		if v, ok := row.Metadata["summary"].(string); ok {
+			return v
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// toolCallDigest renders a one-line summary of a tool_call row for
+// embedding: `<tool_name>(<compact args>)`. Args are marshalled to
+// JSON and truncated at 200 runes to stay cheap.
+func toolCallDigest(name string, args map[string]any) string {
+	if name == "" && len(args) == 0 {
+		return ""
+	}
+	argsJSON := ""
+	if len(args) > 0 {
+		if b, err := json.Marshal(args); err == nil {
+			argsJSON = string(b)
+		}
+	}
+	out := name + "(" + argsJSON + ")"
+	return truncateRunes(out, 200)
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // Classify maps a single ADK event to zero or more session_events
@@ -300,6 +426,33 @@ func nonEmpty(v, fallback string) string {
 
 // Done returns a channel closed when Run() exits.
 func (c *Classifier) Done() <-chan struct{} { return c.stopped }
+
+// Flush waits up to `budget` for every envelope currently in-flight
+// (queued + being handled) to finish processing, WITHOUT closing the
+// channel. Use this between scenario steps / before polling the
+// session_events table to make sure async-classified events have
+// been persisted. Unlike Drain, the classifier keeps accepting
+// Publish calls after Flush returns.
+//
+// Returns context.DeadlineExceeded on timeout. Safe against concurrent
+// Publish: the counter may rise again after return; callers using
+// Flush are expected to have no outstanding RunTurn at the moment.
+func (c *Classifier) Flush(ctx context.Context, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	for c.inflight.Load() > 0 {
+		if time.Now().After(deadline) {
+			c.logger.Warn("classifier flush timed out",
+				"inflight", c.inflight.Load(),
+				"queued", len(c.ch))
+			return context.DeadlineExceeded
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
+}
 
 // Drain closes the input channel and waits up to `timeout` for the
 // consumer goroutine to finish draining it. Returns context.DeadlineExceeded

@@ -22,7 +22,7 @@ func TestHeaderTransport_InjectsHeader(t *testing.T) {
 	resp, err := c.Get(srv.URL + "/ping")
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	assert.Equal(t, "secret-42", got.Get("X-API-Key"))
 }

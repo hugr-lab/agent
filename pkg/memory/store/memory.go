@@ -30,6 +30,34 @@ import (
 // free even when the wall clock resolves only to microseconds.
 func baseTimeForBatch() time.Time { return time.Now().UTC() }
 
+// insertMemoryItem fans out to the appropriate GraphQL mutation based
+// on whether the Client was wired with an embedder. When
+// EmbedderEnabled = true the insert carries `summary: $content` so
+// Hugr embeds server-side and stores the vector atomically; when
+// false it falls back to a plain insert (tests against an engine
+// without an attached embedder data source see no `summary:`
+// argument on the schema).
+func (c *Client) insertMemoryItem(ctx context.Context, data map[string]any, summary string) error {
+	if c.embedderEnabled && summary != "" {
+		return queries.RunMutation(ctx, c.querier,
+			`mutation ($data: hub_db_memory_items_mut_input_data!, $summary: String!) {
+				hub { db { agent {
+					insert_memory_items(data: $data, summary: $summary) { id }
+				}}}
+			}`,
+			map[string]any{"data": data, "summary": summary},
+		)
+	}
+	return queries.RunMutation(ctx, c.querier,
+		`mutation ($data: hub_db_memory_items_mut_input_data!) {
+			hub { db { agent {
+				insert_memory_items(data: $data) { id }
+			}}}
+		}`,
+		map[string]any{"data": data},
+	)
+}
+
 // offsetMicro returns base + idx*1µs. Caller passes idx=0 for the first
 // row and increments monotonically within the batch.
 func offsetMicro(base time.Time, idx int) time.Time {
@@ -54,10 +82,15 @@ type memoryLinkRow struct {
 }
 
 // Search returns memory items matching the query. Applies the agent
-// scope + valid_to > now by default. When embedding is provided and the
-// engine exposes similarity, results are ordered by cosine distance;
-// otherwise the query-string is used as an ILIKE pattern.
-func (c *Client) Search(ctx context.Context, query string, embedding []float32, opts SearchOpts) ([]SearchResult, error) {
+// scope + valid_to > now by default.
+//
+// Spec 006 §3: we no longer pre-compute the embedding vector on the Go
+// side. When the query string is non-trivial (len ≥ 3), Hugr embeds it
+// server-side via the `semantic:` argument and orders results by
+// `_distance_to_query`. For empty / short queries the path falls back
+// to an ILIKE + tag / category browse with score-desc ordering — the
+// only code-path that doesn't go through the embedder.
+func (c *Client) Search(ctx context.Context, query string, opts SearchOpts) ([]SearchResult, error) {
 	type row struct {
 		ID         string          `json:"id"`
 		AgentID    string          `json:"agent_id"`
@@ -72,7 +105,7 @@ func (c *Client) Search(ctx context.Context, query string, embedding []float32, 
 		IsValid    bool            `json:"is_valid"`
 		AgeDays    int             `json:"age_days"`
 		ExpiresIn  int             `json:"expires_in_days"`
-		Distance   float64         `json:"_embedding_distance"`
+		Distance   float64         `json:"distance"`
 		Tags       []memoryTagRow  `json:"tags"`
 		Links      []memoryLinkRow `json:"outgoing_links"`
 	}
@@ -98,41 +131,47 @@ func (c *Client) Search(ctx context.Context, query string, embedding []float32, 
 		"filter": filter,
 		"limit":  limit,
 	}
-	// Keyword/ILIKE fallback when we have no embedding or embeddings
-	// are not enabled. Applies to `content` against the raw query.
-	q := `query ($filter: hub_db_memory_items_filter, $limit: Int!) {
-			hub { db { agent {
-				memory_items(filter: $filter, limit: $limit, order_by: [{field: "score", direction: DESC}]) {
-					id agent_id content category volatility score source
-					valid_from valid_to created_at
-					is_valid age_days expires_in_days
-					tags { tag }
-					outgoing_links { target_id relation }
-				}
-			}}}
-		}`
-	if len(embedding) > 0 {
-		vars["vec"] = embedding
-		q = `query ($filter: hub_db_memory_items_filter, $limit: Int!, $vec: [Float!]!) {
+	var q string
+	if c.embedderEnabled && len(query) >= 3 {
+		vars["query"] = query
+		// `semantic:` already orders by similarity under the hood —
+		// no explicit order_by needed. The `distance` alias on
+		// `_distance_to_query(query:)` surfaces the per-row score
+		// back to Go for display / thresholding.
+		q = `query ($filter: hub_db_memory_items_filter, $limit: Int!, $query: String!) {
 				hub { db { agent {
 					memory_items(
 						filter: $filter
-						limit: $limit
-						similarity: {name: "embedding", vector: $vec, distance: Cosine, limit: $limit}
-						order_by: [{field: "_embedding_distance", direction: ASC}]
+						semantic: { query: $query, limit: $limit }
 					) {
 						id agent_id content category volatility score source
 						valid_from valid_to created_at
 						is_valid age_days expires_in_days
-						_embedding_distance(vector: $vec, distance: Cosine)
+						distance: _distance_to_query(query: $query)
 						tags { tag }
 						outgoing_links { target_id relation }
 					}
 				}}}
 			}`
-	} else if query != "" {
-		// Naive ILIKE fallback; a richer FTS setup can replace this later.
-		filter["content"] = map[string]any{"ilike": "%" + query + "%"}
+	} else {
+		// Empty / very short query OR embedder not wired → tag + category
+		// browse. Non-empty queries still get an ILIKE anchor so "tf" can
+		// browse memories mentioning "tf" even though the embedder
+		// threshold isn't met (or the embedder is off).
+		if query != "" {
+			filter["content"] = map[string]any{"ilike": "%" + query + "%"}
+		}
+		q = `query ($filter: hub_db_memory_items_filter, $limit: Int!) {
+				hub { db { agent {
+					memory_items(filter: $filter, limit: $limit, order_by: [{field: "score", direction: DESC}, {field: "created_at", direction: DESC}]) {
+						id agent_id content category volatility score source
+						valid_from valid_to created_at
+						is_valid age_days expires_in_days
+						tags { tag }
+						outgoing_links { target_id relation }
+					}
+				}}}
+			}`
 	}
 	rows, err := queries.RunQuery[[]row](ctx, c.querier, q, vars, "hub.db.agent.memory_items")
 	if err != nil {
@@ -422,14 +461,12 @@ func (c *Client) Store(ctx context.Context, item Item, tags []string, links []Li
 		"valid_from": item.ValidFrom.UTC().Format(time.RFC3339),
 		"valid_to":   item.ValidTo.UTC().Format(time.RFC3339),
 	}
-	if err := queries.RunMutation(ctx, c.querier,
-		`mutation ($data: hub_db_memory_items_mut_input_data!) {
-			hub { db { agent {
-				insert_memory_items(data: $data) { id }
-			}}}
-		}`,
-		map[string]any{"data": data},
-	); err != nil {
+	// Spec 006 §3.1: when the embedder is wired the `summary:` argument
+	// triggers server-side embedding + vector persistence in one round
+	// trip. Tests without an attached embedder data source see no
+	// `@embeddings` directive on the schema, hence no `summary:`
+	// argument at all — keep a plain insert path for that case.
+	if err := c.insertMemoryItem(ctx, data, item.Content); err != nil {
 		return "", err
 	}
 	if err := c.insertTags(ctx, item.ID, tags); err != nil {
@@ -534,14 +571,7 @@ func (c *Client) Reinforce(ctx context.Context, memID string, scoreBonus float64
 		"valid_from": item.ValidFrom.UTC().Format(time.RFC3339),
 		"valid_to":   item.ValidTo.UTC().Format(time.RFC3339),
 	}
-	if err := queries.RunMutation(ctx, c.querier,
-		`mutation ($data: hub_db_memory_items_mut_input_data!) {
-			hub { db { agent {
-				insert_memory_items(data: $data) { id }
-			}}}
-		}`,
-		map[string]any{"data": data},
-	); err != nil {
+	if err := c.insertMemoryItem(ctx, data, item.Content); err != nil {
 		return err
 	}
 	if err := c.insertTags(ctx, memID, merged); err != nil {

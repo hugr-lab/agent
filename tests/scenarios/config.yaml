@@ -1,0 +1,110 @@
+# Scenario-runner config. Shape mirrors the production ./config.yaml
+# but trimmed down to what tests need:
+#
+#   - Identity is fixed so every scenario shares the same agent row.
+#   - Only system providers are declared (no external MCP).
+#   - local_db.db.path + memory_path + skills.path are placeholders;
+#     the harness overrides them per-scenario so each run gets its
+#     own tmpdir.
+#   - Models are identical to production (LM Studio locally). Override
+#     via tests/scenarios/.test.env if you run a different endpoint.
+#
+# Per-scenario overrides go in <scenarioDir>/config_override.yaml —
+# today only llm.* and chatcontext.* are honoured there.
+
+agent:
+  id: agt_ag01
+  short_id: ag01
+  name: scenario-agent
+  type: hugr-data
+  constitution: constitution/base.md      # harness makes absolute
+
+hugr:
+  auth: hugr-auth
+
+auth:
+  - name: hugr-auth
+    type: hugr
+    # token_url / access_token intentionally empty — scenarios run
+    # fully local, no hub round-trip.
+
+mcp:
+  ttl: 60s
+  fetch_timeout: 30s
+
+providers:
+  - name: _skills
+    type: system
+    suite: skills
+  - name: _memory
+    type: system
+    suite: memory
+  - name: _context
+    type: system
+    suite: context
+
+local_db_enabled: true
+local_db:
+  db:
+    path: .data/engine.db                 # harness overrides
+    settings:
+      max_memory: 4
+      worker_threads: 2
+      home_directory: data
+      timezone: UTC
+  memory_path: .data/memory.db            # harness overrides
+  models:
+    - name: gemma4-26b
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+    - name: gemma-small
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model="google/gemma-4-e2b-it"&timeout=120s'
+    - name: gemma-embedding
+      type: embedding
+      path: '${EMBED_LOCAL_URL}?model="text-embedding-embeddinggemma-300m-qat"&timeout=30s'
+
+memory:
+  volatility_duration:
+    stable: 8760h
+    slow: 2160h
+    moderate: 720h
+    fast: 168h
+    volatile: 24h
+  scheduler:
+    interval: 5m
+    review_delay: 30s
+    consolidation_at: "0 3 * * *"
+  consolidation:
+    hypothesis_expiry: 720h
+
+chatcontext:
+  compaction_threshold: 0.7
+
+llm:
+  model: gemma4-26b
+  max_tokens: 8096
+  temperature: 0.4
+  routes:
+    default: gemma4-26b
+    tool_calling: gemma4-26b
+  context_windows:
+    gemma4-26b: 50000
+    gemma-small: 32000
+  default_budget: 64000
+
+embedding:
+  mode: local
+  model: gemma-embedding
+  dimension: 768
+
+skills:
+  path: ./skills                          # harness overrides
+
+a2a:
+  port: 0
+  base_url: ""
+
+devui:
+  port: 0
+  base_url: ""

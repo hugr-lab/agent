@@ -19,14 +19,23 @@ type Options struct {
 	AgentID    string
 	AgentShort string
 	Logger     *slog.Logger
+	// EmbedderEnabled toggles whether Store/Reinforce/Supersede pass
+	// `summary: <content>` to `insert_memory_items`. True in production
+	// (embedder is a required runtime dependency per spec 006 §5d);
+	// false in tests that spin a hugr engine without an attached
+	// embedder data source, where the `@embeddings` directive is
+	// omitted from the schema and the `summary` argument doesn't
+	// exist.
+	EmbedderEnabled bool
 }
 
 // Client is the agent-scoped hub.db memory API.
 type Client struct {
-	querier    types.Querier
-	agentID    string
-	agentShort string
-	logger     *slog.Logger
+	querier         types.Querier
+	agentID         string
+	agentShort      string
+	logger          *slog.Logger
+	embedderEnabled bool
 }
 
 // New constructs the Client. Returns an error when querier is nil or
@@ -42,10 +51,11 @@ func New(querier types.Querier, opts Options) (*Client, error) {
 		opts.Logger = slog.Default()
 	}
 	return &Client{
-		querier:    querier,
-		agentID:    opts.AgentID,
-		agentShort: opts.AgentShort,
-		logger:     opts.Logger,
+		querier:         querier,
+		agentID:         opts.AgentID,
+		agentShort:      opts.AgentShort,
+		logger:          opts.Logger,
+		embedderEnabled: opts.EmbedderEnabled,
 	}, nil
 }
 

@@ -9,6 +9,33 @@ Built on [Google ADK Go](https://github.com/google/adk-go), uses Hugr as the LLM
 - **Local / standalone** (`hugr_local.enabled: true`) — the agent boots an embedded Hugr engine in-process and attaches `data/memory.db` as the `hub.db` runtime source. LLM and embedding providers can be registered inside this local engine (`llm.mode: local`, `embedding.mode: local`) so the agent runs without any external Hugr instance.
 - **Hub** (`hugr_local.enabled: false`) — the agent connects to a remote Hugr at `cfg.Hugr.URL` (or `memory.hugr_url` for a dedicated memory hub) and uses its catalog for both memory and model queries.
 
+## Required external services
+
+The agent has two **hard runtime dependencies** — startup aborts if either is unreachable:
+
+- **LLM completion endpoint** — OpenAI-compatible `/v1/chat/completions` (LM Studio, vLLM, Ollama, or a cloud provider). Configured via `llm.model` + the matching `models:` entry; `LLM_LOCAL_URL` in `.env` points at a local server. Per-intent routes (`llm.routes.*`) let cheap / tool-calling work go to a smaller model.
+- **Embedder endpoint** — OpenAI-compatible `/v1/embeddings` (same model zoo). Spec 006 made the embedder load-bearing: long-term memory (`memory_items.embedding`) and every classified session event carry a vector that Hugr computes server-side via the `summary:` / `semantic:` arguments. There is no keyword-only fallback mode — `embedding.model` cannot be left empty. The model name is pinned into `hub.db`'s `version` table at first provisioning; changing it later is a fatal startup error (existing vectors belong to the original model's embedding space — recreate `data/memory.db` to switch models).
+
+Example local setup using LM Studio with both an LLM and an embedding model loaded:
+
+```env
+# .env
+LLM_LOCAL_URL=http://localhost:1234/v1/chat/completions
+EMBED_LOCAL_URL=http://localhost:1234/v1/embeddings
+AGENT_MODEL=gemma4-26b
+```
+
+```yaml
+# config.yaml
+llm:
+  mode: local
+  model: gemma4-26b
+embedding:
+  mode: local
+  model: gemma-embedding
+  dimension: 768
+```
+
 ## Quick Start
 
 ```bash

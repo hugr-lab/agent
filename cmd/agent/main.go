@@ -252,8 +252,8 @@ func serveConsole(ctx context.Context, a *app) error {
 
 	l := full.NewLauncher()
 	if err := l.Execute(ctx, &launcher.Config{
-		AgentLoader:    agent.NewSingleLoader(a.runtime.agent),
-		SessionService: a.runtime.sessions,
+		AgentLoader:    agent.NewSingleLoader(a.runtime.Agent),
+		SessionService: a.runtime.Sessions,
 	}, os.Args[2:]); err != nil {
 		return fmt.Errorf("launcher: %w\n%s", err, l.CommandLineSyntax())
 	}
@@ -268,10 +268,10 @@ func serveConsole(ctx context.Context, a *app) error {
 // the given mux. Idempotent only if called at most once per mux —
 // http.ServeMux rejects duplicate registrations.
 func attachA2A(mux *http.ServeMux, rt *agentRuntime, artifacts artifact.Service, baseURL string) {
-	cardH, invokeH := a2a.BuildHandlers(rt.agent, rt.sessions, artifacts, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(rt.Agent, rt.Sessions, artifacts, baseURL)
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
-	registerAdminRoutes(mux, rt.tools, rt.skills)
+	registerAdminRoutes(mux, rt.Tools, rt.Skills)
 }
 
 // buildDevRouter assembles the ADK webui + REST API + dev helpers
@@ -281,10 +281,10 @@ func buildDevRouter(rt *agentRuntime, artifacts artifact.Service,
 	tokens map[string]auth.TokenStore, devBaseURL, a2aBaseURL string) (http.Handler, error) {
 
 	router := mux.NewRouter()
-	agentLoader := agent.NewSingleLoader(rt.agent)
+	agentLoader := agent.NewSingleLoader(rt.Agent)
 
 	apiServer, err := adkrest.NewServer(adkrest.ServerConfig{
-		SessionService:  rt.sessions,
+		SessionService:  rt.Sessions,
 		ArtifactService: artifacts,
 		MemoryService:   memory.InMemoryService(),
 		AgentLoader:     agentLoader,
@@ -306,7 +306,7 @@ func buildDevRouter(rt *agentRuntime, artifacts artifact.Service,
 		return nil, fmt.Errorf("parse webui flags: %w", err)
 	}
 	if err := ui.SetupSubrouters(router, &launcher.Config{
-		SessionService:  rt.sessions,
+		SessionService:  rt.Sessions,
 		ArtifactService: artifacts,
 		AgentLoader:     agentLoader,
 	}); err != nil {

@@ -14,6 +14,18 @@
 # Module "agent" nests under: { hub { db { agent { ... } } } }
 
 # ============================================================
+# Version — schema + embedder identity pins
+# ============================================================
+
+"""Internal pin table — schema version + embedder model identity written at provisioning time (spec 006 §5d). Queried at startup to enforce the "embedder model cannot change under existing vectors" invariant."""
+type version @table(name: "version") {
+  """Pin key: 'schema' | 'embedder_model' | 'embedding_model' (legacy) | 'embedding_dim'"""
+  name:    String! @pk
+  """Pinned value for the key (schema version, model name, dim)"""
+  version: String!
+}
+
+# ============================================================
 # Agent types — configuration templates for agent behavior
 # ============================================================
 
@@ -287,6 +299,17 @@ type sessions @table(name: "sessions") @module(name: "agent") {
   )
   """For forked sessions: inherit parent events up to this seq number. NULL = sub-agent (own context, no inherited history). Use session_events_full view to get complete history with inherited events."""
   fork_after_seq:    Int
+  """Discriminator: 'root' (user-initiated), 'subagent' (agent-spawned, isolated context), 'fork' (reserved for future user-initiated forks). Runtime branches on this column, NOT on parent_session_id presence."""
+  session_type:      String! @default(value: "root")
+  """For sub-agents: id of the session_events row on the parent that carried the dispatch tool_call. NULL for root sessions."""
+  spawned_from_event_id: String @field_references(
+    references_name: "session_events"
+    field: "id"
+    query: "spawn_event"
+    description: "Event on the parent session that spawned this sub-agent (NULL for root sessions)"
+    references_query: "spawned_sessions"
+    references_description: "Sub-agent sessions spawned from this event"
+  )
   """Lifecycle: active|completed|abandoned|failed"""
   status:            String  @default(value: "active")
   """Sub-agent: task description. Fork: NULL or user's question"""
@@ -328,8 +351,9 @@ type session_participants @table(name: "session_participants") @module(name: "ag
 # Session events — full conversation transcript (append-only)
 # ============================================================
 
-"""One event in a session: user message, agent response, tool call/result, sub-agent spawn/result, system event. Append-only — this IS the transcript for post-session review."""
+"""One event in a session: user message, agent response, tool call/result, sub-agent spawn/result, system event. Append-only — this IS the transcript for post-session review. Eligible event types carry a semantic embedding (populated server-side via Hugr's `summary:` mutation parameter)."""
 type session_events @table(name: "session_events") @module(name: "agent")
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderModel }}", vector: "embedding", distance: Cosine){{ end }}
   {{ if .IsTimescale }}@hypertable{{ end }} {
   """Synthetic sortable ID: evt_{agent}_{ts}_{rnd}"""
   id:          String! @pk
@@ -362,18 +386,22 @@ type session_events @table(name: "session_events") @module(name: "agent")
   metadata:    JSON
   """When this event occurred"""
   created_at:  Timestamp {{ if .IsTimescale }}@pk @timescale_key{{ end }} @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  {{ if gt .VectorSize 0 }}
+  """Semantic embedding of content. NULL for lifecycle events / oversize / transient embedder failures. Populated atomically with insert via the `summary:` mutation parameter."""
+  embedding:   Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
 }
 
 # ============================================================
 # Session events full — VIEW with inherited history for forks
 # ============================================================
 
-"""Complete event history for a session, including inherited events from parent chain for forked sessions. No data duplication — recursive CTE starts from the given session_id. For sub-agents (fork_after_seq IS NULL): returns only own events. Max depth: 3."""
+"""Complete event history for a session, including inherited events from parent chain for forked sessions. No data duplication — recursive CTE starts from the given session_id. For sub-agents (session_type='subagent'): returns only own events (chain walk short-circuits). Max depth: 3."""
 type session_events_full @view(
   name: "session_events_full"
   sql: """
     WITH RECURSIVE session_chain AS (
-      SELECT id, parent_session_id, fork_after_seq,
+      SELECT id, parent_session_id, fork_after_seq, session_type,
              NULL::INTEGER AS inherit_limit,
              0 AS depth
       FROM [sessions]
@@ -381,12 +409,14 @@ type session_events_full @view(
 
       UNION ALL
 
-      SELECT p.id, p.parent_session_id, p.fork_after_seq,
+      SELECT p.id, p.parent_session_id, p.fork_after_seq, p.session_type,
              sc.fork_after_seq AS inherit_limit,
              sc.depth + 1
       FROM [sessions] p
       JOIN session_chain sc ON p.id = sc.parent_session_id
-      WHERE sc.fork_after_seq IS NOT NULL AND sc.depth < 3
+      WHERE sc.session_type != 'subagent'
+        AND sc.fork_after_seq IS NOT NULL
+        AND sc.depth < 3
     )
     SELECT e.*, sc.depth AS chain_depth
     FROM [session_events] e
@@ -423,6 +453,62 @@ input session_events_full_input {
 }
 
 # ============================================================
+# Session events chain — view returning every event visible to
+# a session including sub-agent events. Phase-4 (spec 008) consumer
+# for coordinator-scope semantic search. NO session_type filter
+# (deliberately distinct from session_events_full's behaviour).
+# ============================================================
+
+"""Recursive walk over parent_session_id (depth cap 8). Returns every event from the given session AND every ancestor session — including sub-agent events. Distinct from session_events_full (which excludes sub-agent events for ADK conversation replay). Used for coordinator-scope semantic search across the entire conversation tree."""
+type session_events_chain @view(
+  name: "session_events_chain"
+  sql: """
+    WITH RECURSIVE chain AS (
+      SELECT id, parent_session_id, 0 AS depth
+      FROM [sessions]
+      WHERE id = [$session_id]
+
+      UNION ALL
+
+      SELECT p.id, p.parent_session_id, c.depth + 1
+      FROM [sessions] p
+      JOIN chain c ON p.id = c.parent_session_id
+      WHERE c.depth < 8
+    )
+    SELECT e.*, c.depth AS chain_depth
+    FROM [session_events] e
+    JOIN chain c ON e.session_id = c.id
+    ORDER BY c.depth ASC, e.created_at DESC
+  """
+) @args(name: "session_events_chain_input", required: true) @module(name: "agent") {
+  id:          String!
+  session_id:  String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Session that owns this event"
+  )
+  agent_id:    String!
+  seq:         Int!
+  event_type:  String!
+  author:      String!
+  content:     String
+  tool_name:   String
+  tool_args:   JSON
+  tool_result: String
+  metadata:    JSON
+  created_at:  Timestamp
+  """0 = own event, 1+ = ancestor session"""
+  chain_depth: Int!
+}
+
+"""Input for parameterized session_events_chain view"""
+input session_events_chain_input {
+  """Starting session ID — chain walks up from here"""
+  session_id: String!
+}
+
+# ============================================================
 # Session notes — LLM scratchpad during session
 # ============================================================
 
@@ -439,19 +525,82 @@ type session_notes @table(name: "session_notes") @module(name: "agent") {
     references_query: "session_notes"
     references_description: "Session notes saved by this agent"
   )
-  """Session this note belongs to"""
+  """Session this note belongs to (where it's visible)."""
   session_id:  String! @field_references(
     references_name: "sessions"
     field: "id"
     query: "session"
-    description: "Session where this note was saved"
+    description: "Session where this note is visible"
     references_query: "notes"
-    references_description: "Notes saved during this session"
+    references_description: "Notes visible in this session (own + promoted-up from children)"
+  )
+  """Session that AUTHORED this note. Equals session_id for scope=self writes; differs when a sub-agent promotes a note via memory_note(scope:'parent'|'ancestors'). Drives author-only delete authority at the LLM tool surface."""
+  author_session_id: String @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "author_session"
+    description: "Session that wrote this note"
+    references_query: "authored_notes"
+    references_description: "Notes written by this session (visible here or promoted up the chain)"
   )
   """Note text — concise, self-contained finding"""
   content:     String!
   """When this note was saved"""
   created_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+}
+
+# ============================================================
+# Session notes chain — view returning all notes visible to a
+# session (own + ancestor chain). Drives Snapshot's `## Session
+# notes` block; depth cap 8 mirrors session_events_chain.
+# ============================================================
+
+"""Recursive walk over parent_session_id (depth cap 8). Returns every note visible to the given session — own notes + every ancestor's notes (those addressed via memory_note(scope:'parent'|'ancestors')). Ordered by (chain_depth ASC, created_at DESC) so Snapshot renders own notes first, then by ancestry depth."""
+type session_notes_chain @view(
+  name: "session_notes_chain"
+  sql: """
+    WITH RECURSIVE chain AS (
+      SELECT id, parent_session_id, 0 AS depth
+      FROM [sessions]
+      WHERE id = [$session_id]
+
+      UNION ALL
+
+      SELECT p.id, p.parent_session_id, c.depth + 1
+      FROM [sessions] p
+      JOIN chain c ON p.id = c.parent_session_id
+      WHERE c.depth < 8
+    )
+    SELECT n.*, c.depth AS chain_depth
+    FROM [session_notes] n
+    JOIN chain c ON n.session_id = c.id
+    ORDER BY c.depth ASC, n.created_at DESC
+  """
+) @args(name: "session_notes_chain_input", required: true) @module(name: "agent") {
+  id:                String!
+  agent_id:          String!
+  session_id:        String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Session this note is visible in"
+  )
+  author_session_id: String @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "author_session"
+    description: "Session that wrote this note"
+  )
+  content:           String!
+  created_at:        Timestamp
+  """0 = own note, 1+ = ancestor session's note (visible because the ancestor was the addressed scope target)"""
+  chain_depth:       Int!
+}
+
+"""Input for parameterized session_notes_chain view"""
+input session_notes_chain_input {
+  """Starting session ID — chain walks up from here"""
+  session_id: String!
 }
 
 # ============================================================

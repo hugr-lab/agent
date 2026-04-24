@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // New provisions hub.db, constructs the embedded hugr engine, attaches
@@ -205,18 +207,24 @@ func deleteDataSources(ctx context.Context, engine *hugr.Service, names []string
 }
 
 // verifyLocalEmbedding runs a probe against the local embedding model
-// and fails when its dimension disagrees with embedding.Dimension.
-// A transport-level probe failure only warns — FTS fallback covers
-// the case. A dim mismatch is fatal because existing vectors in
-// memory_items are not re-computable.
+// and fails on unreachable embedder, dimension mismatch, OR model
+// identity mismatch against the pin written at provisioning time
+// (spec 006 §5d). Spec 006 promotes the embedder from "nice to
+// have + FTS fallback" to a required runtime dependency, so any of
+// those failures is fatal — bubble up to cmd/agent/main and abort
+// startup before the agent serves traffic that would silently miss
+// semantic paths.
 func verifyLocalEmbedding(ctx context.Context, service *hugr.Service, embedding EmbeddingConfig, logger *slog.Logger) error {
 	if embedding.Mode != "local" || embedding.Model == "" {
 		return nil
 	}
 	dim, err := probeEmbedding(ctx, service, embedding.Model)
 	if err != nil {
-		logger.Warn("embedding probe failed — FTS fallback", "err", err)
-		return nil
+		return fmt.Errorf(
+			"embedder unreachable: model=%q probe=%w. "+
+				"Check the `embedding` data source URL in config.yaml "+
+				"(EMBED_LOCAL_URL for local mode) and that the model is loaded",
+			embedding.Model, err)
 	}
 	if dim != embedding.Dimension {
 		return fmt.Errorf(
@@ -224,8 +232,91 @@ func verifyLocalEmbedding(ctx context.Context, service *hugr.Service, embedding 
 				"Update cfg.Embedding.Dimension or recreate the agent",
 			embedding.Dimension, dim, embedding.Model)
 	}
-	logger.Info("embedding verified", "model", embedding.Model, "dimension", dim)
+	if err := pinEmbedderModel(ctx, service, embedding.Model); err != nil {
+		return err
+	}
+	logger.Info("embedder pinned", "model", embedding.Model, "dimension", dim)
 	return nil
+}
+
+// pinEmbedderModel enforces the invariant that the embedder model
+// name configured at runtime matches the one stored at hub.db
+// provisioning time. The pin lives in the `version` table under
+// `embedder_model` (written by migrate.Ensure — previously as
+// `embedding_model`; we read both to keep backwards compatibility
+// with agents provisioned before the rename).
+//
+// Contract:
+//   - first provisioning (no row): insert the current model name.
+//   - match: no-op.
+//   - mismatch: return an error that names both sides + the
+//     remediation (re-provision hub.db or revert the config).
+func pinEmbedderModel(ctx context.Context, q types.Querier, model string) error {
+	if model == "" {
+		return nil
+	}
+	existing, err := readEmbedderPin(ctx, q)
+	if err != nil {
+		return fmt.Errorf("read embedder pin: %w", err)
+	}
+	if existing == "" {
+		if err := writeEmbedderPin(ctx, q, model); err != nil {
+			return fmt.Errorf("write embedder pin: %w", err)
+		}
+		return nil
+	}
+	if existing != model {
+		return fmt.Errorf(
+			"embedder model mismatch: hub.db provisioned with %q, "+
+				"cfg.Embedding.Model is %q. "+
+				"Either revert the config to the original model, or "+
+				"re-provision hub.db to re-embed existing memory + transcript rows",
+			existing, model)
+	}
+	return nil
+}
+
+func readEmbedderPin(ctx context.Context, q types.Querier) (string, error) {
+	type row struct {
+		Version string `json:"version"`
+	}
+	// Try spec-006 name first, then fall back to the legacy one
+	// migrate.Ensure wrote before the rename landed.
+	for _, name := range []string{"embedder_model", "embedding_model"} {
+		rows, err := queries.RunQuery[[]row](ctx, q,
+			`query ($name: String!) {
+				hub { db {
+					version(filter: {name: {eq: $name}}, limit: 1) { version }
+				}}
+			}`,
+			map[string]any{"name": name},
+			"hub.db.version",
+		)
+		if err != nil {
+			if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+				continue
+			}
+			return "", err
+		}
+		if len(rows) > 0 && rows[0].Version != "" {
+			return rows[0].Version, nil
+		}
+	}
+	return "", nil
+}
+
+func writeEmbedderPin(ctx context.Context, q types.Querier, model string) error {
+	return queries.RunMutation(ctx, q,
+		`mutation ($data: hub_db_version_mut_input_data!) {
+			hub { db {
+				insert_version(data: $data) { name }
+			}}
+		}`,
+		map[string]any{"data": map[string]any{
+			"name":    "embedder_model",
+			"version": model,
+		}},
+	)
 }
 
 // probeEmbedding issues a single core.models.embedding call and

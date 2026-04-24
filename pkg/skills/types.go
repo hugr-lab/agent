@@ -32,6 +32,17 @@ type DescriptorMeta struct {
 	NextStep string
 }
 
+// SessionTypeRoot / SessionTypeSubAgent / SessionTypeFork mirror the
+// constants in pkg/sessions/store but are duplicated here to avoid an
+// import cycle (skills is consumed by sessions, not the other way
+// around). Used in AutoloadFor to scope which sessions an autoload
+// skill applies to (spec 006).
+const (
+	SessionTypeRoot     = "root"
+	SessionTypeSubAgent = "subagent"
+	SessionTypeFork     = "fork"
+)
+
 // Skill is a fully-loaded skill ready for the prompt + tool wiring.
 type Skill struct {
 	Name         string
@@ -45,8 +56,18 @@ type Skill struct {
 	Categories   []string
 	Instructions string
 	// Autoload tells the SessionManager to load this skill on every
-	// new session's Create.
+	// new session's Create. Combined with AutoloadFor (spec 006) to
+	// filter which session types pick the skill up — a skill can be
+	// "autoload for root only" (typical for system-management tools),
+	// "autoload for both root and subagent" (memory / context tools),
+	// or "autoload for subagent only" (future sub-agent constitution).
 	Autoload bool
+	// AutoloadFor restricts Autoload to specific session types
+	// (sessions.session_type values: "root" | "subagent" | "fork").
+	// When Autoload is true and AutoloadFor is empty, defaults to
+	// ["root"] at parse time so existing skills keep their pre-006
+	// behaviour.
+	AutoloadFor []string
 	// Providers is the set of tool-provider bindings this skill
 	// contributes to the session. Each entry is either a reference
 	// to a configured provider or an inline MCP endpoint. The
@@ -62,7 +83,56 @@ type Skill struct {
 	// file is absent or malformed — the reviewer/compactor then
 	// fall back to agent-level defaults.
 	Memory *SkillMemoryConfig
+	// SubAgents is the map of specialist roles a skill exposes for
+	// sub-agent dispatch (spec 006 phase 1). Each role becomes a
+	// `subagent_<skill>_<role>` tool registered on sessions that
+	// load this skill. Nil/empty when the skill declares no
+	// specialists (the common case for non-domain skills).
+	SubAgents map[string]SubAgentSpec
 }
+
+// SubAgentSpec defines one specialist role declared in a skill's
+// frontmatter under `sub_agents.<role>`. Read at skill-load time
+// (mapstructure-decoded from frontmatter); not persistent at runtime.
+//
+// Fields:
+//   - Description (required): human-readable summary the coordinator
+//     LLM sees in the dispatch tool's description; should make it
+//     obvious when to invoke the role.
+//   - Intent: routes the specialist to a model via Router.ModelFor.
+//     Empty means the router's default model (typically the strong
+//     coordinator model). Set to a cheap-model intent (e.g.
+//     "tool_calling") when the role is cheap-compatible.
+//   - Instructions (required): system-prompt body for the specialist
+//     LLM. Combined at dispatch time with the parent skill body.
+//   - Tools: subset of the parent skill's Providers[].Name to expose.
+//     Empty means "all of the skill's providers". Names that don't
+//     match a Providers[].Name fail validation at skill load.
+//   - ToolAllowlist: optional finer-grained tool-name allowlist
+//     applied on top of each provider's existing allowlist. Supports
+//     exact names and "prefix-*" globs (same syntax as
+//     SkillProviderSpec.Tools).
+//   - MaxTurns: hard cap on the dispatcher's turn loop. Defaults to
+//     15 when omitted; rejected if explicitly set to <= 0.
+//   - SummaryMaxTok: cap on the final assistant text returned to the
+//     coordinator (rune count, NOT a token estimate). Defaults to
+//     800; rejected if explicitly set to <= 0.
+type SubAgentSpec struct {
+	Description    string   `yaml:"description"    json:"description"     mapstructure:"description"`
+	Intent         string   `yaml:"intent"         json:"intent,omitempty" mapstructure:"intent"`
+	Instructions   string   `yaml:"instructions"   json:"instructions"    mapstructure:"instructions"`
+	Tools          []string `yaml:"tools"          json:"tools,omitempty"          mapstructure:"tools"`
+	ToolAllowlist  []string `yaml:"tool_allowlist" json:"tool_allowlist,omitempty" mapstructure:"tool_allowlist"`
+	MaxTurns       int      `yaml:"max_turns"      json:"max_turns,omitempty"      mapstructure:"max_turns"`
+	SummaryMaxTok  int      `yaml:"summary_max_tokens" json:"summary_max_tokens,omitempty" mapstructure:"summary_max_tokens"`
+}
+
+// Default sub-agent spec values used by the frontmatter parser when a
+// field is omitted by the skill author.
+const (
+	defaultSubAgentMaxTurns      = 15
+	defaultSubAgentSummaryMaxTok = 800
+)
 
 // SkillProviderSpec is one tool-source binding declared by a skill.
 // `Name` is the required identifier the skill uses to reference

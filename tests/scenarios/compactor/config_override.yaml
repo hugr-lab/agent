@@ -1,0 +1,13 @@
+llm:
+  context_windows:
+    gemma4-26b: 6000
+    gemma-small: 6000
+  default_budget: 6000
+
+# Threshold 0.3 of 6000 = 1800 tokens. The autoloaded _system /
+# _memory / _context skill bodies push every prompt past ~1500
+# tokens even on the first turn, and Compactor.usageRatio now sees
+# the system prompt (not just req.Contents), so the fold fires from
+# turn 1 forward once len(contents) > MinTurns (default 4).
+chatcontext:
+  compaction_threshold: 0.3

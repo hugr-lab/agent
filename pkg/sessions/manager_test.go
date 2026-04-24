@@ -298,3 +298,293 @@ func toolNames(tools []tool.Tool) []string {
 	}
 	return out
 }
+
+// ===== spec 006 — Create well-known State keys + autoload filter =====
+
+// makeAutoloadCatalogue builds three skills exercising the
+// autoload_for filter:
+//   - "_root_only"  → autoload_for: [root]      (default behaviour)
+//   - "_both"       → autoload_for: [root, subagent]
+//   - "_sub_only"   → autoload_for: [subagent]
+// Each registers its own provider name so we can verify the filter
+// fired correctly by inspecting the session's tool list.
+func makeAutoloadCatalogue(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	type skill struct {
+		name        string
+		autoloadFor string
+		provider    string
+	}
+	skills := []skill{
+		{"_root_only", "[root]", "_skills"},
+		{"_both", "[root, subagent]", "_memory"},
+		{"_sub_only", "[subagent]", "_context"},
+	}
+	for _, s := range skills {
+		sd := filepath.Join(dir, s.name)
+		require.NoError(t, os.MkdirAll(sd, 0o755))
+		body := `---
+name: ` + s.name + `
+version: "0.1.0"
+description: x
+autoload: true
+autoload_for: ` + s.autoloadFor + `
+providers:
+  - name: ` + s.provider + `
+    provider: ` + s.provider + `
+---
+body
+`
+		require.NoError(t, os.WriteFile(filepath.Join(sd, "SKILL.md"), []byte(body), 0o644))
+	}
+	return dir
+}
+
+func newAutoloadHarness(t *testing.T) *testHarness {
+	t.Helper()
+	root := makeAutoloadCatalogue(t)
+	sk, err := skills.NewFileManager(root)
+	require.NoError(t, err)
+
+	tm := tools.New(nil)
+	tm.AddProvider(tools.FakeProvider{N: "_skills", T: tools.FakeTools("skill_list")})
+	tm.AddProvider(tools.FakeProvider{N: "_memory", T: tools.FakeTools("memory_search")})
+	tm.AddProvider(tools.FakeProvider{N: "_context", T: tools.FakeTools("context_status")})
+
+	m, err := New(Config{Skills: sk, Tools: tm, Constitution: "C"})
+	require.NoError(t, err)
+	return &testHarness{m: m, tools: tm, skillsRoot: root}
+}
+
+// TestManager_Create_RootSession_Default — when CreateRequest carries
+// none of the well-known State keys, the session is "root" and only
+// autoload skills with "root" in their autoload_for fire.
+func TestManager_Create_RootSession_Default(t *testing.T) {
+	h := newAutoloadHarness(t)
+	ctx := context.Background()
+
+	resp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-root",
+	})
+	require.NoError(t, err)
+	sess := resp.Session.(*Session)
+
+	assert.Equal(t, "root", sess.SessionType())
+	assert.Empty(t, sess.ParentSessionID())
+	assert.Empty(t, sess.SpawnedFromEventID())
+	assert.Empty(t, sess.Mission())
+
+	snap := sess.Snapshot()
+	names := toolNames(snap.Tools)
+	assert.Contains(t, names, "skill_list", "_root_only should autoload on root session")
+	assert.Contains(t, names, "memory_search", "_both should autoload on root session")
+	assert.NotContains(t, names, "context_status", "_sub_only must NOT autoload on root session")
+}
+
+// TestManager_Create_SubAgentSession_StateKeys — exercising the five
+// well-known CreateRequest.State keys: session type + linkage land on
+// the Session, and applyAutoload only picks up skills whose
+// autoload_for includes "subagent".
+func TestManager_Create_SubAgentSession_StateKeys(t *testing.T) {
+	h := newAutoloadHarness(t)
+	ctx := context.Background()
+
+	resp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-sub",
+		State: map[string]any{
+			"__session_type__":           "subagent",
+			"__parent_session_id__":      "s-coord",
+			"__spawned_from_event_id__":  "evt_dispatch",
+			"__mission__":                "describe tf.incidents",
+			// __fork_after_seq__ omitted on purpose — sub-agents have NULL
+			// fork_after_seq.
+			"some_user_state":            "value",
+		},
+	})
+	require.NoError(t, err)
+	sess := resp.Session.(*Session)
+
+	assert.Equal(t, "subagent", sess.SessionType())
+	assert.Equal(t, "s-coord", sess.ParentSessionID())
+	assert.Equal(t, "evt_dispatch", sess.SpawnedFromEventID())
+	assert.Equal(t, "describe tf.incidents", sess.Mission())
+
+	// Well-known keys MUST NOT bleed into Session.state — they're typed
+	// fields on the Session, not generic state. Non-reserved user state
+	// keys still pass through verbatim.
+	stateMap := map[string]any{}
+	for k, v := range sess.state.All() {
+		stateMap[k] = v
+	}
+	assert.NotContains(t, stateMap, "__session_type__")
+	assert.NotContains(t, stateMap, "__parent_session_id__")
+	assert.NotContains(t, stateMap, "__spawned_from_event_id__")
+	assert.NotContains(t, stateMap, "__mission__")
+	assert.Equal(t, "value", stateMap["some_user_state"])
+
+	// Autoload filter: only _both + _sub_only fire (autoload_for
+	// includes "subagent"); _root_only is skipped.
+	snap := sess.Snapshot()
+	names := toolNames(snap.Tools)
+	assert.NotContains(t, names, "skill_list", "_root_only should NOT autoload on subagent session")
+	assert.Contains(t, names, "memory_search", "_both should autoload on subagent session")
+	assert.Contains(t, names, "context_status", "_sub_only should autoload on subagent session")
+}
+
+// TestManager_Create_ForkSession_PassesForkAfterSeq — fork sessions
+// (future user-fork feature) carry both parent_session_id AND
+// fork_after_seq. Verify the integer round-trips through State.
+func TestManager_Create_ForkSession_PassesForkAfterSeq(t *testing.T) {
+	h := newAutoloadHarness(t)
+	ctx := context.Background()
+
+	resp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-fork",
+		State: map[string]any{
+			"__session_type__":      "fork",
+			"__parent_session_id__": "s-original",
+			"__fork_after_seq__":    7, // user forked the conversation at seq 7
+		},
+	})
+	require.NoError(t, err)
+	sess := resp.Session.(*Session)
+
+	assert.Equal(t, "fork", sess.SessionType())
+	assert.Equal(t, "s-original", sess.ParentSessionID())
+	require.NotNil(t, sess.forkAfterSeq, "ForkAfterSeq must be set when supplied")
+	assert.Equal(t, 7, *sess.forkAfterSeq)
+}
+
+// TestManager_Create_SubAgentNoSkillCatalog locks US1 snapshot
+// contract (spec 006 §3a): sub-agent sessions must NOT include the
+// "Available Skills" catalog block in their Snapshot prompt — a
+// specialist is on a single mission and shouldn't be tempted to
+// replan with the full catalogue. The catalog MUST still render for
+// root sessions (regression guard).
+func TestManager_Create_SubAgentNoSkillCatalog(t *testing.T) {
+	h := newAutoloadHarness(t)
+	ctx := context.Background()
+
+	// Baseline: root session sees the catalog.
+	rootResp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-root",
+	})
+	require.NoError(t, err)
+	rootSnap := rootResp.Session.(*Session).Snapshot()
+	assert.Contains(t, rootSnap.Prompt, "Available Skills",
+		"root snapshot must keep the skill catalogue (regression guard)")
+
+	// Sub-agent session: catalog omitted; parent skill body (the one
+	// the dispatcher will LoadSkill) is the only skill-shaped content.
+	subResp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-sub",
+		State: map[string]any{
+			"__session_type__":          "subagent",
+			"__parent_session_id__":     "s-root",
+			"__spawned_from_event_id__": "evt_dispatch",
+			"__mission__":               "focused mission",
+		},
+	})
+	require.NoError(t, err)
+	sub := subResp.Session.(*Session)
+	// Simulate the Dispatcher's LoadSkill of the parent skill on the
+	// child so we can verify the parent body IS present.
+	require.NoError(t, sub.LoadSkill(ctx, "_both"))
+
+	subSnap := sub.Snapshot()
+	assert.NotContains(t, subSnap.Prompt, "Available Skills",
+		"sub-agent snapshot must omit the skill catalogue (spec 006 §3a)")
+	assert.Contains(t, subSnap.Prompt, "## Skill: _both",
+		"sub-agent snapshot must still include the parent skill body")
+}
+
+// TestSession_LoadSkill_RegistersSubAgentTools locks spec 006 T105:
+// loading a skill with a non-empty `sub_agents:` block registers
+// one tool.Tool per role under `skill/<name>/_subagents`; UnloadSkill
+// drops the provider. Builder invocation checked via a spy closure
+// so we don't need a real Dispatcher wired into the harness.
+func TestSession_LoadSkill_RegistersSubAgentTools(t *testing.T) {
+	// Skills dir with one skill declaring two sub_agents.
+	dir := t.TempDir()
+	sd := filepath.Join(dir, "worker")
+	require.NoError(t, os.MkdirAll(sd, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sd, "SKILL.md"), []byte(`---
+name: worker
+version: "0.1.0"
+description: A worker skill
+sub_agents:
+  summariser:
+    description: Summarises stuff.
+    instructions: |
+      Short summary, no fluff.
+  planner:
+    description: Plans stuff.
+    instructions: |
+      Make a plan.
+---
+body`), 0o644))
+
+	sk, err := skills.NewFileManager(dir)
+	require.NoError(t, err)
+	tm := tools.New(nil)
+
+	// Spy: collect (skill, role) pairs the builder was invoked with.
+	var calls []string
+	m, err := New(Config{
+		Skills:       sk,
+		Tools:        tm,
+		Constitution: "C",
+		SubAgentToolBuilder: func(skillName, role string, spec skills.SubAgentSpec) tool.Tool {
+			calls = append(calls, skillName+"/"+role)
+			return &stubSubAgentTool{name: "subagent_" + skillName + "_" + role, spec: spec}
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	resp, err := m.Create(ctx, &adksession.CreateRequest{AppName: "a", UserID: "u", SessionID: "s1"})
+	require.NoError(t, err)
+	sess := resp.Session.(*Session)
+
+	require.NoError(t, sess.LoadSkill(ctx, "worker"))
+
+	// Builder fired once per role.
+	assert.ElementsMatch(t,
+		[]string{"worker/summariser", "worker/planner"},
+		calls,
+		"builder must be called once per sub_agent role")
+
+	// Provider registered under the canonical name.
+	provTools, err := tm.ProviderTools("skill/worker/_subagents")
+	require.NoError(t, err, "skill/worker/_subagents provider must exist after LoadSkill")
+	names := toolNames(provTools)
+	assert.ElementsMatch(t,
+		[]string{"subagent_worker_summariser", "subagent_worker_planner"},
+		names,
+		"provider must expose one tool per role")
+
+	// Tools are visible through the session snapshot (Inject path).
+	snap := sess.Snapshot()
+	snapNames := toolNames(snap.Tools)
+	assert.Contains(t, snapNames, "subagent_worker_summariser")
+	assert.Contains(t, snapNames, "subagent_worker_planner")
+
+	// UnloadSkill detaches the provider.
+	require.NoError(t, sess.UnloadSkill(ctx, "worker"))
+	_, err = tm.ProviderTools("skill/worker/_subagents")
+	assert.Error(t, err, "provider must be removed on UnloadSkill")
+}
+
+// stubSubAgentTool is a minimal tool.Tool for
+// TestSession_LoadSkill_RegistersSubAgentTools — we only care that
+// Session registers it, not that it runs.
+type stubSubAgentTool struct {
+	name string
+	spec skills.SubAgentSpec
+}
+
+func (t *stubSubAgentTool) Name() string        { return t.name }
+func (t *stubSubAgentTool) Description() string { return t.spec.Description }
+func (t *stubSubAgentTool) IsLongRunning() bool { return true }

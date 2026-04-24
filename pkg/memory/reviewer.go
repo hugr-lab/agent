@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"iter"
 	"log/slog"
 	"sort"
 	"strings"
@@ -383,7 +382,7 @@ func (r *Reviewer) collectPriorFacts(ctx context.Context, sessionID string) []pr
 // reviewer — keeps the path testable without an embedding model.
 func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact, merged MergedConfig) (bool, error) {
 	// Look for near-duplicates by category + keyword.
-	existing, _ := r.memory.Search(ctx, f.Content, nil, memstore.SearchOpts{
+	existing, _ := r.memory.Search(ctx, f.Content, memstore.SearchOpts{
 		Category: f.Category,
 		Limit:    5,
 	})
@@ -766,7 +765,7 @@ func RunOnce(ctx context.Context, llm model.LLM, prompt string) (string, int, er
 	}
 	var out strings.Builder
 	var totalTokens int
-	var seq iter.Seq2[*model.LLMResponse, error] = llm.GenerateContent(ctx, req, false)
+	seq := llm.GenerateContent(ctx, req, false)
 	for resp, err := range seq {
 		if err != nil {
 			return "", totalTokens, err

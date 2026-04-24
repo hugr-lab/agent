@@ -64,12 +64,12 @@ func LoadBootstrap(envPath string) (*BootstrapConfig, error) {
 		if _, set := os.LookupEnv(upper); set {
 			continue
 		}
-		os.Setenv(upper, v.GetString(key))
+		_ = os.Setenv(upper, v.GetString(key))
 	}
 
 	hugrURL := strings.TrimRight(v.GetString("HUGR_URL"), "/")
 	if os.Getenv("HUGR_MCP_URL") == "" && hugrURL != "" {
-		os.Setenv("HUGR_MCP_URL", hugrURL+"/mcp")
+		_ = os.Setenv("HUGR_MCP_URL", hugrURL+"/mcp")
 	}
 
 	port := v.GetInt("AGENT_PORT")

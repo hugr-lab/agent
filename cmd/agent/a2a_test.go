@@ -69,8 +69,8 @@ func startTestA2AServer(t *testing.T, llmResponse string) *a2aclient.Client {
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
 
-	go http.Serve(listener, mux)
-	t.Cleanup(func() { listener.Close() })
+	go func() { _ = http.Serve(listener, mux) }()
+	t.Cleanup(func() { _ = listener.Close() })
 
 	client, err := a2aclient.NewFromEndpoints(context.Background(), []a2acore.AgentInterface{
 		{URL: baseURL + "/invoke", Transport: a2acore.TransportProtocolJSONRPC},
@@ -137,18 +137,18 @@ func TestA2A_AgentCard(t *testing.T) {
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	baseURL := "http://" + listener.Addr().String()
 	cardH, invokeH := a2a.BuildHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
-	go http.Serve(listener, mux)
+	go func() { _ = http.Serve(listener, mux) }()
 
 	resp, err := http.Get(baseURL + a2asrv.WellKnownAgentCardPath)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
 }
@@ -234,8 +234,8 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
 
-	go http.Serve(listener, mux)
-	t.Cleanup(func() { listener.Close() })
+	go func() { _ = http.Serve(listener, mux) }()
+	t.Cleanup(func() { _ = listener.Close() })
 
 	client, err := a2aclient.NewFromEndpoints(context.Background(), []a2acore.AgentInterface{
 		{URL: baseURL + "/invoke", Transport: a2acore.TransportProtocolJSONRPC},

@@ -13,14 +13,16 @@ import (
 
 // skillFrontmatter is the YAML header inside SKILL.md.
 type skillFrontmatter struct {
-	Name        string               `yaml:"name"`
-	Version     string               `yaml:"version"`
-	Description string               `yaml:"description"`
-	Categories  []string             `yaml:"categories"`
-	Autoload    bool                 `yaml:"autoload"`
-	Providers   []SkillProviderSpec  `yaml:"providers"`
-	References  []frontmatterRefMeta `yaml:"references"`
-	NextStep    string               `yaml:"next_step"`
+	Name        string                  `yaml:"name"`
+	Version     string                  `yaml:"version"`
+	Description string                  `yaml:"description"`
+	Categories  []string                `yaml:"categories"`
+	Autoload    bool                    `yaml:"autoload"`
+	AutoloadFor []string                `yaml:"autoload_for"`
+	Providers   []SkillProviderSpec     `yaml:"providers"`
+	References  []frontmatterRefMeta    `yaml:"references"`
+	NextStep    string                  `yaml:"next_step"`
+	SubAgents   map[string]SubAgentSpec `yaml:"sub_agents"`
 }
 
 // frontmatterRefMeta mirrors SkillRefMeta with YAML tags so
@@ -119,6 +121,53 @@ func (m *fileManager) AutoloadNames(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
+// AutoloadNamesFor returns autoload skills whose AutoloadFor list
+// includes sessionType. Skills that omit autoload_for are treated as
+// `["root"]` (mirrors normalizeAutoloadFor's parse-time default), so
+// callers asking for "root" sessions see the pre-006 behaviour and
+// callers asking for "subagent" sessions see only opt-in skills.
+//
+// An empty sessionType is treated as "root" — defensive default for
+// callers that haven't migrated to passing the discriminator yet.
+func (m *fileManager) AutoloadNamesFor(_ context.Context, sessionType string) ([]string, error) {
+	if sessionType == "" {
+		sessionType = SessionTypeRoot
+	}
+	entries, err := os.ReadDir(m.path)
+	if err != nil {
+		return nil, fmt.Errorf("skills: read %q: %w", m.path, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		fm, ok := readFrontmatter(filepath.Join(m.path, e.Name()))
+		if !ok || !fm.Autoload {
+			continue
+		}
+		applicable := normalizeAutoloadFor(fm.Autoload, fm.AutoloadFor)
+		if !contains(applicable, sessionType) {
+			continue
+		}
+		name := fm.Name
+		if name == "" {
+			name = e.Name()
+		}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // Load reads a single skill's SKILL.md fresh on every call — the
 // on-disk copy is always authoritative.
 func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
@@ -157,14 +206,18 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 	var refs []SkillRefMeta
 	if len(fm.References) > 0 {
 		for _, r := range fm.References {
-			refs = append(refs, SkillRefMeta{
-				Name:        r.Name,
-				Description: r.Description,
-			})
+			refs = append(refs, SkillRefMeta(r))
 		}
 	} else {
 		refs, _ = listRefs(filepath.Join(skillDir, "references"))
 	}
+
+	subAgents, err := normalizeSubAgents(canonical, providers, fm.SubAgents)
+	if err != nil {
+		return nil, err
+	}
+
+	autoloadFor := normalizeAutoloadFor(fm.Autoload, fm.AutoloadFor)
 
 	return &Skill{
 		Name:         canonical,
@@ -173,11 +226,93 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 		Categories:   fm.Categories,
 		Instructions: instructions,
 		Autoload:     fm.Autoload,
+		AutoloadFor:  autoloadFor,
 		Providers:    providers,
 		Refs:         refs,
 		NextStep:     fm.NextStep,
 		Memory:       loadSkillMemory(skillDir),
+		SubAgents:    subAgents,
 	}, nil
+}
+
+// normalizeAutoloadFor implements the spec-006 default: when a skill
+// declares `autoload: true` but omits `autoload_for`, we pick the
+// pre-006 behaviour (root sessions only). Skills with `autoload:
+// false` keep AutoloadFor at nil — applyAutoload only consults the
+// list when Autoload is true.
+func normalizeAutoloadFor(autoload bool, declared []string) []string {
+	if !autoload {
+		return nil
+	}
+	if len(declared) == 0 {
+		return []string{SessionTypeRoot}
+	}
+	out := make([]string, 0, len(declared))
+	seen := make(map[string]bool, len(declared))
+	for _, v := range declared {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		// Edge case: declared was non-empty but every entry was blank
+		// (e.g. `autoload_for: [""]`). Fall back to the safe default.
+		return []string{SessionTypeRoot}
+	}
+	return out
+}
+
+// normalizeSubAgents validates and applies defaults to the
+// `sub_agents:` frontmatter block. Errors identify skill + role + the
+// specific failure so misconfigured skills surface at load time
+// rather than at dispatch time. Returns nil when the skill declares
+// no specialists.
+func normalizeSubAgents(skillName string, providers []SkillProviderSpec, raw map[string]SubAgentSpec) (map[string]SubAgentSpec, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	providerNames := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		providerNames[p.Name] = true
+	}
+
+	out := make(map[string]SubAgentSpec, len(raw))
+	for role, spec := range raw {
+		if role == "" {
+			return nil, fmt.Errorf("skills: %q: sub_agents has empty role name", skillName)
+		}
+		if strings.TrimSpace(spec.Description) == "" {
+			return nil, fmt.Errorf("skills: %q sub_agent %q: description is required", skillName, role)
+		}
+		if strings.TrimSpace(spec.Instructions) == "" {
+			return nil, fmt.Errorf("skills: %q sub_agent %q: instructions are required", skillName, role)
+		}
+		for _, tool := range spec.Tools {
+			if !providerNames[tool] {
+				return nil, fmt.Errorf("skills: %q sub_agent %q: tool %q is not in skill providers", skillName, role, tool)
+			}
+		}
+		// Apply defaults; explicit non-positive values are an error
+		// (catches typos like `max_turns: 0`).
+		switch {
+		case spec.MaxTurns == 0:
+			spec.MaxTurns = defaultSubAgentMaxTurns
+		case spec.MaxTurns < 0:
+			return nil, fmt.Errorf("skills: %q sub_agent %q: max_turns must be > 0 (got %d)", skillName, role, spec.MaxTurns)
+		}
+		switch {
+		case spec.SummaryMaxTok == 0:
+			spec.SummaryMaxTok = defaultSubAgentSummaryMaxTok
+		case spec.SummaryMaxTok < 0:
+			return nil, fmt.Errorf("skills: %q sub_agent %q: summary_max_tokens must be > 0 (got %d)", skillName, role, spec.SummaryMaxTok)
+		}
+		out[role] = spec
+	}
+	return out, nil
 }
 
 // loadSkillMemory reads an optional memory.yaml adjacent to SKILL.md.

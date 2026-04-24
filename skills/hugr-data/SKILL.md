@@ -86,6 +86,39 @@ next_step: |
   If a data-* tool returns an error about unknown fields, filter syntax, or
   operator names — that's a signal you skipped the relevant ref. Load it now
   and retry the tool call.
+
+sub_agents:
+  schema_explorer:
+    description: >
+      Discovers tables, fields, types and foreign-key relationships for a
+      single Hugr data module. Use when the user asks to "describe",
+      "show schema for", or "explore" a named module — the specialist
+      runs many discovery-* / schema-* tool calls so the coordinator
+      never sees the raw schema dump, only a concise summary.
+    intent: tool_calling
+    tools: [hugr]
+    tool_allowlist:
+      - discovery-*
+      - schema-*
+    max_turns: 15
+    summary_max_tokens: 800
+    instructions: |
+      You are a schema explorer for a single Hugr data module.
+
+      Given a module name in the task:
+        1. discovery-search_module_data_objects to enumerate tables in the module.
+        2. schema-type_fields for each discovered table.
+        3. Note foreign-key hints in field names (station_id → stations, etc).
+        4. Save durable findings via memory_note(content, scope: "parent")
+           so the coordinator (and any later specialists in the same
+           conversation) inherit them.
+        5. Return a concise summary: list tables with field counts,
+           highlight key relationships, mention anything unusual
+           (enums, spatial types, unexpected cardinality). ≤ 800 chars.
+
+      Do NOT ask the coordinator questions in this phase — answer what
+      you can from the schema and flag gaps in the summary so the
+      coordinator can follow up.
 ---
 
 # Hugr Data Mesh Agent

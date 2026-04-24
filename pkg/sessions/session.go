@@ -24,6 +24,22 @@ type Session struct {
 	id      string
 	appName string
 	userID  string
+	// sessionType mirrors sessions.session_type in hub (spec 006). Used
+	// by Manager.applyAutoload to filter autoload skills against the
+	// session's discriminator: a "subagent" session only picks up
+	// autoload skills whose AutoloadFor includes "subagent". Empty
+	// value at runtime is treated as SessionTypeRoot (defensive).
+	sessionType        string
+	parentSessionID    string
+	spawnedFromEventID string
+	mission            string
+	forkAfterSeq       *int
+	// Cached sub-agent identity sourced from sessions.metadata at
+	// Create / restore time (spec 006 §6). Used by renderNotesBlock to
+	// prefix cross-session notes as "[from <skill>/<role>]" without
+	// paying a hub round-trip per render.
+	metaSkill string
+	metaRole  string
 
 	state  *State
 	events *eventStore
@@ -41,6 +57,14 @@ type Session struct {
 	notesCache   string    // rendered "## Session notes" block
 	notesCacheAt time.Time // render time for 10s TTL
 
+	// writeMu serialises every (nextSeq → INSERT) pair on this
+	// session's transcript. Synchronous writers (LoadSkill,
+	// UnloadSkill, compactor events through Manager.AppendEvent) and
+	// the async classifier all funnel through AppendEvent, which
+	// holds this lock across the store call — so a write can't read a
+	// stale max(seq) while another is still committing.
+	writeMu sync.Mutex
+
 	// Materialization: sessions restored from hub.db on startup are
 	// created as stubs (no events, no bindings). The first Get hits
 	// ensureMaterialized, which replays skill state + conversation
@@ -48,6 +72,45 @@ type Session struct {
 	// markMaterialized.
 	mzOnce sync.Once
 	mzErr  error
+}
+
+// SessionType returns the session's discriminator
+// (sessstore.SessionTypeRoot|SubAgent|Fork). Defaults to "root"
+// for sessions created without an explicit type (preserves pre-006
+// behaviour).
+func (s *Session) SessionType() string {
+	if s == nil || s.sessionType == "" {
+		return sessstore.SessionTypeRoot
+	}
+	return s.sessionType
+}
+
+// ParentSessionID returns the linked parent session id (empty for
+// root sessions).
+func (s *Session) ParentSessionID() string {
+	if s == nil {
+		return ""
+	}
+	return s.parentSessionID
+}
+
+// SpawnedFromEventID returns the parent's tool_call event id that
+// dispatched this session (empty for root sessions and pre-spec-006
+// rows).
+func (s *Session) SpawnedFromEventID() string {
+	if s == nil {
+		return ""
+	}
+	return s.spawnedFromEventID
+}
+
+// Mission returns the short task description recorded for this
+// sub-agent session ("" for root sessions).
+func (s *Session) Mission() string {
+	if s == nil {
+		return ""
+	}
+	return s.mission
 }
 
 var (
@@ -65,22 +128,40 @@ type sessionConfig struct {
 	hub          *sessstore.Client
 	logger       *slog.Logger
 	constitution string
+
+	// Spec 006 sub-agent linkage. All optional — root sessions leave
+	// these empty / nil; the dispatcher populates them when opening a
+	// child session, and RestoreOpen copies them off the hub Record.
+	sessionType        string
+	parentSessionID    string
+	spawnedFromEventID string
+	mission            string
+	forkAfterSeq       *int
+	metaSkill          string
+	metaRole           string
 }
 
 func newSession(cfg sessionConfig) *Session {
 	return &Session{
-		id:           cfg.id,
-		appName:      cfg.appName,
-		userID:       cfg.userID,
-		state:        NewState(),
-		events:       newEventStore(),
-		manager:      cfg.manager,
-		skills:       cfg.skills,
-		tools:        cfg.tools,
-		hub:          cfg.hub,
-		logger:       cfg.logger,
-		constitution: cfg.constitution,
-		updatedAt:    time.Now(),
+		id:                 cfg.id,
+		appName:            cfg.appName,
+		userID:             cfg.userID,
+		sessionType:        cfg.sessionType,
+		parentSessionID:    cfg.parentSessionID,
+		spawnedFromEventID: cfg.spawnedFromEventID,
+		mission:            cfg.mission,
+		forkAfterSeq:       cfg.forkAfterSeq,
+		metaSkill:          cfg.metaSkill,
+		metaRole:           cfg.metaRole,
+		state:              NewState(),
+		events:             newEventStore(),
+		manager:            cfg.manager,
+		skills:             cfg.skills,
+		tools:              cfg.tools,
+		hub:                cfg.hub,
+		logger:             cfg.logger,
+		constitution:       cfg.constitution,
+		updatedAt:          time.Now(),
 	}
 }
 
@@ -213,6 +294,12 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 		}
 	}
 
+	// Spec 006 T105: if the skill declares sub_agents and the manager
+	// wired a builder, register one specific tool per role under a
+	// dedicated provider. Non-fatal — a builder miss still leaves the
+	// generic `subagent_dispatch` tool available via `_system`.
+	s.bindSubAgents(sk)
+
 	s.state.RecordSkillVersion(sk.Name, sk.Version)
 
 	// Phase 2: commit to state + hub. AddSkill is idempotent — if the
@@ -241,7 +328,7 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 			Content:   sk.Name,
 			Metadata:  jsonToMap(meta),
 		}
-		if _, err := s.hub.AppendEvent(ctx, ev); err != nil {
+		if _, err := s.AppendEvent(ctx, ev, ""); err != nil {
 			s.logger.Warn("session: append skill_loaded", "err", err, "session", s.id)
 		}
 	}
@@ -269,7 +356,7 @@ func (s *Session) UnloadSkill(ctx context.Context, name string) error {
 			Content:   name,
 			Metadata:  jsonToMap(meta),
 		}
-		if _, err := s.hub.AppendEvent(ctx, ev); err != nil {
+		if _, err := s.AppendEvent(ctx, ev, ""); err != nil {
 			s.logger.Warn("session: append skill_unloaded", "err", err, "session", s.id)
 		}
 	}
@@ -393,15 +480,22 @@ func (s *Session) buildPrompt(ctx context.Context) string {
 	refs := append([]string(nil), s.state.Refs...)
 	s.state.mu.RUnlock()
 
-	var catalog []skills.SkillMeta
-	if catalogSet {
-		catalog = catalogOverride
-	} else if list, err := s.skills.List(ctx); err == nil {
-		catalog = list
-	}
-	if text := s.skills.RenderCatalog(catalog); text != "" {
-		b.WriteString("\n\n")
-		b.WriteString(text)
+	// US1 snapshot contract (spec 006 §3a): sub-agent sessions carry
+	// only the parent skill's body — no full catalogue. The specialist
+	// operates on a single mission; exposing every available skill
+	// would invite it to re-plan outside its lane and burn turns.
+	// Root (and fork) sessions keep the full catalogue.
+	if s.sessionType != sessstore.SessionTypeSubAgent {
+		var catalog []skills.SkillMeta
+		if catalogSet {
+			catalog = catalogOverride
+		} else if list, err := s.skills.List(ctx); err == nil {
+			catalog = list
+		}
+		if text := s.skills.RenderCatalog(catalog); text != "" {
+			b.WriteString("\n\n")
+			b.WriteString(text)
+		}
 	}
 
 	loadedBySkill := map[string][]string{}
@@ -446,10 +540,15 @@ func (s *Session) buildPrompt(ctx context.Context) string {
 	return b.String()
 }
 
-// renderNotesBlock pulls the session's notes from HubDB and renders a
-// fixed-part "## Session notes" block that survives context
-// compaction. Cached at the session level for 10 s; invalidated
-// explicitly by the memory_note / memory_clear_note tools.
+// renderNotesBlock pulls the session's notes chain from HubDB and
+// renders a fixed-part "## Session notes" block that survives context
+// compaction. Spec 006 §6: the block sources from the
+// session_notes_chain view so a coordinator sees notes its specialists
+// promoted via memory_note(scope: "parent" | "ancestors"). Notes
+// authored by another session (chain promotions) render with a
+// "[from <skill>/<role>]" prefix using the author session's metadata.
+// Cached at the session level for 10 s; invalidated explicitly by the
+// memory_note / memory_clear_note tools.
 func (s *Session) renderNotesBlock(ctx context.Context) string {
 	if s.hub == nil {
 		return ""
@@ -461,7 +560,7 @@ func (s *Session) renderNotesBlock(ctx context.Context) string {
 	if cachedAt.After(time.Now().Add(-10*time.Second)) && cached != "" {
 		return cached
 	}
-	notes, err := s.hub.ListNotes(ctx, s.id)
+	notes, err := s.hub.ListNotesChain(ctx, s.id)
 	if err != nil || len(notes) == 0 {
 		s.mu.Lock()
 		s.notesCache = ""
@@ -469,12 +568,27 @@ func (s *Session) renderNotesBlock(ctx context.Context) string {
 		s.mu.Unlock()
 		return ""
 	}
+	// Cache author-session metadata for the duration of this render so
+	// a coordinator with ten notes from one specialist only pays one
+	// hub round-trip.
+	authorMeta := map[string]string{}
 	var b strings.Builder
 	b.WriteString("## Session notes\n")
 	for _, n := range notes {
 		b.WriteString("- [")
 		b.WriteString(n.ID)
 		b.WriteString("] ")
+		if n.AuthorSessionID != "" && n.AuthorSessionID != s.id {
+			prefix, ok := authorMeta[n.AuthorSessionID]
+			if !ok {
+				prefix = s.resolveAuthorPrefix(ctx, n.AuthorSessionID)
+				authorMeta[n.AuthorSessionID] = prefix
+			}
+			if prefix != "" {
+				b.WriteString(prefix)
+				b.WriteString(" ")
+			}
+		}
 		b.WriteString(n.Content)
 		b.WriteString("\n")
 	}
@@ -484,6 +598,74 @@ func (s *Session) renderNotesBlock(ctx context.Context) string {
 	s.notesCacheAt = time.Now()
 	s.mu.Unlock()
 	return out
+}
+
+// resolveAuthorPrefix looks up the skill/role pair for a cross-session
+// note's author and returns the "[from <skill>/<role>]" tag (or an
+// empty string when metadata is missing). Best-effort: metadata lookup
+// failures silently degrade to no prefix rather than break rendering.
+func (s *Session) resolveAuthorPrefix(ctx context.Context, authorID string) string {
+	// In-memory first — specialists dispatched in this process are
+	// tracked by the Manager and carry session metadata. Falling back
+	// to hub works for long-gone authors the Manager has evicted.
+	var skill, role string
+	if s.manager != nil {
+		if peer, err := s.manager.Session(authorID); err == nil && peer != nil {
+			skill, role = peer.metadataSkillRole()
+		}
+	}
+	if skill == "" && role == "" && s.hub != nil {
+		if rec, err := s.hub.GetSession(ctx, authorID); err == nil && rec != nil {
+			if v, ok := rec.Metadata["skill"].(string); ok {
+				skill = v
+			}
+			if v, ok := rec.Metadata["role"].(string); ok {
+				role = v
+			}
+		}
+	}
+	switch {
+	case skill != "" && role != "":
+		return "[from " + skill + "/" + role + "]"
+	case skill != "":
+		return "[from " + skill + "]"
+	case role != "":
+		return "[from " + role + "]"
+	default:
+		return ""
+	}
+}
+
+// metadataSkillRole returns the skill/role pair cached on the Session
+// at Create / restore time. Returns empty strings when the session did
+// not carry skill/role metadata (i.e. coordinator / fork sessions).
+func (s *Session) metadataSkillRole() (string, string) {
+	if s == nil {
+		return "", ""
+	}
+	return s.metaSkill, s.metaRole
+}
+
+// AppendEvent writes a transcript event to the hub for this session
+// with mutual exclusion against every other writer on the same
+// session. Call this from any path (synchronous skill events,
+// compactor, classifier-facing Manager.AppendEvent) that would
+// otherwise race on nextSeq. Empty SessionID on ev is filled in from
+// the session's own id.
+//
+// Returns (id, nil) on success and ("", err) on store failure. When
+// the session has no hub (test harness), returns ("", nil) without
+// touching the lock.
+func (s *Session) AppendEvent(ctx context.Context, ev sessstore.Event, summary string) (string, error) {
+	if s == nil || s.hub == nil {
+		return "", nil
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = s.id
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.hub.AppendEventWithSummary(ctx, ev, summary)
 }
 
 // InvalidateNotesCache clears the session's notes-render cache so the
@@ -503,23 +685,32 @@ func (s *Session) buildTools(ctx context.Context) []tool.Tool {
 
 	var out []tool.Tool
 	seen := map[string]bool{}
+	collect := func(providerKey string) {
+		ts, err := s.tools.ProviderTools(providerKey)
+		if err != nil {
+			return
+		}
+		for _, t := range ts {
+			if seen[t.Name()] {
+				continue
+			}
+			seen[t.Name()] = true
+			out = append(out, t)
+		}
+	}
 	for _, skillName := range active {
 		sk, err := s.skills.Load(ctx, skillName)
 		if err != nil {
 			continue
 		}
 		for _, spec := range sk.Providers {
-			ts, err := s.tools.ProviderTools(bindingName(skillName, spec.Name))
-			if err != nil {
-				continue
-			}
-			for _, t := range ts {
-				if seen[t.Name()] {
-					continue
-				}
-				seen[t.Name()] = true
-				out = append(out, t)
-			}
+			collect(bindingName(skillName, spec.Name))
+		}
+		// Spec 006 T105: pick up the per-skill _subagents provider
+		// when the skill declares sub_agents. Registration happens in
+		// bindSubAgents; no-op when absent.
+		if len(sk.SubAgents) > 0 {
+			collect(subagentsName(sk.Name))
 		}
 	}
 	return out
@@ -573,6 +764,9 @@ func (s *Session) dropBindings(ctx context.Context, name string) {
 			_ = s.tools.RemoveProvider(inlineName(name, spec.Name))
 		}
 	}
+	// T105: also drop the per-skill sub-agent tool provider. Safe to
+	// call unconditionally — RemoveProvider on a missing key is a no-op.
+	_ = s.tools.RemoveProvider(subagentsName(name))
 }
 
 // sweepSkillBindings removes every registered provider whose name
@@ -622,6 +816,7 @@ func (s *Session) restoreSkill(ctx context.Context, name string) {
 		}
 	}
 	s.state.RecordSkillVersion(sk.Name, sk.Version)
+	s.bindSubAgents(sk)
 	s.touch()
 }
 
@@ -665,8 +860,95 @@ func inlineName(skill, providerName string) string {
 	return fmt.Sprintf("skill-inline/%s/%s", skill, providerName)
 }
 
+// subagentsName is the tools.Manager key for the per-skill
+// sub-agent tool provider registered when a skill declares
+// non-empty sub_agents. One entry per role lives inside it
+// (Name: subagent_<skill>_<role>). Detached by dropBindings.
+func subagentsName(skill string) string {
+	return fmt.Sprintf("skill/%s/_subagents", skill)
+}
+
+// bindSubAgents registers one tool.Tool per role declared under the
+// skill's `sub_agents:` frontmatter block (name
+// `subagent_<skill>_<role>`, args {task, notes?}). Provider name
+// `skill/<skill>/_subagents` mirrors the provider-binding convention
+// so dropBindings / sweepSkillBindings clean it up on unload /
+// version-drift automatically.
+//
+// No-op when the manager didn't supply a builder (pkg/sessions stays
+// agent-agnostic) or when the skill has no sub_agents.
+func (s *Session) bindSubAgents(sk *skills.Skill) {
+	if s == nil || s.manager == nil || s.manager.subagentBuilder == nil {
+		return
+	}
+	if len(sk.SubAgents) == 0 {
+		return
+	}
+	tools := make([]tool.Tool, 0, len(sk.SubAgents))
+	for role, spec := range sk.SubAgents {
+		t := s.manager.subagentBuilder(sk.Name, role, spec)
+		if t == nil {
+			continue
+		}
+		tools = append(tools, t)
+	}
+	if len(tools) == 0 {
+		return
+	}
+	s.tools.AddProvider(subagentsProvider{
+		name:  subagentsName(sk.Name),
+		tools: tools,
+	})
+}
+
+// subagentsProvider is a minimal tools.Provider wrapping a static
+// tool list — purely a sessions-package construct so we don't need
+// a public constructor in pkg/tools for this one call site.
+type subagentsProvider struct {
+	name  string
+	tools []tool.Tool
+}
+
+func (p subagentsProvider) Name() string       { return p.name }
+func (p subagentsProvider) Tools() []tool.Tool { return p.tools }
+
 // Touch is for tests/infra that need to flag activity.
 func (s *Session) Touch() { s.touch() }
+
+// ActiveSkills returns the names of skills currently loaded on this
+// session. Snapshot is the single source of truth for what the LLM
+// sees; this accessor lets tool handlers make short decisions
+// (is skill X loaded?) without re-rendering the snapshot.
+func (s *Session) ActiveSkills() []string {
+	if s == nil || s.state == nil {
+		return nil
+	}
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	if len(s.state.Skills) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.state.Skills))
+	copy(out, s.state.Skills)
+	return out
+}
+
+// HasSkill reports whether the named skill is currently loaded on
+// this session. Used by the subagent_dispatch tool to refuse
+// dispatches into skills that weren't loaded by the coordinator.
+func (s *Session) HasSkill(name string) bool {
+	if s == nil || s.state == nil || name == "" {
+		return false
+	}
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	for _, n := range s.state.Skills {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
 
 // SkillDescriptorMeta is what skill_load needs to shape its response —
 // references with descriptions + the author-provided workflow hint.

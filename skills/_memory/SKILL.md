@@ -1,10 +1,13 @@
 ---
 name: _memory
-version: "0.1.0"
+version: "0.2.0"
 description: >
   Persistent memory tools. Save notes during the session, search
-  long-term facts learned from previous sessions.
+  long-term facts learned from previous sessions. Also the
+  entry-point for spec-006 scoped notes: memory_note(content, scope?)
+  lets a specialist promote findings up to the coordinator chain.
 autoload: true
+autoload_for: [root, subagent]
 providers:
   - name: _memory
     provider: _memory
@@ -16,10 +19,31 @@ You have two kinds of memory.
 
 ## Session notes (this conversation only)
 
-- `memory_note(content)` — save a concise finding to the scratchpad.
-  Notes stay visible in your prompt until the session ends and
-  survive context compaction.
-- `memory_clear_note(id)` — remove a note when it's no longer useful.
+- `memory_note(content, scope?)` — save a concise finding to the
+  scratchpad. Notes stay visible in your prompt until the session
+  ends and survive context compaction.
+  - `scope: "self"` (default) — the note is visible only in the
+    session that wrote it.
+  - `scope: "parent"` — target the session that dispatched this
+    one (the coordinator). Your own Snapshot also shows it
+    (forwarded up-the-chain), and the coordinator sees it tagged
+    `[from <skill>/<role>]` to indicate provenance. Errors on a
+    root session with no parent.
+  - `scope: "ancestors"` — same idea, but walk the whole chain
+    upward and write one note at every ancestor level. Use this
+    sparingly — `parent` usually suffices.
+- `memory_clear_note(id)` — remove a note when it's no longer
+  useful. **Author-only at the LLM surface**: if another session
+  wrote the note (it renders with a `[from …]` prefix in your
+  notes), you cannot clear it — only the author can. The
+  post-session reviewer still has full delete rights below the
+  surface.
+
+When promoting notes up the chain, keep them short and
+self-contained — the reader is a separate model run with no
+shared turn context. Prefer actionable findings
+("`tf.incidents.severity` is enum 1-3, not 0-5") over
+conversational fragments ("just checked the field").
 
 ## Long-term memory (learned from previous sessions)
 

@@ -14,6 +14,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"github.com/hugr-lab/query-engine/types"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 )
 
 // Config bundles Manager dependencies.
@@ -52,6 +53,20 @@ type Config struct {
 	// delegating to providers.Build with type=mcp. May be nil — skills
 	// that only use named providers work without it.
 	InlineBuilder InlineProviderFactory
+
+	// SubAgentToolBuilder is an optional callback consulted by
+	// Session.LoadSkill whenever a loaded skill declares non-empty
+	// sub_agents. When set, the manager registers one tool.Tool per
+	// role (name pattern `subagent_<skill>_<role>`) under a new
+	// tools.Manager provider `skill/<skill>/_subagents`. On UnloadSkill
+	// the provider is dropped alongside the skill's regular bindings.
+	// Wired from runtime.Build so pkg/sessions stays agent-agnostic
+	// (Dispatcher lives in pkg/agent; importing it here would cycle).
+	//
+	// Nil is fine: the generic `subagent_dispatch(skill, role, task)`
+	// tool still ships via the `_system` skill autoload and covers the
+	// same use case.
+	SubAgentToolBuilder SubAgentToolBuilder
 
 	// Classifier persists conversation events (user_message / llm_response
 	// / tool_call / tool_result) asynchronously via hub.AppendEvent.
@@ -93,6 +108,11 @@ type InlineProviderAuth struct {
 // tools.Manager under the provided synthetic name.
 type InlineProviderFactory func(name, endpoint string, auth InlineProviderAuth, logger *slog.Logger) (tools.Provider, error)
 
+// SubAgentToolBuilder returns a tool.Tool wrapping a (skill, role)
+// dispatch. Set on Config from runtime.Build; pkg/sessions invokes it
+// without importing pkg/agent (cycle-avoidance).
+type SubAgentToolBuilder func(skillName, role string, spec skills.SubAgentSpec) tool.Tool
+
 // Manager owns runtime sessions. Implements adksession.Service and
 // *Manager. System tools no longer live here — they
 // come from a tools.Provider declared in config.yaml (`type: system`,
@@ -106,9 +126,10 @@ type Manager struct {
 	hub           *sessstore.Client
 	constitution  string
 	logger        *slog.Logger
-	inlineBuilder InlineProviderFactory
-	classifier    *Classifier
-	scheduler     ReviewQueuer
+	inlineBuilder    InlineProviderFactory
+	subagentBuilder  SubAgentToolBuilder
+	classifier       *Classifier
+	scheduler        ReviewQueuer
 }
 
 var (
@@ -140,9 +161,10 @@ func New(cfg Config) (*Manager, error) {
 		hub:           hub,
 		constitution:  cfg.Constitution,
 		logger:        cfg.Logger,
-		inlineBuilder: cfg.InlineBuilder,
-		classifier:    cfg.Classifier,
-		scheduler:     cfg.Scheduler,
+		inlineBuilder:   cfg.InlineBuilder,
+		subagentBuilder: cfg.SubAgentToolBuilder,
+		classifier:      cfg.Classifier,
+		scheduler:       cfg.Scheduler,
 	}, nil
 }
 
@@ -186,6 +208,29 @@ func (a skillsAccessor) Session(id string) (skills.Session, error) {
 	return a.m.Session(id)
 }
 
+// PublishHubEvent writes a transcript row for the given session with
+// per-session write serialisation. The name is deliberately distinct
+// from `AppendEvent` on the adksession.Service interface (which takes
+// *session.Event, not sessstore.Event) — callers without direct
+// access to a *Session (classifier, compactor) reach the serialised
+// write path through here. When the session isn't tracked in-memory
+// (GC'd, pre-restore) falls back to a direct hub write.
+func (m *Manager) PublishHubEvent(ctx context.Context, sessionID string, ev sessstore.Event, summary string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("session: PublishHubEvent: session_id required")
+	}
+	if sess, err := m.Session(sessionID); err == nil && sess != nil {
+		return sess.AppendEvent(ctx, ev, summary)
+	}
+	if m.hub == nil {
+		return "", nil
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
+	}
+	return m.hub.AppendEventWithSummary(ctx, ev, summary)
+}
+
 // Cleanup removes sessions inactive for more than olderThan.
 func (m *Manager) Cleanup(olderThan time.Duration) int {
 	cutoff := time.Now().Add(-olderThan)
@@ -219,12 +264,28 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		app := ""
+		skill := ""
+		role := ""
 		if row.Metadata != nil {
 			if v, ok := row.Metadata["app_name"].(string); ok {
 				app = v
 			}
+			if v, ok := row.Metadata["skill"].(string); ok {
+				skill = v
+			}
+			if v, ok := row.Metadata["role"].(string); ok {
+				role = v
+			}
 		}
-		sess := m.newLocal(row.ID, app, row.OwnerID)
+		sess := m.newLocalWithLinkage(row.ID, app, row.OwnerID, subAgentLinkage{
+			sessionType:        row.SessionType,
+			parentSessionID:    row.ParentSessionID,
+			spawnedFromEventID: row.SpawnedFromEventID,
+			mission:            row.Mission,
+			forkAfterSeq:       row.ForkAfterSeq,
+			metaSkill:          skill,
+			metaRole:           role,
+		})
 		m.mu.Lock()
 		m.sessions[row.ID] = sess
 		m.mu.Unlock()
@@ -233,13 +294,18 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 	return nil
 }
 
-// applyAutoload loads every skill marked autoload into sess, idempotent
-// against AddSkill so repeat calls are safe.
+// applyAutoload loads every autoload skill applicable to the session's
+// type into sess, idempotent against AddSkill so repeat calls are safe.
+//
+// Spec 006: a sub-agent session only picks up autoload skills whose
+// frontmatter `autoload_for` includes "subagent" (the file parser
+// defaults missing lists to ["root"]). Existing root sessions keep
+// their pre-006 autoload set unchanged.
 func (m *Manager) applyAutoload(ctx context.Context, sess *Session) {
 	if m.skills == nil {
 		return
 	}
-	names, err := m.skills.AutoloadNames(ctx)
+	names, err := m.skills.AutoloadNamesFor(ctx, sess.SessionType())
 	if err != nil {
 		m.logger.Warn("session: autoload lookup", "err", err)
 		return
@@ -267,18 +333,33 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 		id = uuid.NewString()
 	}
 
+	// Spec 006: extract sub-agent / fork linkage from well-known State
+	// keys before constructing the Session so the discriminator is
+	// available to applyAutoload below + the hub Record carries it.
+	linkage := linkageFromState(req.State)
+
 	m.mu.Lock()
 	if _, exists := m.sessions[id]; exists {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("session: %q already exists", id)
 	}
-	sess := m.newLocal(id, req.AppName, req.UserID)
+	sess := m.newLocalWithLinkage(id, req.AppName, req.UserID, linkage)
 	sess.markMaterialized() // fresh session — nothing to replay from hub
 	m.sessions[id] = sess
 	m.mu.Unlock()
 
 	if req.State != nil {
 		for k, v := range req.State {
+			// Skip the well-known linkage keys — they're already absorbed
+			// into the Session's typed fields and into the hub Record
+			// below; copying them into State would duplicate the truth
+			// and let later code mutate them out of sync.
+			switch k {
+			case stateKeyParentSessionID, stateKeyMission, stateKeyForkAfterSeq,
+				stateKeySessionType, stateKeySpawnedFromEventID,
+				stateKeySkill, stateKeyRole:
+				continue
+			}
 			_ = sess.state.Set(k, v)
 		}
 	}
@@ -288,12 +369,25 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 		if req.AppName != "" {
 			meta["app_name"] = req.AppName
 		}
+		if req.State != nil {
+			if v, ok := req.State[stateKeySkill].(string); ok && v != "" {
+				meta["skill"] = v
+			}
+			if v, ok := req.State[stateKeyRole].(string); ok && v != "" {
+				meta["role"] = v
+			}
+		}
 		row := sessstore.Record{
-			ID:       id,
-			AgentID:  m.hub.AgentID(),
-			OwnerID:  req.UserID,
-			Status:   "active",
-			Metadata: meta,
+			ID:                 id,
+			AgentID:            m.hub.AgentID(),
+			OwnerID:            req.UserID,
+			Status:             "active",
+			Metadata:           meta,
+			SessionType:        linkage.sessionType,
+			ParentSessionID:    linkage.parentSessionID,
+			SpawnedFromEventID: linkage.spawnedFromEventID,
+			Mission:            linkage.mission,
+			ForkAfterSeq:       linkage.forkAfterSeq,
 		}
 		if _, err := m.hub.CreateSession(ctx, row); err != nil {
 			m.logger.Warn("session: hub.CreateSession", "id", id, "err", err)
@@ -364,6 +458,18 @@ func (m *Manager) Delete(ctx context.Context, req *adksession.DeleteRequest) err
 	return nil
 }
 
+// UpdateSessionStatus proxies to the hub session-status update so
+// callers (notably the spec-006 sub-agent dispatcher) can mark a
+// child session completed / failed / abandoned at the end of a run
+// without reaching into the hub client directly. No-op when the
+// manager runs without a hub (test mode).
+func (m *Manager) UpdateSessionStatus(ctx context.Context, sessionID, status string) error {
+	if m.hub == nil {
+		return nil
+	}
+	return m.hub.UpdateSessionStatus(ctx, sessionID, status)
+}
+
 func (m *Manager) AppendEvent(ctx context.Context, cur adksession.Session, ev *adksession.Event) error {
 	if cur == nil {
 		return errors.New("session: AppendEvent: nil session")
@@ -393,16 +499,105 @@ func (m *Manager) AppendEvent(ctx context.Context, cur adksession.Session, ev *a
 // internal
 // ------------------------------------------------------------
 
-func (m *Manager) newLocal(id, app, user string) *Session {
+// newLocalWithLinkage builds a Session with spec-006 sub-agent linkage
+// (session_type, parent_session_id, spawned_from_event_id, mission,
+// fork_after_seq) populated. Used by Create when the caller supplied
+// the relevant CreateRequest.State keys, and by RestoreOpen when
+// rehydrating sessions from hub. Falls back to root when sessionType
+// is empty so existing call sites that don't care continue to work.
+func (m *Manager) newLocalWithLinkage(id, app, user string, sub subAgentLinkage) *Session {
 	return newSession(sessionConfig{
-		id:           id,
-		appName:      app,
-		userID:       user,
-		manager:      m,
-		skills:       m.skills,
-		tools:        m.tools,
-		hub:          m.hub,
-		logger:       m.logger,
-		constitution: m.constitution,
+		id:                 id,
+		appName:            app,
+		userID:             user,
+		manager:            m,
+		skills:             m.skills,
+		tools:              m.tools,
+		hub:                m.hub,
+		logger:             m.logger,
+		constitution:       m.constitution,
+		sessionType:        sub.sessionType,
+		parentSessionID:    sub.parentSessionID,
+		spawnedFromEventID: sub.spawnedFromEventID,
+		mission:            sub.mission,
+		forkAfterSeq:       sub.forkAfterSeq,
+		metaSkill:          sub.metaSkill,
+		metaRole:           sub.metaRole,
 	})
+}
+
+// subAgentLinkage carries the spec-006 sub-agent / fork linkage fields
+// extracted from CreateRequest.State (or rehydrated from a Record on
+// startup). See linkageFromState for the State-key contract.
+type subAgentLinkage struct {
+	sessionType        string
+	parentSessionID    string
+	spawnedFromEventID string
+	mission            string
+	forkAfterSeq       *int
+	// Spec 006 §6: specialist identity sourced from CreateRequest.State
+	// (__skill__ / __role__) and merged into sessions.metadata at
+	// Create time. Plumbed onto Session so renderNotesBlock can resolve
+	// "[from <skill>/<role>]" without a hub round-trip.
+	metaSkill string
+	metaRole  string
+}
+
+// CreateRequest.State keys recognised by Manager.Create. Empty values
+// fall through to the default "root" session shape.
+const (
+	stateKeyParentSessionID    = "__parent_session_id__"
+	stateKeyMission            = "__mission__"
+	stateKeyForkAfterSeq       = "__fork_after_seq__"
+	stateKeySessionType        = "__session_type__"
+	stateKeySpawnedFromEventID = "__spawned_from_event_id__"
+	// Spec 006 §6: skill + role identify the specialist behind a
+	// sub-agent session. Merged into sessions.metadata so cross-session
+	// notes can render a "[from <skill>/<role>]" provenance prefix.
+	stateKeySkill = "__skill__"
+	stateKeyRole  = "__role__"
+)
+
+// linkageFromState reads the five well-known CreateRequest.State keys
+// and returns a subAgentLinkage. Unknown / missing keys → zero values
+// (i.e. root session). Type coercion is loose so tests can pass plain
+// Go types and JSON-decoded callers can pass the same map unmodified.
+func linkageFromState(state map[string]any) subAgentLinkage {
+	if len(state) == 0 {
+		return subAgentLinkage{}
+	}
+	out := subAgentLinkage{}
+	if v, ok := state[stateKeySessionType].(string); ok {
+		out.sessionType = v
+	}
+	if v, ok := state[stateKeyParentSessionID].(string); ok {
+		out.parentSessionID = v
+	}
+	if v, ok := state[stateKeySpawnedFromEventID].(string); ok {
+		out.spawnedFromEventID = v
+	}
+	if v, ok := state[stateKeyMission].(string); ok {
+		out.mission = v
+	}
+	if v, ok := state[stateKeySkill].(string); ok {
+		out.metaSkill = v
+	}
+	if v, ok := state[stateKeyRole].(string); ok {
+		out.metaRole = v
+	}
+	switch v := state[stateKeyForkAfterSeq].(type) {
+	case nil:
+		// leave nil
+	case int:
+		out.forkAfterSeq = &v
+	case int64:
+		x := int(v)
+		out.forkAfterSeq = &x
+	case float64:
+		x := int(v)
+		out.forkAfterSeq = &x
+	case *int:
+		out.forkAfterSeq = v
+	}
+	return out
 }

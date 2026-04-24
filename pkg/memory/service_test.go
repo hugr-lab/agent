@@ -11,13 +11,13 @@ import (
 // querier is provided; returns an empty tool list when querier is nil.
 func TestService_ToolNames(t *testing.T) {
 	// Nil querier → no tools (provider registers but exposes empty list).
-	svc, err := NewService(nil, nil, nil, ServiceOptions{AgentID: "ag01"})
+	svc, err := NewService(nil, nil, ServiceOptions{AgentID: "ag01"})
 	require.NoError(t, err)
 	assert.Empty(t, svc.Tools())
 
 	// With a (stub) querier → five tools by name. We only exercise the
 	// construction path here; no tool Run is invoked.
-	svc, err = NewService(stubQuerier{}, nil, nil, ServiceOptions{AgentID: "ag01", AgentShort: "ag01"})
+	svc, err = NewService(stubQuerier{}, nil, ServiceOptions{AgentID: "ag01", AgentShort: "ag01"})
 	require.NoError(t, err)
 	tools := svc.Tools()
 	require.Len(t, tools, 5)
@@ -32,7 +32,7 @@ func TestService_ToolNames(t *testing.T) {
 }
 
 func TestService_Name(t *testing.T) {
-	svc, err := NewService(nil, nil, nil, ServiceOptions{AgentID: "ag01"})
+	svc, err := NewService(nil, nil, ServiceOptions{AgentID: "ag01"})
 	require.NoError(t, err)
 	assert.Equal(t, "_memory", svc.Name())
 }

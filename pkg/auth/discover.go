@@ -26,7 +26,7 @@ func DiscoverOIDCFromHugr(ctx context.Context, hugrURL string) (*HugrOIDCConfig,
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s/auth/config: %w", hugrURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil // OIDC not configured on Hugr
