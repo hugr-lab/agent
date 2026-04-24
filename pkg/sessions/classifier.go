@@ -143,6 +143,12 @@ func (c *Classifier) Run(ctx context.Context) {
 // handle classifies a single envelope and persists any rows it
 // produced. Errors are logged, never returned — the classifier
 // consumer loop is best-effort.
+//
+// Spec 006 §2: eligible event types carry a `summary:` payload that
+// Hugr embeds server-side on insert. Embedder failures surface as
+// mutation errors — the classifier falls back to a plain insert
+// (empty summary → NULL embedding) so the transcript row always
+// lands, and a WARN log points a backfill worker at the gap.
 func (c *Classifier) handle(ctx context.Context, env Envelope) {
 	rows := Classify(env)
 	if c.hub == nil {
@@ -150,11 +156,99 @@ func (c *Classifier) handle(ctx context.Context, env Envelope) {
 	}
 	for _, row := range rows {
 		row.SessionID = env.SessionID
-		if _, err := c.hub.AppendEvent(ctx, row); err != nil {
+		summary := buildSummary(row)
+		eventID, err := c.hub.AppendEventWithSummary(ctx, row, summary)
+		if err == nil {
+			_ = eventID
+			continue
+		}
+		if summary == "" {
 			c.logger.Warn("classifier: AppendEvent failed",
+				"session", env.SessionID, "type", row.EventType, "err", err)
+			continue
+		}
+		// Embedder-or-other failure on the summary path: retry once
+		// WITHOUT summary so the row still persists with NULL embedding.
+		c.logger.Warn("classifier: embed insert failed, retrying without summary",
+			"session", env.SessionID, "type", row.EventType, "err", err)
+		if _, err := c.hub.AppendEvent(ctx, row); err != nil {
+			c.logger.Warn("classifier: AppendEvent retry failed",
 				"session", env.SessionID, "type", row.EventType, "err", err)
 		}
 	}
+}
+
+// buildSummary returns the text Hugr should embed for the given row,
+// or "" when the event type is ineligible (spec 006 contract
+// session-events-semantic.md §2 eligibility table).
+//
+// | type                  | payload                                     |
+// |-----------------------|---------------------------------------------|
+// | user_message          | row.Content                                 |
+// | llm_response          | row.Content                                 |
+// | agent_message         | row.Content (phase-2 producer)              |
+// | tool_call             | fmt "%s(%s)" name + compact args, ≤200 runes|
+// | tool_result           | row.ToolResult, non-empty ≤ 64 KiB, first 2048|
+// | compaction_summary    | row.Content                                 |
+// | agent_result (phase2) | metadata.summary                            |
+// | other                 | ""                                          |
+func buildSummary(row sessstore.Event) string {
+	switch row.EventType {
+	case sessstore.EventTypeUserMessage,
+		sessstore.EventTypeLLMResponse,
+		sessstore.EventTypeAgentMessage,
+		sessstore.EventTypeCompactionSummary:
+		return row.Content
+	case sessstore.EventTypeToolCall:
+		return toolCallDigest(row.ToolName, row.ToolArgs)
+	case sessstore.EventTypeToolResult:
+		if row.ToolResult == "" {
+			return ""
+		}
+		// AppendEvent already caps the persisted payload at
+		// maxToolResultBytes (64 KiB). The embedding summary is an
+		// even tighter window — the first 2 048 runes stay cheap for
+		// the embedder call without losing the tool's intent.
+		return truncateRunes(row.ToolResult, 2048)
+	case sessstore.EventTypeAgentResult:
+		if row.Metadata == nil {
+			return ""
+		}
+		if v, ok := row.Metadata["summary"].(string); ok {
+			return v
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// toolCallDigest renders a one-line summary of a tool_call row for
+// embedding: `<tool_name>(<compact args>)`. Args are marshalled to
+// JSON and truncated at 200 runes to stay cheap.
+func toolCallDigest(name string, args map[string]any) string {
+	if name == "" && len(args) == 0 {
+		return ""
+	}
+	argsJSON := ""
+	if len(args) > 0 {
+		if b, err := json.Marshal(args); err == nil {
+			argsJSON = string(b)
+		}
+	}
+	out := name + "(" + argsJSON + ")"
+	return truncateRunes(out, 200)
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // Classify maps a single ADK event to zero or more session_events

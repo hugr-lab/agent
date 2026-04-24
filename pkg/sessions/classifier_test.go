@@ -109,6 +109,90 @@ func TestClassify_ToolResultTruncated(t *testing.T) {
 	assert.Equal(t, true, rows[0].Metadata["truncated"])
 }
 
+// Spec 006 §2 — buildSummary eligibility table.
+func TestBuildSummary_Eligibility(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   sessstore.Event
+		want string
+	}{
+		{
+			"user_message",
+			sessstore.Event{EventType: sessstore.EventTypeUserMessage, Content: "hi"},
+			"hi",
+		},
+		{
+			"llm_response",
+			sessstore.Event{EventType: sessstore.EventTypeLLMResponse, Content: "ok"},
+			"ok",
+		},
+		{
+			"agent_message",
+			sessstore.Event{EventType: sessstore.EventTypeAgentMessage, Content: "agent"},
+			"agent",
+		},
+		{
+			"compaction_summary",
+			sessstore.Event{EventType: sessstore.EventTypeCompactionSummary, Content: "short"},
+			"short",
+		},
+		{
+			"tool_call with args",
+			sessstore.Event{
+				EventType: sessstore.EventTypeToolCall,
+				ToolName:  "hugr_query",
+				ToolArgs:  map[string]any{"q": "SELECT 1"},
+			},
+			`hugr_query({"q":"SELECT 1"})`,
+		},
+		{
+			"tool_result with content",
+			sessstore.Event{EventType: sessstore.EventTypeToolResult, ToolResult: "results"},
+			"results",
+		},
+		{
+			"tool_result empty",
+			sessstore.Event{EventType: sessstore.EventTypeToolResult},
+			"",
+		},
+		{
+			"agent_result with metadata.summary",
+			sessstore.Event{
+				EventType: sessstore.EventTypeAgentResult,
+				Metadata:  map[string]any{"summary": "sub completed"},
+			},
+			"sub completed",
+		},
+		{
+			"agent_result without summary",
+			sessstore.Event{EventType: sessstore.EventTypeAgentResult},
+			"",
+		},
+		{
+			"ineligible event_type",
+			sessstore.Event{EventType: sessstore.EventTypeSessionForked, Content: "forked"},
+			"",
+		},
+		{
+			"unknown event_type",
+			sessstore.Event{EventType: "weird_extension", Content: "anything"},
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, buildSummary(c.ev))
+		})
+	}
+}
+
+// toolCallDigest trims at 200 runes to keep the embedder call cheap.
+func TestToolCallDigest_Truncates(t *testing.T) {
+	long := map[string]any{"x": string(make([]byte, 1000))}
+	got := toolCallDigest("long_tool", long)
+	assert.LessOrEqual(t, len([]rune(got)), 200)
+}
+
 func TestPublish_DropOnFull(t *testing.T) {
 	// tiny buffer, fill it, third publish should drop.
 	c := NewClassifier(nil, "", "", nil, 1)

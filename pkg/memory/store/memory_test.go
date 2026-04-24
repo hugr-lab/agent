@@ -69,16 +69,16 @@ func TestMemory_StoreGetDelete(t *testing.T) {
 	assert.ElementsMatch(t, []string{"other-fact"}, got.Links)
 	assert.True(t, got.IsValid)
 
-	res, err := h.Search(ctx, "incidents", nil, memstore.SearchOpts{Limit: 5})
+	res, err := h.Search(ctx, "incidents", memstore.SearchOpts{Limit: 5})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 	assert.Equal(t, id, res[0].ID)
 
-	res, err = h.Search(ctx, "", nil, memstore.SearchOpts{Tags: []string{"tf"}, Limit: 5})
+	res, err = h.Search(ctx, "", memstore.SearchOpts{Tags: []string{"tf"}, Limit: 5})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 
-	res, err = h.Search(ctx, "", nil, memstore.SearchOpts{Tags: []string{"weather"}, Limit: 5})
+	res, err = h.Search(ctx, "", memstore.SearchOpts{Tags: []string{"weather"}, Limit: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res)
 
@@ -168,7 +168,7 @@ func TestMemory_DeleteExpired(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	res, err := h.Search(ctx, "expired", nil, memstore.SearchOpts{Limit: 5})
+	res, err := h.Search(ctx, "expired", memstore.SearchOpts{Limit: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res)
 }

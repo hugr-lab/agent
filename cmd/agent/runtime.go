@@ -19,7 +19,6 @@ import (
 	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
 	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/models/embedding"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
@@ -267,13 +266,6 @@ func buildRuntime(
 		}
 	}
 
-	// Embeddings adapter — shared by memory service + memory workers.
-	embed := embedding.New(memoryQuerier, embedding.Options{
-		Model:     cfg.Embedding.Model,
-		Dimension: cfg.Embedding.Dimension,
-		Logger:    logger,
-	})
-
 	// Hub clients — built once and shared across every subsystem
 	// (classifier, sessions manager, memory service, reviewer,
 	// compactor, consolidator, verifier, injector). Each consumer used
@@ -287,8 +279,10 @@ func buildRuntime(
 	// querier; splitting is a future task that needs per-subsystem
 	// routing flags in memory.Config + chatcontext.Config + an
 	// agent-level sessions routing switch.
+	embedderEnabled := cfg.Embedding.Dimension > 0 && cfg.Embedding.Model != ""
 	sessHub, err := sessstore.New(memoryQuerier, sessstore.Options{
 		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+		EmbedderEnabled: embedderEnabled,
 	})
 	if err != nil {
 		rt.close(logger)
@@ -296,6 +290,7 @@ func buildRuntime(
 	}
 	memHub, err := memstore.New(memoryQuerier, memstore.Options{
 		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
+		EmbedderEnabled: embedderEnabled,
 	})
 	if err != nil {
 		rt.close(logger)
@@ -410,7 +405,7 @@ func buildRuntime(
 		rt.close(logger)
 		return nil, fmt.Errorf("attach chatcontext service: %w", err)
 	}
-	memService, err := memory.NewService(memoryQuerier, sessionMgr, embed, memory.ServiceOptions{
+	memService, err := memory.NewService(memoryQuerier, sessionMgr, memory.ServiceOptions{
 		AgentID: cfg.Identity.ID, AgentShort: cfg.Identity.ShortID, Logger: logger,
 		Memory: memHub, Sessions: sessHub,
 	})

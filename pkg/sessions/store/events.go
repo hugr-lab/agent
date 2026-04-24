@@ -5,13 +5,16 @@ const (
 	EventTypeSkillLoaded   = "skill_loaded"
 	EventTypeSkillUnloaded = "skill_unloaded"
 
-	EventTypeUserMessage   = "user_message"
-	EventTypeLLMResponse   = "llm_response"
-	EventTypeToolCall      = "tool_call"
-	EventTypeToolResult    = "tool_result"
-	EventTypeSessionForked = "session_forked"
-	EventTypeNote          = "note"
-	EventTypeError         = "error"
+	EventTypeUserMessage       = "user_message"
+	EventTypeLLMResponse       = "llm_response"
+	EventTypeAgentMessage      = "agent_message"
+	EventTypeToolCall          = "tool_call"
+	EventTypeToolResult        = "tool_result"
+	EventTypeSessionForked     = "session_forked"
+	EventTypeCompactionSummary = "compaction_summary"
+	EventTypeAgentResult       = "agent_result" // reserved for spec 006 phase 2
+	EventTypeNote              = "note"
+	EventTypeError             = "error"
 )
 
 // SkillLoadedMeta is the JSON payload of a skill_loaded event's Metadata.

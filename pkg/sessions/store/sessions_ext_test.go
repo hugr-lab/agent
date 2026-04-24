@@ -277,3 +277,57 @@ func TestSessions_NotesChain(t *testing.T) {
 		assert.Equal(t, "sess-coord-2", n.SessionID)
 	}
 }
+
+// TestSessions_DeleteNoteAsAuthor covers the author-only delete gate
+// behind memory_clear_note (spec 006 §6): a sub-agent can delete its
+// own promoted note, but not a note authored by a sibling session or
+// the coordinator. Legacy rows with NULL author_session_id also fail
+// the gate — only DeleteNote (housekeeper surface) can prune them.
+func TestSessions_DeleteNoteAsAuthor(t *testing.T) {
+	h := newClient(t, "agt_ag01", "ag01")
+	ctx := context.Background()
+
+	_, err := h.CreateSession(ctx, sessstore.Record{
+		ID: "sess-coord-del", OwnerID: "u1", Status: "active",
+	})
+	require.NoError(t, err)
+	_, err = h.CreateSession(ctx, sessstore.Record{
+		ID: "sess-sub-del", OwnerID: "u1", Status: "active",
+		ParentSessionID: "sess-coord-del",
+		SessionType:     sessstore.SessionTypeSubAgent,
+	})
+	require.NoError(t, err)
+
+	// Sub-agent authors a note targeted at the coordinator.
+	promoted, err := h.AddNote(ctx, sessstore.Note{
+		SessionID:       "sess-coord-del",
+		AuthorSessionID: "sess-sub-del",
+		Content:         "station_id FK",
+	})
+	require.NoError(t, err)
+
+	// Coordinator cannot delete the sub-agent's note.
+	affected, err := h.DeleteNoteAsAuthor(ctx, promoted, "sess-coord-del")
+	require.NoError(t, err)
+	assert.Equal(t, 0, affected, "coord is not author — author-only delete must refuse")
+
+	// The note is still there — GetNote returns it.
+	got, err := h.GetNote(ctx, promoted)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	// Sub-agent (the actual author) succeeds.
+	affected, err = h.DeleteNoteAsAuthor(ctx, promoted, "sess-sub-del")
+	require.NoError(t, err)
+	assert.Equal(t, 1, affected)
+
+	// GetNote now returns nil — the row was deleted.
+	got, err = h.GetNote(ctx, promoted)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// Unknown note id is also a 0-row outcome.
+	affected, err = h.DeleteNoteAsAuthor(ctx, "missing-id", "sess-sub-del")
+	require.NoError(t, err)
+	assert.Equal(t, 0, affected)
+}

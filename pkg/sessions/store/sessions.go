@@ -143,7 +143,26 @@ func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 // AppendEvent inserts a row into hub.db.agent.session_events. Computes seq
 // as max(seq)+1 within the session (not transactionally atomic; fine for
 // single-writer-per-session which is how ADK drives sessions).
+//
+// Thin wrapper around AppendEventWithSummary with an empty summary —
+// use AppendEventWithSummary directly when you want Hugr to compute +
+// store the row's embedding as part of the insert.
 func (c *Client) AppendEvent(ctx context.Context, ev Event) (string, error) {
+	return c.AppendEventWithSummary(ctx, ev, "")
+}
+
+// AppendEventWithSummary inserts a row and, when summary is non-empty,
+// asks Hugr to embed the summary text through the attached embedder
+// and write the resulting vector to the `embedding` column atomically
+// with the row (spec 006 §2). Empty summary → no `summary:` GraphQL
+// argument and the row lands with embedding NULL (same behaviour as
+// plain AppendEvent).
+//
+// Hugr reports embedder-side failures as mutation errors. The classifier
+// catches those and retries once with summary="" (plain insert) — the
+// row still persists so the agent's transcript stays complete even when
+// the embedder is unavailable.
+func (c *Client) AppendEventWithSummary(ctx context.Context, ev Event, summary string) (string, error) {
 	if ev.SessionID == "" {
 		return "", fmt.Errorf("hubdb: AppendEvent requires SessionID")
 	}
@@ -188,13 +207,31 @@ func (c *Client) AppendEvent(ctx context.Context, ev Event) (string, error) {
 	if ev.Metadata != nil {
 		data["metadata"] = ev.Metadata
 	}
+	// Gate the `summary:` argument behind the embedder flag: when the
+	// engine has no embedder attached the schema doesn't expose the
+	// argument and the server rejects the mutation outright ("Unknown
+	// argument summary"). Tests that spin a minimal hugr engine hit
+	// that path.
+	if summary == "" || !c.embedderEnabled {
+		if err := queries.RunMutation(ctx, c.querier,
+			`mutation ($data: hub_db_session_events_mut_input_data!) {
+				hub { db { agent {
+					insert_session_events(data: $data) { id }
+				}}}
+			}`,
+			map[string]any{"data": data},
+		); err != nil {
+			return "", err
+		}
+		return eventID, nil
+	}
 	if err := queries.RunMutation(ctx, c.querier,
-		`mutation ($data: hub_db_session_events_mut_input_data!) {
+		`mutation ($data: hub_db_session_events_mut_input_data!, $summary: String) {
 			hub { db { agent {
-				insert_session_events(data: $data) { id }
+				insert_session_events(data: $data, summary: $summary) { id }
 			}}}
 		}`,
-		map[string]any{"data": data},
+		map[string]any{"data": data, "summary": summary},
 	); err != nil {
 		return "", err
 	}
@@ -603,7 +640,11 @@ func (c *Client) ListNotesChain(ctx context.Context, sessionID string) ([]NoteWi
 	return out, nil
 }
 
-// DeleteNote removes a single note by ID.
+// DeleteNote removes a single note by ID. Unconditional — callers at
+// the store layer (reviewer, housekeeper, dev tooling) always have
+// full authority. The author-only policy for the LLM-facing
+// memory_clear_note tool lives above this layer; see DeleteNoteAsAuthor
+// for the gated variant.
 func (c *Client) DeleteNote(ctx context.Context, noteID string) error {
 	return queries.RunMutation(ctx, c.querier,
 		`mutation ($id: String!) {
@@ -613,6 +654,90 @@ func (c *Client) DeleteNote(ctx context.Context, noteID string) error {
 		}`,
 		map[string]any{"id": noteID},
 	)
+}
+
+// DeleteNoteAsAuthor removes a note only when its author_session_id
+// matches the caller's sessionID. Returns affected rows (0 when the
+// author check fails — caller should treat that as a permission denial).
+// The LLM-facing memory_clear_note tool gates deletes through this
+// path so a specialist cannot wipe notes another session wrote, while
+// housekeepers below the surface use DeleteNote for full authority.
+func (c *Client) DeleteNoteAsAuthor(ctx context.Context, noteID, authorSessionID string) (int, error) {
+	if noteID == "" {
+		return 0, fmt.Errorf("hubdb: DeleteNoteAsAuthor requires noteID")
+	}
+	if authorSessionID == "" {
+		return 0, fmt.Errorf("hubdb: DeleteNoteAsAuthor requires authorSessionID")
+	}
+	type result struct {
+		Affected int `json:"affected_rows"`
+	}
+	resp, err := c.querier.Query(ctx,
+		`mutation ($id: String!, $author: String!) {
+			hub { db { agent {
+				delete_session_notes(filter: {id: {eq: $id}, author_session_id: {eq: $author}}) {
+					affected_rows
+				}
+			}}}
+		}`,
+		map[string]any{"id": noteID, "author": authorSessionID},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("hubdb mutation: %w", err)
+	}
+	defer resp.Close()
+	if err := resp.Err(); err != nil {
+		return 0, fmt.Errorf("hubdb graphql: %w", err)
+	}
+	var r result
+	if err := resp.ScanData("hub.db.agent.delete_session_notes", &r); err != nil {
+		if !errors.Is(err, types.ErrWrongDataPath) && !errors.Is(err, types.ErrNoData) {
+			return 0, fmt.Errorf("hubdb scan: %w", err)
+		}
+	}
+	return r.Affected, nil
+}
+
+// GetNote fetches a single note by ID (any session). Returns
+// (nil, nil) when the note does not exist.
+func (c *Client) GetNote(ctx context.Context, noteID string) (*Note, error) {
+	type row struct {
+		ID              string    `json:"id"`
+		AgentID         string    `json:"agent_id"`
+		SessionID       string    `json:"session_id"`
+		AuthorSessionID string    `json:"author_session_id"`
+		Content         string    `json:"content"`
+		CreatedAt       time.Time `json:"created_at"`
+	}
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
+		`query ($id: String!) {
+			hub { db { agent {
+				session_notes(filter: {id: {eq: $id}}, limit: 1) {
+					id agent_id session_id author_session_id content created_at
+				}
+			}}}
+		}`,
+		map[string]any{"id": noteID},
+		"hub.db.agent.session_notes",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	r := rows[0]
+	return &Note{
+		ID:              r.ID,
+		AgentID:         r.AgentID,
+		SessionID:       r.SessionID,
+		AuthorSessionID: r.AuthorSessionID,
+		Content:         r.Content,
+		CreatedAt:       r.CreatedAt,
+	}, nil
 }
 
 // DeleteSessionNotes removes every note in a session. Returns the

@@ -383,7 +383,7 @@ func (r *Reviewer) collectPriorFacts(ctx context.Context, sessionID string) []pr
 // reviewer — keeps the path testable without an embedding model.
 func (r *Reviewer) upsertFact(ctx context.Context, sessionID string, f extractedFact, merged MergedConfig) (bool, error) {
 	// Look for near-duplicates by category + keyword.
-	existing, _ := r.memory.Search(ctx, f.Content, nil, memstore.SearchOpts{
+	existing, _ := r.memory.Search(ctx, f.Content, memstore.SearchOpts{
 		Category: f.Category,
 		Limit:    5,
 	})

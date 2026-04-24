@@ -219,9 +219,17 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		app := ""
+		skill := ""
+		role := ""
 		if row.Metadata != nil {
 			if v, ok := row.Metadata["app_name"].(string); ok {
 				app = v
+			}
+			if v, ok := row.Metadata["skill"].(string); ok {
+				skill = v
+			}
+			if v, ok := row.Metadata["role"].(string); ok {
+				role = v
 			}
 		}
 		sess := m.newLocalWithLinkage(row.ID, app, row.OwnerID, subAgentLinkage{
@@ -230,6 +238,8 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 			spawnedFromEventID: row.SpawnedFromEventID,
 			mission:            row.Mission,
 			forkAfterSeq:       row.ForkAfterSeq,
+			metaSkill:          skill,
+			metaRole:           role,
 		})
 		m.mu.Lock()
 		m.sessions[row.ID] = sess
@@ -301,7 +311,8 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 			// and let later code mutate them out of sync.
 			switch k {
 			case stateKeyParentSessionID, stateKeyMission, stateKeyForkAfterSeq,
-				stateKeySessionType, stateKeySpawnedFromEventID:
+				stateKeySessionType, stateKeySpawnedFromEventID,
+				stateKeySkill, stateKeyRole:
 				continue
 			}
 			_ = sess.state.Set(k, v)
@@ -312,6 +323,14 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 		meta := map[string]any{}
 		if req.AppName != "" {
 			meta["app_name"] = req.AppName
+		}
+		if req.State != nil {
+			if v, ok := req.State[stateKeySkill].(string); ok && v != "" {
+				meta["skill"] = v
+			}
+			if v, ok := req.State[stateKeyRole].(string); ok && v != "" {
+				meta["role"] = v
+			}
 		}
 		row := sessstore.Record{
 			ID:                 id,
@@ -471,6 +490,8 @@ func (m *Manager) newLocalWithLinkage(id, app, user string, sub subAgentLinkage)
 		spawnedFromEventID: sub.spawnedFromEventID,
 		mission:            sub.mission,
 		forkAfterSeq:       sub.forkAfterSeq,
+		metaSkill:          sub.metaSkill,
+		metaRole:           sub.metaRole,
 	})
 }
 
@@ -483,6 +504,12 @@ type subAgentLinkage struct {
 	spawnedFromEventID string
 	mission            string
 	forkAfterSeq       *int
+	// Spec 006 §6: specialist identity sourced from CreateRequest.State
+	// (__skill__ / __role__) and merged into sessions.metadata at
+	// Create time. Plumbed onto Session so renderNotesBlock can resolve
+	// "[from <skill>/<role>]" without a hub round-trip.
+	metaSkill string
+	metaRole  string
 }
 
 // CreateRequest.State keys recognised by Manager.Create. Empty values
@@ -493,6 +520,11 @@ const (
 	stateKeyForkAfterSeq       = "__fork_after_seq__"
 	stateKeySessionType        = "__session_type__"
 	stateKeySpawnedFromEventID = "__spawned_from_event_id__"
+	// Spec 006 §6: skill + role identify the specialist behind a
+	// sub-agent session. Merged into sessions.metadata so cross-session
+	// notes can render a "[from <skill>/<role>]" provenance prefix.
+	stateKeySkill = "__skill__"
+	stateKeyRole  = "__role__"
 )
 
 // linkageFromState reads the five well-known CreateRequest.State keys
@@ -515,6 +547,12 @@ func linkageFromState(state map[string]any) subAgentLinkage {
 	}
 	if v, ok := state[stateKeyMission].(string); ok {
 		out.mission = v
+	}
+	if v, ok := state[stateKeySkill].(string); ok {
+		out.metaSkill = v
+	}
+	if v, ok := state[stateKeyRole].(string); ok {
+		out.metaRole = v
 	}
 	switch v := state[stateKeyForkAfterSeq].(type) {
 	case nil:

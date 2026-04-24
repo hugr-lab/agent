@@ -34,6 +34,12 @@ type Session struct {
 	spawnedFromEventID string
 	mission            string
 	forkAfterSeq       *int
+	// Cached sub-agent identity sourced from sessions.metadata at
+	// Create / restore time (spec 006 §6). Used by renderNotesBlock to
+	// prefix cross-session notes as "[from <skill>/<role>]" without
+	// paying a hub round-trip per render.
+	metaSkill string
+	metaRole  string
 
 	state  *State
 	events *eventStore
@@ -123,6 +129,8 @@ type sessionConfig struct {
 	spawnedFromEventID string
 	mission            string
 	forkAfterSeq       *int
+	metaSkill          string
+	metaRole           string
 }
 
 func newSession(cfg sessionConfig) *Session {
@@ -135,6 +143,8 @@ func newSession(cfg sessionConfig) *Session {
 		spawnedFromEventID: cfg.spawnedFromEventID,
 		mission:            cfg.mission,
 		forkAfterSeq:       cfg.forkAfterSeq,
+		metaSkill:          cfg.metaSkill,
+		metaRole:           cfg.metaRole,
 		state:              NewState(),
 		events:             newEventStore(),
 		manager:            cfg.manager,
@@ -509,10 +519,15 @@ func (s *Session) buildPrompt(ctx context.Context) string {
 	return b.String()
 }
 
-// renderNotesBlock pulls the session's notes from HubDB and renders a
-// fixed-part "## Session notes" block that survives context
-// compaction. Cached at the session level for 10 s; invalidated
-// explicitly by the memory_note / memory_clear_note tools.
+// renderNotesBlock pulls the session's notes chain from HubDB and
+// renders a fixed-part "## Session notes" block that survives context
+// compaction. Spec 006 §6: the block sources from the
+// session_notes_chain view so a coordinator sees notes its specialists
+// promoted via memory_note(scope: "parent" | "ancestors"). Notes
+// authored by another session (chain promotions) render with a
+// "[from <skill>/<role>]" prefix using the author session's metadata.
+// Cached at the session level for 10 s; invalidated explicitly by the
+// memory_note / memory_clear_note tools.
 func (s *Session) renderNotesBlock(ctx context.Context) string {
 	if s.hub == nil {
 		return ""
@@ -524,7 +539,7 @@ func (s *Session) renderNotesBlock(ctx context.Context) string {
 	if cachedAt.After(time.Now().Add(-10*time.Second)) && cached != "" {
 		return cached
 	}
-	notes, err := s.hub.ListNotes(ctx, s.id)
+	notes, err := s.hub.ListNotesChain(ctx, s.id)
 	if err != nil || len(notes) == 0 {
 		s.mu.Lock()
 		s.notesCache = ""
@@ -532,12 +547,27 @@ func (s *Session) renderNotesBlock(ctx context.Context) string {
 		s.mu.Unlock()
 		return ""
 	}
+	// Cache author-session metadata for the duration of this render so
+	// a coordinator with ten notes from one specialist only pays one
+	// hub round-trip.
+	authorMeta := map[string]string{}
 	var b strings.Builder
 	b.WriteString("## Session notes\n")
 	for _, n := range notes {
 		b.WriteString("- [")
 		b.WriteString(n.ID)
 		b.WriteString("] ")
+		if n.AuthorSessionID != "" && n.AuthorSessionID != s.id {
+			prefix, ok := authorMeta[n.AuthorSessionID]
+			if !ok {
+				prefix = s.resolveAuthorPrefix(ctx, n.AuthorSessionID)
+				authorMeta[n.AuthorSessionID] = prefix
+			}
+			if prefix != "" {
+				b.WriteString(prefix)
+				b.WriteString(" ")
+			}
+		}
 		b.WriteString(n.Content)
 		b.WriteString("\n")
 	}
@@ -547,6 +577,52 @@ func (s *Session) renderNotesBlock(ctx context.Context) string {
 	s.notesCacheAt = time.Now()
 	s.mu.Unlock()
 	return out
+}
+
+// resolveAuthorPrefix looks up the skill/role pair for a cross-session
+// note's author and returns the "[from <skill>/<role>]" tag (or an
+// empty string when metadata is missing). Best-effort: metadata lookup
+// failures silently degrade to no prefix rather than break rendering.
+func (s *Session) resolveAuthorPrefix(ctx context.Context, authorID string) string {
+	// In-memory first — specialists dispatched in this process are
+	// tracked by the Manager and carry session metadata. Falling back
+	// to hub works for long-gone authors the Manager has evicted.
+	var skill, role string
+	if s.manager != nil {
+		if peer, err := s.manager.Session(authorID); err == nil && peer != nil {
+			skill, role = peer.metadataSkillRole()
+		}
+	}
+	if skill == "" && role == "" && s.hub != nil {
+		if rec, err := s.hub.GetSession(ctx, authorID); err == nil && rec != nil {
+			if v, ok := rec.Metadata["skill"].(string); ok {
+				skill = v
+			}
+			if v, ok := rec.Metadata["role"].(string); ok {
+				role = v
+			}
+		}
+	}
+	switch {
+	case skill != "" && role != "":
+		return "[from " + skill + "/" + role + "]"
+	case skill != "":
+		return "[from " + skill + "]"
+	case role != "":
+		return "[from " + role + "]"
+	default:
+		return ""
+	}
+}
+
+// metadataSkillRole returns the skill/role pair cached on the Session
+// at Create / restore time. Returns empty strings when the session did
+// not carry skill/role metadata (i.e. coordinator / fork sessions).
+func (s *Session) metadataSkillRole() (string, string) {
+	if s == nil {
+		return "", ""
+	}
+	return s.metaSkill, s.metaRole
 }
 
 // InvalidateNotesCache clears the session's notes-render cache so the

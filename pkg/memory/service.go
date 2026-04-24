@@ -1,12 +1,13 @@
 package memory
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/hugr-lab/hugen/pkg/sessions"
-	embedding "github.com/hugr-lab/hugen/pkg/models/embedding"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/tools"
@@ -42,20 +43,24 @@ type ServiceOptions struct {
 // memory_clear_note). Stateless beyond the hub + session-manager
 // references it holds.
 type Service struct {
-	sm         *sessions.Manager
-	memory     *memstore.Client
-	sessions   *sessstore.Client
-	embeddings *embedding.Client
-	tools      []tool.Tool
+	sm       *sessions.Manager
+	memory   *memstore.Client
+	sessions *sessstore.Client
+	tools    []tool.Tool
 }
 
 // NewService returns the memory tools provider. When querier is nil the
 // service exposes no tools (Tools() → empty slice); registering it
 // anyway keeps the provider catalogue consistent. The service builds
 // its own memstore + sessstore clients internally from the given
-// querier. Embeddings are injected (they're a models-domain dependency).
-func NewService(querier types.Querier, sm *sessions.Manager, embeddings *embedding.Client, opts ServiceOptions) (*Service, error) {
-	s := &Service{sm: sm, embeddings: embeddings}
+// querier.
+//
+// Spec 006 §3 dropped the direct Go-side embedding client dependency:
+// memory_search sends the raw query string to Hugr's `semantic:`
+// argument, which embeds server-side. No caller of NewService needs
+// to pass an embedding client any more.
+func NewService(querier types.Querier, sm *sessions.Manager, opts ServiceOptions) (*Service, error) {
+	s := &Service{sm: sm}
 	memC := opts.Memory
 	sessC := opts.Sessions
 	if memC == nil && querier != nil {
@@ -169,7 +174,7 @@ func (t *memorySearchTool) Run(ctx tool.Context, args any) (map[string]any, erro
 			limit = 20
 		}
 	}
-	results, err := t.memory.Search(ctx, query, nil, memstore.SearchOpts{
+	results, err := t.memory.Search(ctx, query, memstore.SearchOpts{
 		Category: category,
 		Tags:     tags,
 		Limit:    limit,
@@ -284,7 +289,7 @@ type memoryNoteTool struct {
 
 func (t *memoryNoteTool) Name() string { return "memory_note" }
 func (t *memoryNoteTool) Description() string {
-	return "Saves a short finding to the session scratchpad. The note is visible in your prompt for the rest of this session and survives context compaction. Returns the note id so you can clear it later."
+	return "Saves a short finding to the session scratchpad. The note is visible in your prompt for the rest of this session and survives context compaction. Optional scope promotes the note up the session chain: 'parent' writes to the coordinator that dispatched you, 'ancestors' writes to every session above. Returns the note id(s) so you can clear them later (author-only)."
 }
 func (t *memoryNoteTool) IsLongRunning() bool { return false }
 
@@ -298,6 +303,11 @@ func (t *memoryNoteTool) Declaration() *genai.FunctionDeclaration {
 				"content": {
 					Type:        "STRING",
 					Description: "Concise, self-contained note text. Prefer ≤ 150 chars per note.",
+				},
+				"scope": {
+					Type:        "STRING",
+					Description: "Where the note is visible: 'self' (default, current session only), 'parent' (target the session that dispatched this one; error on root), 'ancestors' (walk the whole chain upward, one note per ancestor).",
+					Enum:        []string{"self", "parent", "ancestors"},
 				},
 			},
 			Required: []string{"content"},
@@ -319,21 +329,101 @@ func (t *memoryNoteTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	if content == "" {
 		return nil, fmt.Errorf("memory_note: missing required parameter: content")
 	}
+	scope, _ := m["scope"].(string)
+	if scope == "" {
+		scope = "self"
+	}
+	switch scope {
+	case "self", "parent", "ancestors":
+	default:
+		return nil, fmt.Errorf("memory_note: unknown scope %q (want self|parent|ancestors)", scope)
+	}
 	sid := ctx.SessionID()
 	if sid == "" {
 		return nil, fmt.Errorf("memory_note: no session id in tool context")
 	}
-	id, err := t.sessions.AddNote(ctx, sessstore.Note{
-		SessionID: sid, Content: content,
-	})
+
+	// Resolve the list of session ids that should receive the note.
+	// For self the author and session target are the same row; for
+	// parent / ancestors the author stays at the current session and
+	// the target id(s) walk up the chain.
+	current, err := t.sm.Session(sid)
 	if err != nil {
 		return nil, fmt.Errorf("memory_note: %w", err)
 	}
-	// Mark the session dirty so the next Snapshot re-reads notes.
-	if sess, err := t.sm.Session(sid); err == nil {
-		sess.InvalidateNotesCache()
+	targets, err := resolveNoteTargets(ctx, t.sessions, current, scope)
+	if err != nil {
+		return nil, fmt.Errorf("memory_note: %w", err)
 	}
-	return map[string]any{"id": id, "saved": true}, nil
+
+	ids := make([]string, 0, len(targets))
+	for _, targetID := range targets {
+		id, err := t.sessions.AddNote(ctx, sessstore.Note{
+			SessionID:       targetID,
+			AuthorSessionID: sid,
+			Content:         content,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("memory_note: %w", err)
+		}
+		ids = append(ids, id)
+		// Invalidate every affected session's render cache. Own cache
+		// gets invalidated implicitly when the current session later
+		// walks the chain and finds its own notes; upstream ones need
+		// an explicit poke since their Snapshot() may otherwise serve
+		// a stale cached block for up to 10 s.
+		if sess, err := t.sm.Session(targetID); err == nil {
+			sess.InvalidateNotesCache()
+		}
+	}
+	// Always invalidate the author's cache so the LLM sees their own
+	// note on the very next Snapshot (the view returns own notes at
+	// chain_depth = 0 regardless of scope).
+	current.InvalidateNotesCache()
+
+	out := map[string]any{"saved": true, "scope": scope}
+	if len(ids) == 1 {
+		out["id"] = ids[0]
+	} else {
+		out["ids"] = ids
+	}
+	return out, nil
+}
+
+// resolveNoteTargets maps a memory_note scope to the target session
+// ids that receive a row. "self" returns just the caller; "parent"
+// returns the caller's parent (or errors on root); "ancestors" walks
+// parent_session_id upward through the hub, capped at depth 8 to
+// mirror session_notes_chain's cap.
+func resolveNoteTargets(ctx context.Context, hub *sessstore.Client, current *sessions.Session, scope string) ([]string, error) {
+	switch scope {
+	case "self":
+		return []string{current.ID()}, nil
+	case "parent":
+		parent := current.ParentSessionID()
+		if parent == "" {
+			return nil, errors.New("no parent session (scope requires a sub-agent / fork)")
+		}
+		return []string{parent}, nil
+	case "ancestors":
+		parent := current.ParentSessionID()
+		if parent == "" {
+			return nil, errors.New("no ancestor sessions (scope requires a sub-agent / fork)")
+		}
+		var out []string
+		cur := parent
+		for i := 0; i < 8 && cur != ""; i++ {
+			out = append(out, cur)
+			rec, err := hub.GetSession(ctx, cur)
+			if err != nil || rec == nil {
+				break
+			}
+			cur = rec.ParentSessionID
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unknown scope %q", scope)
+	}
 }
 
 // ------------------------------------------------------------
@@ -379,14 +469,35 @@ func (t *memoryClearNoteTool) Run(ctx tool.Context, args any) (map[string]any, e
 	if id == "" {
 		return nil, fmt.Errorf("memory_clear_note: missing required parameter: id")
 	}
-	if err := t.sessions.DeleteNote(ctx, id); err != nil {
+	sid := ctx.SessionID()
+	if sid == "" {
+		return nil, fmt.Errorf("memory_clear_note: no session id in tool context")
+	}
+	affected, err := t.sessions.DeleteNoteAsAuthor(ctx, id, sid)
+	if err != nil {
 		return nil, fmt.Errorf("memory_clear_note: %w", err)
 	}
-	sid := ctx.SessionID()
-	if sid != "" {
-		if sess, err := t.sm.Session(sid); err == nil {
-			sess.InvalidateNotesCache()
+	if affected == 0 {
+		// Could be missing row OR author mismatch. GetNote disambiguates
+		// for a useful error surface; housekeeper paths (reviewer etc.)
+		// bypass this tool and call the store directly, so the
+		// distinction is LLM-facing only.
+		existing, lookupErr := t.sessions.GetNote(ctx, id)
+		switch {
+		case lookupErr == nil && existing == nil:
+			return nil, fmt.Errorf("memory_clear_note: note %q not found", id)
+		case lookupErr == nil && existing.AuthorSessionID == "":
+			return nil, fmt.Errorf("memory_clear_note: not authorised to clear note %q (legacy note with no author)", id)
+		default:
+			return nil, fmt.Errorf("memory_clear_note: not authorised to clear note %q", id)
 		}
+	}
+	// Invalidate this session + (best effort) the session the note
+	// lived in. We don't have an efficient way to reach the target
+	// session here without another hub round-trip; the 10 s TTL on
+	// cached note blocks keeps everyone else eventually-consistent.
+	if sess, err := t.sm.Session(sid); err == nil {
+		sess.InvalidateNotesCache()
 	}
 	return map[string]any{"cleared": true, "id": id}, nil
 }

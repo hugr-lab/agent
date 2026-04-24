@@ -179,6 +179,8 @@ func (d *Dispatcher) Run(
 			"__parent_session_id__":     parentSessionID,
 			"__spawned_from_event_id__": spawnEventID,
 			"__mission__":               task,
+			"__skill__":                 parentSkill,
+			"__role__":                  role,
 			// __fork_after_seq__ omitted — sub-agents always have own context.
 		},
 	}
