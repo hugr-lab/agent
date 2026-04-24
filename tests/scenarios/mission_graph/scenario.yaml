@@ -66,7 +66,14 @@ steps:
   # Step 2 — user asks for status; coordinator should call
   # mission_status() (branch 5 of the decision tree) and paste the
   # rendered tree. Observational — we assert on DB state, not LLM text.
+  #
+  # wait_for_missions polls the Executor's DAG until every mission in
+  # the graph reaches terminal status (done / failed / abandoned) or
+  # the budget expires. Gives the scheduler room to promote formatter
+  # after summariser completes, and lets both child sessions drain
+  # before the final hub.db snapshot.
   - say: "how's it going?"
+    wait_for_missions: 90s
     queries:
       # After the summariser completes, the coordinator sees an
       # agent_result row with the summary embedded (Hugr server-side
@@ -114,6 +121,44 @@ steps:
                 id session_id author_session_id content chain_depth
               }
             }}}
+          }
+        vars:
+          sid: scenario-mission-graph-1
+
+      # After wait_for_missions drained the DAG, every planned mission
+      # now has a terminal status and the cascade path has fired for
+      # any that were abandoned by an upstream failure.
+      - name: final_missions_state
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({id, status, role: .metadata.role, deps: .metadata.depends_on})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-graph-1
+
+      # Full lifecycle-event trace on the coordinator: one spawn per
+      # mission that actually started, one result per terminal
+      # transition (including cascade-abandoned children).
+      - name: coord_lifecycle_events
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"agent_spawn\" or .event_type == \"agent_result\" or .event_type == \"agent_abstained\")) | map({seq, type: .event_type, status: .metadata.status, role: .metadata.role, reason: .metadata.reason})"
+            ) {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }}}
+            }
           }
         vars:
           sid: scenario-mission-graph-1

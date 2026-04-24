@@ -41,7 +41,7 @@ sub_agents:
       Use when the coordinator has a rough summary and wants a
       presentation-ready one-liner.
     intent: tool_calling
-    max_turns: 3
+    max_turns: 5
     summary_max_tokens: 200
     instructions: |
       You polish an existing short summary into one tight sentence.

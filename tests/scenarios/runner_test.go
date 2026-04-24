@@ -25,6 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/hugr-lab/hugen/pkg/missions/graph"
 	"github.com/hugr-lab/hugen/tests/scenarios/harness"
 )
 
@@ -41,6 +42,11 @@ type scenario struct {
 type scenarioStep struct {
 	Say     string          `yaml:"say"`
 	Queries []scenarioQuery `yaml:"queries"`
+	// WaitForMissions, when non-empty, polls the Executor's DAG for
+	// this coordinator after the step's turn completes and blocks
+	// until every mission reaches a terminal status — or the budget
+	// expires. Accepts any time.ParseDuration value ("30s", "2m").
+	WaitForMissions string `yaml:"wait_for_missions"`
 }
 
 type scenarioQuery struct {
@@ -126,6 +132,10 @@ func runScenario(t *testing.T, scenDir, scenPath string) {
 		// Drain the async classifier so subsequent queries + the Dump
 		// see every llm_response / tool_* event the turn emitted.
 		drainClassifier(t, a, 5*time.Second)
+		if step.WaitForMissions != "" {
+			waitMissionsTerminal(ctx, t, a, sc.SessionID, step.WaitForMissions)
+			drainClassifier(t, a, 5*time.Second)
+		}
 		for _, q := range step.Queries {
 			runQuery(ctx, t, a, q)
 		}
@@ -152,6 +162,82 @@ func drainClassifier(t *testing.T, a *harness.Agent, budget time.Duration) {
 	if err := a.Runtime.Classifier.Flush(ctx, budget); err != nil {
 		t.Logf("classifier flush: %v", err)
 	}
+}
+
+// waitMissionsTerminal polls the Executor's in-memory DAG for
+// coordSessionID until every mission reaches a terminal status or the
+// budget expires. Logs periodic progress at 5s intervals. Never
+// fails the test — scenarios are observational, a timeout simply
+// surfaces in the log for inspection.
+func waitMissionsTerminal(
+	ctx context.Context,
+	t *testing.T,
+	a *harness.Agent,
+	coordSessionID string,
+	budget string,
+) {
+	t.Helper()
+	if a.Runtime == nil || a.Runtime.Missions == nil {
+		return
+	}
+	d, err := time.ParseDuration(budget)
+	if err != nil {
+		t.Logf("wait_for_missions: parse %q: %v", budget, err)
+		return
+	}
+	deadline := time.Now().Add(d)
+	lastLog := time.Now()
+	for {
+		nodes := a.Runtime.Missions.Snapshot(ctx, coordSessionID)
+		if missionsAllTerminal(nodes) {
+			t.Logf("wait_for_missions: %d missions terminal after %s",
+				len(nodes), time.Since(deadline.Add(-d)).Truncate(time.Millisecond))
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Logf("wait_for_missions: timeout after %s — %d missions still non-terminal",
+				d, countNonTerminal(nodes))
+			return
+		}
+		if time.Since(lastLog) > 5*time.Second {
+			lastLog = time.Now()
+			t.Logf("wait_for_missions: %d missions still running / pending",
+				countNonTerminal(nodes))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func missionsAllTerminal(nodes []graph.MissionRecord) bool {
+	if len(nodes) == 0 {
+		return true
+	}
+	for _, n := range nodes {
+		switch n.Status {
+		case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func countNonTerminal(nodes []graph.MissionRecord) int {
+	n := 0
+	for _, m := range nodes {
+		switch m.Status {
+		case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+			continue
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 // runQuery fires one scenario query against the live engine and logs
