@@ -145,8 +145,13 @@ func mkReq(text string) *model.LLMRequest {
 func TestFollowUp_UnambiguousMatch_Routes(t *testing.T) {
 	f := newFixture(t)
 	ids := f.registerAndStart(t, []string{"mission one", "mission two"})
+	// Address the classifier reply by the real session id (string)
+	// rather than the prompt-list index — the prompt order depends on
+	// map iteration in promoteRunning + RunningMissions and would
+	// otherwise make this test flake against runtime randomisation.
+	target := ids[1]
 
-	clfRouter, _ := scriptClassifier(clfJSON(2, 0.9))
+	clfRouter, _ := scriptClassifier(clfJSON(target, 0.9))
 	r := followup.New(followup.Config{
 		Executor: f.exec, Router: clfRouter, Enabled: true,
 	})
@@ -158,7 +163,7 @@ func TestFollowUp_UnambiguousMatch_Routes(t *testing.T) {
 	assert.Contains(t, resp.Content.Parts[0].Text, "Relaying")
 
 	// Target session has the new user_message.
-	evs, err := f.sess.GetEvents(context.Background(), ids[1])
+	evs, err := f.sess.GetEvents(context.Background(), target)
 	require.NoError(t, err)
 	var seenRoute bool
 	for _, ev := range evs {
@@ -175,7 +180,7 @@ func TestFollowUp_UnambiguousMatch_Routes(t *testing.T) {
 	for _, ev := range coordEvs {
 		if ev.EventType == sessstore.EventTypeUserFollowupRouted {
 			seenAudit = true
-			assert.Equal(t, ids[1], ev.Metadata["target_mission_id"])
+			assert.Equal(t, target, ev.Metadata["target_mission_id"])
 		}
 	}
 	assert.True(t, seenAudit, "coordinator has user_followup_routed audit row")
