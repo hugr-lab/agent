@@ -124,7 +124,7 @@ func (s *RemoteStore) exchange(ctx context.Context, expiredToken string) (string
 	if err != nil {
 		return "", 0, fmt.Errorf("token exchange: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check status before decoding — non-200 may return HTML, not JSON.
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

@@ -221,7 +221,7 @@ func (s *OIDCStore) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("OIDC login successful", "name", s.cfg.Name)
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, `<html><body><h2>Login successful</h2><p>You can close this tab.</p></body></html>`)
+	_, _ = fmt.Fprint(w, `<html><body><h2>Login successful</h2><p>You can close this tab.</p></body></html>`)
 }
 
 // PromptLogin prints the login URL and optionally opens the browser.
@@ -284,7 +284,7 @@ func (s *OIDCStore) tokenRequest(ctx context.Context, data url.Values) (*oidcTok
 	if err != nil {
 		return nil, fmt.Errorf("oidc token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result oidcTokenResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
@@ -310,7 +310,7 @@ func discover(ctx context.Context, issuerURL string) (*oidcDiscovery, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("discovery returned %d", resp.StatusCode)

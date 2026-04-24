@@ -223,7 +223,7 @@ func verifyLocalEmbedding(ctx context.Context, service *hugr.Service, embedding 
 		return fmt.Errorf(
 			"embedder unreachable: model=%q probe=%w. "+
 				"Check the `embedding` data source URL in config.yaml "+
-				"(EMBED_LOCAL_URL for local mode) and that the model is loaded.",
+				"(EMBED_LOCAL_URL for local mode) and that the model is loaded",
 			embedding.Model, err)
 	}
 	if dim != embedding.Dimension {
@@ -270,7 +270,7 @@ func pinEmbedderModel(ctx context.Context, q types.Querier, model string) error 
 			"embedder model mismatch: hub.db provisioned with %q, "+
 				"cfg.Embedding.Model is %q. "+
 				"Either revert the config to the original model, or "+
-				"re-provision hub.db to re-embed existing memory + transcript rows.",
+				"re-provision hub.db to re-embed existing memory + transcript rows",
 			existing, model)
 	}
 	return nil

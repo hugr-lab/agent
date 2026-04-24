@@ -206,10 +206,7 @@ func (m *fileManager) Load(_ context.Context, name string) (*Skill, error) {
 	var refs []SkillRefMeta
 	if len(fm.References) > 0 {
 		for _, r := range fm.References {
-			refs = append(refs, SkillRefMeta{
-				Name:        r.Name,
-				Description: r.Description,
-			})
+			refs = append(refs, SkillRefMeta(r))
 		}
 	} else {
 		refs, _ = listRefs(filepath.Join(skillDir, "references"))

@@ -499,20 +499,6 @@ func (m *Manager) AppendEvent(ctx context.Context, cur adksession.Session, ev *a
 // internal
 // ------------------------------------------------------------
 
-func (m *Manager) newLocal(id, app, user string) *Session {
-	return newSession(sessionConfig{
-		id:           id,
-		appName:      app,
-		userID:       user,
-		manager:      m,
-		skills:       m.skills,
-		tools:        m.tools,
-		hub:          m.hub,
-		logger:       m.logger,
-		constitution: m.constitution,
-	})
-}
-
 // newLocalWithLinkage builds a Session with spec-006 sub-agent linkage
 // (session_type, parent_session_id, spawned_from_event_id, mission,
 // fork_after_seq) populated. Used by Create when the caller supplied

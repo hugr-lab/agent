@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"iter"
 	"log/slog"
 	"sort"
 	"strings"
@@ -766,7 +765,7 @@ func RunOnce(ctx context.Context, llm model.LLM, prompt string) (string, int, er
 	}
 	var out strings.Builder
 	var totalTokens int
-	var seq iter.Seq2[*model.LLMResponse, error] = llm.GenerateContent(ctx, req, false)
+	seq := llm.GenerateContent(ctx, req, false)
 	for resp, err := range seq {
 		if err != nil {
 			return "", totalTokens, err

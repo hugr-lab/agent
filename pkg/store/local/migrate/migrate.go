@@ -133,7 +133,7 @@ func provision(dbType db.ScriptDBType, cfg Config, target string) error {
 	if err != nil {
 		return fmt.Errorf("migrate: open for create: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	rendered, err := db.ParseSQLScriptTemplate(dbType, initSchemaTmpl, SchemaParams{
 		VectorSize:  cfg.VectorSize,
@@ -183,7 +183,7 @@ func upgrade(dbType db.ScriptDBType, cfg Config, target string) error {
 	if err != nil {
 		return fmt.Errorf("migrate: open: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var version string
 	if err := conn.QueryRow(
@@ -294,14 +294,14 @@ func dbExists(dbType db.ScriptDBType, path string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		return true, c.Ping()
 	case db.SDBPostgres:
 		c, err := sql.Open("pgx", path)
 		if err != nil {
 			return false, err
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		err = c.Ping()
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "3D000" {
@@ -332,10 +332,10 @@ func openForCreate(dbType db.ScriptDBType, path string) (*sql.DB, error) {
 			return nil, err
 		}
 		if _, err := bootstrap.Exec(`CREATE DATABASE "` + targetDB + `"`); err != nil {
-			bootstrap.Close()
+			_ = bootstrap.Close()
 			return nil, fmt.Errorf("create database %s: %w", targetDB, err)
 		}
-		bootstrap.Close()
+		_ = bootstrap.Close()
 		return sql.Open("pgx", path)
 	default:
 		return nil, fmt.Errorf("migrate: unsupported db type %q", dbType)

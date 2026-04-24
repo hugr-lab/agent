@@ -122,20 +122,7 @@ func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {
 	}
 	out := make([]Record, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Record{
-			ID:                 r.ID,
-			AgentID:            r.AgentID,
-			OwnerID:            r.OwnerID,
-			ParentSessionID:    r.ParentSessionID,
-			ForkAfterSeq:       r.ForkAfterSeq,
-			SessionType:        r.SessionType,
-			SpawnedFromEventID: r.SpawnedFromEventID,
-			Status:             r.Status,
-			Mission:            r.Mission,
-			Metadata:           r.Metadata,
-			CreatedAt:          r.CreatedAt,
-			UpdatedAt:          r.UpdatedAt,
-		})
+		out = append(out, Record(r))
 	}
 	return out, nil
 }
@@ -273,20 +260,7 @@ func (c *Client) GetEvents(ctx context.Context, sessionID string) ([]Event, erro
 	}
 	out := make([]Event, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Event{
-			ID:         r.ID,
-			SessionID:  r.SessionID,
-			AgentID:    r.AgentID,
-			Seq:        r.Seq,
-			EventType:  r.EventType,
-			Author:     r.Author,
-			Content:    r.Content,
-			ToolName:   r.ToolName,
-			ToolArgs:   r.ToolArgs,
-			ToolResult: r.ToolResult,
-			Metadata:   r.Metadata,
-			CreatedAt:  r.CreatedAt,
-		})
+		out = append(out, Event(r))
 	}
 	return out, nil
 }
@@ -381,20 +355,7 @@ func (c *Client) ListChildSessions(ctx context.Context, parentSessionID string) 
 	}
 	out := make([]Record, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Record{
-			ID:                 r.ID,
-			AgentID:            r.AgentID,
-			OwnerID:            r.OwnerID,
-			ParentSessionID:    r.ParentSessionID,
-			ForkAfterSeq:       r.ForkAfterSeq,
-			SessionType:        r.SessionType,
-			SpawnedFromEventID: r.SpawnedFromEventID,
-			Status:             r.Status,
-			Mission:            r.Mission,
-			Metadata:           r.Metadata,
-			CreatedAt:          r.CreatedAt,
-			UpdatedAt:          r.UpdatedAt,
-		})
+		out = append(out, Record(r))
 	}
 	return out, nil
 }
@@ -570,14 +531,7 @@ func (c *Client) ListNotes(ctx context.Context, sessionID string) ([]Note, error
 	}
 	out := make([]Note, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, Note{
-			ID:              r.ID,
-			AgentID:         r.AgentID,
-			SessionID:       r.SessionID,
-			AuthorSessionID: r.AuthorSessionID,
-			Content:         r.Content,
-			CreatedAt:       r.CreatedAt,
-		})
+		out = append(out, Note(r))
 	}
 	return out, nil
 }
