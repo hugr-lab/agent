@@ -81,7 +81,7 @@ func New(cfg Config) *Router {
 	if cfg.Threshold <= 0 {
 		cfg.Threshold = defaultThreshold
 	}
-	if cfg.TieBand < 0 {
+	if cfg.TieBand <= 0 {
 		cfg.TieBand = defaultTieBand
 	}
 	if cfg.Timeout <= 0 {
