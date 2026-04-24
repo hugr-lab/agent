@@ -1,0 +1,47 @@
+name: dispatch
+session_id: scenario-dispatch-1
+
+steps:
+  - say: |
+      You have a specialist exposed as the tool `subagent_domain_summariser`.
+      Delegate the task "summarise the meaning of 'context engineering'
+      in one sentence" to it via that tool. Do not answer yourself — dispatch
+      first, then return whatever summary the specialist gives back.
+
+    queries:
+      - name: subagent_sessions
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | map({id, status, parent: .parent_session_id, skill: .metadata.skill, role: .metadata.role, mission})") {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata mission }
+              }}}
+            }
+          }
+
+      - name: coord_dispatch_pair
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.tool_name == \"subagent_domain_summariser\")) | group_by(.event_type) | map({event_type: .[0].event_type, count: length})") {
+              hub { db { agent {
+                session_events(filter: {session_id: {eq: $sid}}) {
+                  seq event_type tool_name
+                }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-dispatch-1
+
+      - name: child_events
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.session_events | map({seq, type: .event_type, author, tool: .tool_name, has_embedding: (.embedding != null)})") {
+              hub { db { agent {
+                session_events(
+                  filter: {event_type: {neq: "skill_loaded"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type author tool_name }
+              }}}
+            }
+          }

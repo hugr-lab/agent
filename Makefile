@@ -1,4 +1,4 @@
-.PHONY: build run run-devui run-console test vet lint check clean
+.PHONY: build run run-devui run-console test vet lint check clean scenario
 
 BINARY := bin/hugen
 TAGS   := duckdb_arrow
@@ -34,3 +34,18 @@ check: vet test
 
 clean:
 	rm -rf bin/
+
+# Run data-driven scenarios against the live LM Studio / hub configured
+# via .env (LLM_LOCAL_URL + EMBED_LOCAL_URL required). Scenarios live
+# in tests/scenarios/<name>/scenario.yaml.
+#
+# Usage:
+#   make scenario              # runs every scenario
+#   make scenario name=simple  # runs just tests/scenarios/simple
+#
+# Each run leaves hub.db under tests/scenarios/.data/<name>-<ts>/
+# memory.db for manual DuckDB inspection.
+scenario:
+	CGO_CFLAGS="$(CGO_DEBUG_FLAGS)" SCENARIO_NAME="$(name)" \
+	go test -tags='$(TAGS) scenario' -count=1 -v -timeout=600s \
+		-run "TestScenarios" ./tests/scenarios/...

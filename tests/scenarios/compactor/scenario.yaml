@@ -1,0 +1,60 @@
+name: compactor
+session_id: scenario-compactor-1
+config_override: config_override.yaml
+
+# The override shrinks the context window to 6k and the compaction
+# threshold to 0.3 (so ~1800 tokens trigger a compaction cycle). After
+# three to four meaty turns the Compactor callback should fold the
+# oldest group into a compaction_summary event.
+
+steps:
+  - say: |
+      Remember this project brief. Project Aurora is a distributed
+      event-ingest pipeline that handles 2M events per second across
+      12 data centres. Pipelines are written in Go and deploy via
+      Kubernetes operators; storage is a mix of Kafka, ClickHouse and
+      object store tiers. Latency targets: p99 under 120ms end-to-end.
+      Key risk area: back-pressure propagation from slow consumers.
+      Confirm with a one-line acknowledgement.
+
+  - say: |
+      For Project Aurora, summarise the architectural trade-offs of
+      using Kafka as the primary ingestion buffer vs a managed
+      cloud pub/sub system. Two short paragraphs.
+
+  - say: |
+      For Project Aurora, list three specific failure modes of the
+      back-pressure path and how Kubernetes operators could surface
+      early signals for each. Keep it concrete.
+
+  - say: |
+      For Project Aurora, propose a rollout plan for the new
+      ClickHouse query gateway: phases, rollback criteria, and
+      what tests gate each phase.
+    queries:
+      - name: compaction_events
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.event_type == \"compaction_summary\")) | {count: length, seqs: map(.seq)}") {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "compaction_summary"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type content }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-compactor-1
+
+      - name: event_count_by_type
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | group_by(.event_type) | map({type: .[0].event_type, n: length})") {
+              hub { db { agent {
+                session_events(filter: {session_id: {eq: $sid}}) { event_type }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-compactor-1

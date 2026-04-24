@@ -1,0 +1,8 @@
+llm:
+  context_windows:
+    gemma4-26b: 6000
+    gemma-small: 6000
+  default_budget: 6000
+
+chatcontext:
+  compaction_threshold: 0.3

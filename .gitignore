@@ -35,3 +35,6 @@ __debug_bin*
 
 # Runtime data (local DuckDB + WAL)
 .data/
+
+# Scenario-runner leftover hub.db / engine.db files (one per run)
+tests/scenarios/.data/
