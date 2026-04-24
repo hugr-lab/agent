@@ -62,7 +62,7 @@ local_db:
       path: '${LLM_LOCAL_URL}?model="qwen/qwen3.6-27b"&max_tokens=8096&timeout=2m'
     - name: gemma-small
       type: llm-openai
-      path: '${LLM_LOCAL_URL}?model="google/gemma-4-e2b-it"&timeout=120s'
+      path: '${LLM_LOCAL_URL}?model="gemma-4-e4b-it"&timeout=120s'
     - name: gemma-embedding
       type: embedding
       path: '${EMBED_LOCAL_URL}?model="text-embedding-embeddinggemma-300m-qat"&timeout=30s'
@@ -92,11 +92,10 @@ llm:
     default: gemma4-26b
     tool_calling: gemma4-26b
     # Spec 007 follow-up routing. Short pairwise "is this a
-    # refinement?" decision; production should route this to a
-    # cheaper model (gemma-small / qwen), but local LM Studio
-    # identifiers vary — scenarios keep it on gemma4-26b and lean
-    # on classifier_timeout below for margin under load.
-    classification: gemma4-26b
+    # refinement?" decision — routed to the cheap 4B gemma so the
+    # classifier call doesn't block on gemma4-26b while it's
+    # driving a sub-agent.
+    classification: gemma-small
   context_windows:
     gemma4-26b: 50000
     qwen3-27b: 100000
