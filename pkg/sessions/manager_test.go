@@ -499,3 +499,92 @@ func TestManager_Create_SubAgentNoSkillCatalog(t *testing.T) {
 	assert.Contains(t, subSnap.Prompt, "## Skill: _both",
 		"sub-agent snapshot must still include the parent skill body")
 }
+
+// TestSession_LoadSkill_RegistersSubAgentTools locks spec 006 T105:
+// loading a skill with a non-empty `sub_agents:` block registers
+// one tool.Tool per role under `skill/<name>/_subagents`; UnloadSkill
+// drops the provider. Builder invocation checked via a spy closure
+// so we don't need a real Dispatcher wired into the harness.
+func TestSession_LoadSkill_RegistersSubAgentTools(t *testing.T) {
+	// Skills dir with one skill declaring two sub_agents.
+	dir := t.TempDir()
+	sd := filepath.Join(dir, "worker")
+	require.NoError(t, os.MkdirAll(sd, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sd, "SKILL.md"), []byte(`---
+name: worker
+version: "0.1.0"
+description: A worker skill
+sub_agents:
+  summariser:
+    description: Summarises stuff.
+    instructions: |
+      Short summary, no fluff.
+  planner:
+    description: Plans stuff.
+    instructions: |
+      Make a plan.
+---
+body`), 0o644))
+
+	sk, err := skills.NewFileManager(dir)
+	require.NoError(t, err)
+	tm := tools.New(nil)
+
+	// Spy: collect (skill, role) pairs the builder was invoked with.
+	var calls []string
+	m, err := New(Config{
+		Skills:       sk,
+		Tools:        tm,
+		Constitution: "C",
+		SubAgentToolBuilder: func(skillName, role string, spec skills.SubAgentSpec) tool.Tool {
+			calls = append(calls, skillName+"/"+role)
+			return &stubSubAgentTool{name: "subagent_" + skillName + "_" + role, spec: spec}
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	resp, err := m.Create(ctx, &adksession.CreateRequest{AppName: "a", UserID: "u", SessionID: "s1"})
+	require.NoError(t, err)
+	sess := resp.Session.(*Session)
+
+	require.NoError(t, sess.LoadSkill(ctx, "worker"))
+
+	// Builder fired once per role.
+	assert.ElementsMatch(t,
+		[]string{"worker/summariser", "worker/planner"},
+		calls,
+		"builder must be called once per sub_agent role")
+
+	// Provider registered under the canonical name.
+	provTools, err := tm.ProviderTools("skill/worker/_subagents")
+	require.NoError(t, err, "skill/worker/_subagents provider must exist after LoadSkill")
+	names := toolNames(provTools)
+	assert.ElementsMatch(t,
+		[]string{"subagent_worker_summariser", "subagent_worker_planner"},
+		names,
+		"provider must expose one tool per role")
+
+	// Tools are visible through the session snapshot (Inject path).
+	snap := sess.Snapshot()
+	snapNames := toolNames(snap.Tools)
+	assert.Contains(t, snapNames, "subagent_worker_summariser")
+	assert.Contains(t, snapNames, "subagent_worker_planner")
+
+	// UnloadSkill detaches the provider.
+	require.NoError(t, sess.UnloadSkill(ctx, "worker"))
+	_, err = tm.ProviderTools("skill/worker/_subagents")
+	assert.Error(t, err, "provider must be removed on UnloadSkill")
+}
+
+// stubSubAgentTool is a minimal tool.Tool for
+// TestSession_LoadSkill_RegistersSubAgentTools — we only care that
+// Session registers it, not that it runs.
+type stubSubAgentTool struct {
+	name string
+	spec skills.SubAgentSpec
+}
+
+func (t *stubSubAgentTool) Name() string        { return t.name }
+func (t *stubSubAgentTool) Description() string { return t.spec.Description }
+func (t *stubSubAgentTool) IsLongRunning() bool { return true }

@@ -325,13 +325,111 @@ func (d *Dispatcher) Run(
 	return cap(result, spec.SummaryMaxTok), nil
 }
 
-// ToolFor returns an ADK tool.Tool exposing this dispatcher to the
-// coordinator's LLM under the canonical name
-// `subagent_<skill>_<role>`. Phase-3 follow-up wires the registration
-// into the skill load path; tests construct it directly.
+// ToolFor returns a tool.Tool that dispatches one specific
+// (skill, role) sub-agent — name `subagent_<skill>_<role>`. The
+// coordinator's LLM calls it with just `{task, notes}` because
+// skill/role are baked in at registration time.
 //
-// Parked behind a TODO until Phase-3 T103 ships the tool.Tool wrapper.
-// The Run method above carries the full dispatch contract today.
+// Registered per-session by Session.LoadSkill when the loaded skill
+// declares non-empty SubAgents. Complementary to the generic
+// subagent_dispatch(skill, role, task) tool: the specific tools are
+// easier for cheap models to use correctly (fewer required args,
+// name self-documents the specialist), while the generic one stays
+// for cases where the LLM needs the full catalogue.
+func (d *Dispatcher) ToolFor(skillName, role string, spec skills.SubAgentSpec) tool.Tool {
+	return &subagentRoleTool{
+		dispatcher: d,
+		skill:      skillName,
+		role:       role,
+		spec:       spec,
+	}
+}
+
+// subagentRoleTool is a Dispatcher-backed tool.Tool for one
+// (skill, role). Unlike subagentDispatchTool it's prebound — the
+// coordinator's LLM only supplies {task, notes}.
+type subagentRoleTool struct {
+	dispatcher *Dispatcher
+	skill      string
+	role       string
+	spec       skills.SubAgentSpec
+}
+
+func (t *subagentRoleTool) Name() string {
+	return fmt.Sprintf("subagent_%s_%s", t.skill, t.role)
+}
+
+func (t *subagentRoleTool) Description() string {
+	desc := strings.TrimSpace(t.spec.Description)
+	if desc == "" {
+		desc = fmt.Sprintf("Dispatches a narrow task to the %q specialist declared by the %q skill.", t.role, t.skill)
+	}
+	return desc + " Returns {summary, child_session, turns_used, truncated, error}. Specialist runs in an isolated session; the coordinator only sees the capped summary."
+}
+
+func (t *subagentRoleTool) IsLongRunning() bool { return true }
+
+func (t *subagentRoleTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"task": {
+					Type:        "STRING",
+					Description: "Natural-language task description for the specialist. Keep it focused — a specialist runs one mission.",
+				},
+				"notes": {
+					Type:        "STRING",
+					Description: "Optional extra context or constraints (e.g. filters, timeframe).",
+				},
+			},
+			Required: []string{"task"},
+		},
+	}
+}
+
+func (t *subagentRoleTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *subagentRoleTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: unexpected args: %T", t.Name(), args)
+	}
+	task, _ := m["task"].(string)
+	notes, _ := m["notes"].(string)
+	if strings.TrimSpace(task) == "" {
+		return nil, fmt.Errorf("%s: task is required", t.Name())
+	}
+	parent, err := sessionForTool(ctx, t.dispatcher.sessions)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", t.Name(), err)
+	}
+	// The skill is guaranteed active because this tool is only
+	// registered on sessions that loaded the declaring skill.
+	// (Session.dropBindings drops the provider on UnloadSkill.)
+	res, runErr := t.dispatcher.Run(
+		ctx,
+		parent.ID(), "",
+		t.skill, t.role,
+		t.spec,
+		task, notes,
+	)
+	if runErr != nil {
+		return nil, fmt.Errorf("%s: %w", t.Name(), runErr)
+	}
+	return map[string]any{
+		"summary":       res.Summary,
+		"child_session": res.ChildSessionID,
+		"turns_used":    res.TurnsUsed,
+		"truncated":     res.Truncated,
+		"error":         res.Error,
+	}, nil
+}
 
 // markChild updates the child session's status. Best-effort — a hub
 // write failure here doesn't bubble up to the coordinator; the row's

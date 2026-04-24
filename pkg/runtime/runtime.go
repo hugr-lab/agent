@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/tool"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -263,16 +264,36 @@ func Build(
 	rt.Classifier = cls
 	rt.Scheduler = sched
 
+	// Dispatcher has to be built BEFORE sessions.New because the
+	// SessionManager needs its ToolFor callback at construction time
+	// (per-skill subagent_* tools are bound during LoadSkill, including
+	// autoload at Create — spec 006 T105). Dispatcher in turn takes a
+	// *sessions.Manager, so we use the two-step pattern from chatcontext:
+	// construct dispatcher below against sessionMgr via AttachSessions.
+	//
+	// To keep the wiring linear, we use a closure indirection: the
+	// SubAgentToolBuilder captured here reads a pointer that's filled
+	// after dispatcher construction. Nil-safe — if anyone dispatches
+	// before AttachSessions on dispatcher, the closure is a no-op.
+	var dispatcherRef *hugen.Dispatcher
+	subagentToolBuilder := func(skillName, role string, spec skills.SubAgentSpec) tool.Tool {
+		if dispatcherRef == nil {
+			return nil
+		}
+		return dispatcherRef.ToolFor(skillName, role, spec)
+	}
+
 	sessionMgr, err := sessions.New(sessions.Config{
-		Skills:       skillsMgr,
-		Tools:        toolsMgr,
-		Sessions:     sessHub,
-		AgentID:      cfg.Identity.ID,
-		AgentShort:   cfg.Identity.ShortID,
-		Constitution: constitution,
-		Logger:       logger,
-		Classifier:   cls,
-		Scheduler:    mem.Reviewer(),
+		Skills:              skillsMgr,
+		Tools:               toolsMgr,
+		Sessions:            sessHub,
+		AgentID:             cfg.Identity.ID,
+		AgentShort:          cfg.Identity.ShortID,
+		Constitution:        constitution,
+		Logger:              logger,
+		Classifier:          cls,
+		Scheduler:           mem.Reviewer(),
+		SubAgentToolBuilder: subagentToolBuilder,
 		InlineBuilder: func(name, endpoint string, a sessions.InlineProviderAuth, lg *slog.Logger) (tools.Provider, error) {
 			return tools.NewMCPProvider(tools.MCPSpec{
 				Name:            name,
@@ -322,6 +343,11 @@ func Build(
 		closeOnErr()
 		return nil, fmt.Errorf("runtime: build sub-agent dispatcher: %w", err)
 	}
+	// Back-fill the closure captured by sessions.Config.SubAgentToolBuilder
+	// now that dispatcher exists. Any skill loaded from this point on
+	// (autoload fires lazily on first Create) gets subagent_<skill>_<role>
+	// tools wired straight through Dispatcher.ToolFor.
+	dispatcherRef = dispatcher
 	subagentSvc, err := hugen.NewSubAgentService(dispatcher, sessionMgr, skillsMgr)
 	if err != nil {
 		closeOnErr()

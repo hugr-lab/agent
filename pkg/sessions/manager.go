@@ -14,6 +14,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tools"
 	"github.com/hugr-lab/query-engine/types"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 )
 
 // Config bundles Manager dependencies.
@@ -52,6 +53,20 @@ type Config struct {
 	// delegating to providers.Build with type=mcp. May be nil — skills
 	// that only use named providers work without it.
 	InlineBuilder InlineProviderFactory
+
+	// SubAgentToolBuilder is an optional callback consulted by
+	// Session.LoadSkill whenever a loaded skill declares non-empty
+	// sub_agents. When set, the manager registers one tool.Tool per
+	// role (name pattern `subagent_<skill>_<role>`) under a new
+	// tools.Manager provider `skill/<skill>/_subagents`. On UnloadSkill
+	// the provider is dropped alongside the skill's regular bindings.
+	// Wired from runtime.Build so pkg/sessions stays agent-agnostic
+	// (Dispatcher lives in pkg/agent; importing it here would cycle).
+	//
+	// Nil is fine: the generic `subagent_dispatch(skill, role, task)`
+	// tool still ships via the `_system` skill autoload and covers the
+	// same use case.
+	SubAgentToolBuilder SubAgentToolBuilder
 
 	// Classifier persists conversation events (user_message / llm_response
 	// / tool_call / tool_result) asynchronously via hub.AppendEvent.
@@ -93,6 +108,11 @@ type InlineProviderAuth struct {
 // tools.Manager under the provided synthetic name.
 type InlineProviderFactory func(name, endpoint string, auth InlineProviderAuth, logger *slog.Logger) (tools.Provider, error)
 
+// SubAgentToolBuilder returns a tool.Tool wrapping a (skill, role)
+// dispatch. Set on Config from runtime.Build; pkg/sessions invokes it
+// without importing pkg/agent (cycle-avoidance).
+type SubAgentToolBuilder func(skillName, role string, spec skills.SubAgentSpec) tool.Tool
+
 // Manager owns runtime sessions. Implements adksession.Service and
 // *Manager. System tools no longer live here — they
 // come from a tools.Provider declared in config.yaml (`type: system`,
@@ -106,9 +126,10 @@ type Manager struct {
 	hub           *sessstore.Client
 	constitution  string
 	logger        *slog.Logger
-	inlineBuilder InlineProviderFactory
-	classifier    *Classifier
-	scheduler     ReviewQueuer
+	inlineBuilder    InlineProviderFactory
+	subagentBuilder  SubAgentToolBuilder
+	classifier       *Classifier
+	scheduler        ReviewQueuer
 }
 
 var (
@@ -140,9 +161,10 @@ func New(cfg Config) (*Manager, error) {
 		hub:           hub,
 		constitution:  cfg.Constitution,
 		logger:        cfg.Logger,
-		inlineBuilder: cfg.InlineBuilder,
-		classifier:    cfg.Classifier,
-		scheduler:     cfg.Scheduler,
+		inlineBuilder:   cfg.InlineBuilder,
+		subagentBuilder: cfg.SubAgentToolBuilder,
+		classifier:      cfg.Classifier,
+		scheduler:       cfg.Scheduler,
 	}, nil
 }
 

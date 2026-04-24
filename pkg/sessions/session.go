@@ -294,6 +294,12 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 		}
 	}
 
+	// Spec 006 T105: if the skill declares sub_agents and the manager
+	// wired a builder, register one specific tool per role under a
+	// dedicated provider. Non-fatal — a builder miss still leaves the
+	// generic `subagent_dispatch` tool available via `_system`.
+	s.bindSubAgents(sk)
+
 	s.state.RecordSkillVersion(sk.Name, sk.Version)
 
 	// Phase 2: commit to state + hub. AddSkill is idempotent — if the
@@ -679,23 +685,32 @@ func (s *Session) buildTools(ctx context.Context) []tool.Tool {
 
 	var out []tool.Tool
 	seen := map[string]bool{}
+	collect := func(providerKey string) {
+		ts, err := s.tools.ProviderTools(providerKey)
+		if err != nil {
+			return
+		}
+		for _, t := range ts {
+			if seen[t.Name()] {
+				continue
+			}
+			seen[t.Name()] = true
+			out = append(out, t)
+		}
+	}
 	for _, skillName := range active {
 		sk, err := s.skills.Load(ctx, skillName)
 		if err != nil {
 			continue
 		}
 		for _, spec := range sk.Providers {
-			ts, err := s.tools.ProviderTools(bindingName(skillName, spec.Name))
-			if err != nil {
-				continue
-			}
-			for _, t := range ts {
-				if seen[t.Name()] {
-					continue
-				}
-				seen[t.Name()] = true
-				out = append(out, t)
-			}
+			collect(bindingName(skillName, spec.Name))
+		}
+		// Spec 006 T105: pick up the per-skill _subagents provider
+		// when the skill declares sub_agents. Registration happens in
+		// bindSubAgents; no-op when absent.
+		if len(sk.SubAgents) > 0 {
+			collect(subagentsName(sk.Name))
 		}
 	}
 	return out
@@ -749,6 +764,9 @@ func (s *Session) dropBindings(ctx context.Context, name string) {
 			_ = s.tools.RemoveProvider(inlineName(name, spec.Name))
 		}
 	}
+	// T105: also drop the per-skill sub-agent tool provider. Safe to
+	// call unconditionally — RemoveProvider on a missing key is a no-op.
+	_ = s.tools.RemoveProvider(subagentsName(name))
 }
 
 // sweepSkillBindings removes every registered provider whose name
@@ -798,6 +816,7 @@ func (s *Session) restoreSkill(ctx context.Context, name string) {
 		}
 	}
 	s.state.RecordSkillVersion(sk.Name, sk.Version)
+	s.bindSubAgents(sk)
 	s.touch()
 }
 
@@ -840,6 +859,58 @@ func bindingName(skill, providerName string) string {
 func inlineName(skill, providerName string) string {
 	return fmt.Sprintf("skill-inline/%s/%s", skill, providerName)
 }
+
+// subagentsName is the tools.Manager key for the per-skill
+// sub-agent tool provider registered when a skill declares
+// non-empty sub_agents. One entry per role lives inside it
+// (Name: subagent_<skill>_<role>). Detached by dropBindings.
+func subagentsName(skill string) string {
+	return fmt.Sprintf("skill/%s/_subagents", skill)
+}
+
+// bindSubAgents registers one tool.Tool per role declared under the
+// skill's `sub_agents:` frontmatter block (name
+// `subagent_<skill>_<role>`, args {task, notes?}). Provider name
+// `skill/<skill>/_subagents` mirrors the provider-binding convention
+// so dropBindings / sweepSkillBindings clean it up on unload /
+// version-drift automatically.
+//
+// No-op when the manager didn't supply a builder (pkg/sessions stays
+// agent-agnostic) or when the skill has no sub_agents.
+func (s *Session) bindSubAgents(sk *skills.Skill) {
+	if s == nil || s.manager == nil || s.manager.subagentBuilder == nil {
+		return
+	}
+	if len(sk.SubAgents) == 0 {
+		return
+	}
+	tools := make([]tool.Tool, 0, len(sk.SubAgents))
+	for role, spec := range sk.SubAgents {
+		t := s.manager.subagentBuilder(sk.Name, role, spec)
+		if t == nil {
+			continue
+		}
+		tools = append(tools, t)
+	}
+	if len(tools) == 0 {
+		return
+	}
+	s.tools.AddProvider(subagentsProvider{
+		name:  subagentsName(sk.Name),
+		tools: tools,
+	})
+}
+
+// subagentsProvider is a minimal tools.Provider wrapping a static
+// tool list — purely a sessions-package construct so we don't need
+// a public constructor in pkg/tools for this one call site.
+type subagentsProvider struct {
+	name  string
+	tools []tool.Tool
+}
+
+func (p subagentsProvider) Name() string       { return p.name }
+func (p subagentsProvider) Tools() []tool.Tool { return p.tools }
 
 // Touch is for tests/infra that need to flag activity.
 func (s *Session) Touch() { s.touch() }
