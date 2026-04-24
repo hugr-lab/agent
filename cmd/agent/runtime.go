@@ -398,9 +398,17 @@ func buildRuntime(
 	}
 	rt.sessions = sessionMgr
 
+	// Classifier funnels writes through the manager so its async
+	// inserts share the per-session write lock with sync writers
+	// (LoadSkill, compactor). Without this, classifier and
+	// LoadSkill routinely race on max(seq)+1.
+	cls.AttachManager(sessionMgr)
+
 	// SessionManager is up — ChatContext can now own its Service
 	// (which needs sessions.Manager for the intro tool) and we can
-	// build the memory tools provider the same way.
+	// build the memory tools provider the same way. AttachSessions
+	// also wires the compactor's transcript writer through the
+	// manager for the same lock.
 	if err := chat.AttachSessions(sessionMgr); err != nil {
 		rt.close(logger)
 		return nil, fmt.Errorf("attach chatcontext service: %w", err)

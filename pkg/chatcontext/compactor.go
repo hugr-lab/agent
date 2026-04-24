@@ -33,6 +33,10 @@ import (
 type Compactor struct {
 	memory   *memstore.Client
 	sessions *sessstore.Client
+	// writer routes `compaction` transcript events through the
+	// per-session write lock. nil in tests that spin up the compactor
+	// with a bare hub client — those fall back to direct hub writes.
+	writer   transcriptWriter
 	router   *models.Router
 	tokens   *models.TokenEstimator
 	// intent picks which model's context budget the compactor sizes
@@ -180,8 +184,8 @@ func (c *Compactor) before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 	newContents = append(newContents, tail...)
 	req.Contents = newContents
 
-	if sid != "" && c.sessions != nil {
-		_, _ = c.sessions.AppendEvent(ctx, sessstore.Event{
+	if sid != "" {
+		ev := sessstore.Event{
 			SessionID: sid,
 			EventType: "compaction",
 			Author:    "system",
@@ -190,9 +194,31 @@ func (c *Compactor) before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 				"original_turns": len(oldest),
 				"summary_tokens": c.tokens.Estimate(summary),
 			},
-		})
+		}
+		switch {
+		case c.writer != nil:
+			_, _ = c.writer.PublishHubEvent(ctx, sid, ev, "")
+		case c.sessions != nil:
+			_, _ = c.sessions.AppendEvent(ctx, ev)
+		}
 	}
 	return nil, nil
+}
+
+// transcriptWriter is the narrow interface the compactor needs to
+// hand a transcript event to whoever owns per-session write
+// serialisation. Implemented by *sessions.Manager via PublishHubEvent.
+type transcriptWriter interface {
+	PublishHubEvent(ctx context.Context, sessionID string, ev sessstore.Event, summary string) (string, error)
+}
+
+// AttachWriter wires the compactor to a per-session-locking writer
+// (typically *sessions.Manager). Called once at runtime startup via
+// ChatContext.AttachSessions.
+func (c *Compactor) AttachWriter(w transcriptWriter) {
+	if c.writer == nil {
+		c.writer = w
+	}
 }
 
 // splitAtSafeBoundary walks backwards from idx until it lands at a

@@ -25,7 +25,12 @@ type Options struct {
 	EmbedderEnabled bool
 }
 
-// Client is the agent-scoped hub.db sessions API.
+// Client is the agent-scoped hub.db sessions API. Stateless: every
+// method hits the wire without per-session bookkeeping. Ordering of
+// appends on a single session is the Session's responsibility (it
+// serialises writers through its own mutex + wraps AppendEvent);
+// callers that don't go through Session take the fallback direct
+// path and accept best-effort seq allocation.
 type Client struct {
 	querier         types.Querier
 	agentID         string

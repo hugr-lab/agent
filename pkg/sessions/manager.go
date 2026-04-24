@@ -186,6 +186,29 @@ func (a skillsAccessor) Session(id string) (skills.Session, error) {
 	return a.m.Session(id)
 }
 
+// PublishHubEvent writes a transcript row for the given session with
+// per-session write serialisation. The name is deliberately distinct
+// from `AppendEvent` on the adksession.Service interface (which takes
+// *session.Event, not sessstore.Event) — callers without direct
+// access to a *Session (classifier, compactor) reach the serialised
+// write path through here. When the session isn't tracked in-memory
+// (GC'd, pre-restore) falls back to a direct hub write.
+func (m *Manager) PublishHubEvent(ctx context.Context, sessionID string, ev sessstore.Event, summary string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("session: PublishHubEvent: session_id required")
+	}
+	if sess, err := m.Session(sessionID); err == nil && sess != nil {
+		return sess.AppendEvent(ctx, ev, summary)
+	}
+	if m.hub == nil {
+		return "", nil
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
+	}
+	return m.hub.AppendEventWithSummary(ctx, ev, summary)
+}
+
 // Cleanup removes sessions inactive for more than olderThan.
 func (m *Manager) Cleanup(olderThan time.Duration) int {
 	cutoff := time.Now().Add(-olderThan)

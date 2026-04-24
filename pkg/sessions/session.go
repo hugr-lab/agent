@@ -57,6 +57,14 @@ type Session struct {
 	notesCache   string    // rendered "## Session notes" block
 	notesCacheAt time.Time // render time for 10s TTL
 
+	// writeMu serialises every (nextSeq → INSERT) pair on this
+	// session's transcript. Synchronous writers (LoadSkill,
+	// UnloadSkill, compactor events through Manager.AppendEvent) and
+	// the async classifier all funnel through AppendEvent, which
+	// holds this lock across the store call — so a write can't read a
+	// stale max(seq) while another is still committing.
+	writeMu sync.Mutex
+
 	// Materialization: sessions restored from hub.db on startup are
 	// created as stubs (no events, no bindings). The first Get hits
 	// ensureMaterialized, which replays skill state + conversation
@@ -314,7 +322,7 @@ func (s *Session) LoadSkill(ctx context.Context, name string) error {
 			Content:   sk.Name,
 			Metadata:  jsonToMap(meta),
 		}
-		if _, err := s.hub.AppendEvent(ctx, ev); err != nil {
+		if _, err := s.AppendEvent(ctx, ev, ""); err != nil {
 			s.logger.Warn("session: append skill_loaded", "err", err, "session", s.id)
 		}
 	}
@@ -342,7 +350,7 @@ func (s *Session) UnloadSkill(ctx context.Context, name string) error {
 			Content:   name,
 			Metadata:  jsonToMap(meta),
 		}
-		if _, err := s.hub.AppendEvent(ctx, ev); err != nil {
+		if _, err := s.AppendEvent(ctx, ev, ""); err != nil {
 			s.logger.Warn("session: append skill_unloaded", "err", err, "session", s.id)
 		}
 	}
@@ -623,6 +631,28 @@ func (s *Session) metadataSkillRole() (string, string) {
 		return "", ""
 	}
 	return s.metaSkill, s.metaRole
+}
+
+// AppendEvent writes a transcript event to the hub for this session
+// with mutual exclusion against every other writer on the same
+// session. Call this from any path (synchronous skill events,
+// compactor, classifier-facing Manager.AppendEvent) that would
+// otherwise race on nextSeq. Empty SessionID on ev is filled in from
+// the session's own id.
+//
+// Returns (id, nil) on success and ("", err) on store failure. When
+// the session has no hub (test harness), returns ("", nil) without
+// touching the lock.
+func (s *Session) AppendEvent(ctx context.Context, ev sessstore.Event, summary string) (string, error) {
+	if s == nil || s.hub == nil {
+		return "", nil
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = s.id
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.hub.AppendEventWithSummary(ctx, ev, summary)
 }
 
 // InvalidateNotesCache clears the session's notes-render cache so the

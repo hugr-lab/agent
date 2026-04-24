@@ -17,10 +17,15 @@
 -- 1. sessions: discriminator + spawn-event linkage
 -- ----------------------------------------------------------------------------
 
-ALTER TABLE sessions ADD COLUMN session_type VARCHAR NOT NULL DEFAULT 'root';
+-- DuckDB rejects `ADD COLUMN ... NOT NULL DEFAULT` as a compound
+-- constraint on ALTER, so we add with DEFAULT only, backfill existing
+-- rows, and promote to NOT NULL separately on engines that support it.
+ALTER TABLE sessions ADD COLUMN session_type VARCHAR DEFAULT 'root';
+UPDATE sessions SET session_type = 'root' WHERE session_type IS NULL;
 ALTER TABLE sessions ADD COLUMN spawned_from_event_id VARCHAR;
 
 {{ if isPostgres }}
+ALTER TABLE sessions ALTER COLUMN session_type SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_type
     ON sessions (agent_id, session_type);
 {{ end }}

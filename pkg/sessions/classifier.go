@@ -41,12 +41,28 @@ type Classifier struct {
 	hub    *sessstore.Client
 	logger *slog.Logger
 
+	// manager is an optional *Manager reference used to route
+	// transcript writes through Session.AppendEvent so the per-session
+	// write lock serialises classifier events against synchronous
+	// writers (LoadSkill, compactor). Left nil in standalone tests —
+	// writes go direct to hub with best-effort seq.
+	manager *Manager
+
 	ch      chan Envelope
 	dropped atomic.Int64
 
 	stopped chan struct{}
 	stopMu  sync.Mutex
 	closed  bool
+}
+
+// AttachManager wires the Classifier to the session manager so
+// transcript writes take the per-session lock. Safe to call once,
+// after construction, before Run(ctx). No-op when called repeatedly.
+func (c *Classifier) AttachManager(m *Manager) {
+	if c.manager == nil {
+		c.manager = m
+	}
 }
 
 // NewClassifier constructs a Classifier with the given channel capacity.
@@ -151,15 +167,14 @@ func (c *Classifier) Run(ctx context.Context) {
 // lands, and a WARN log points a backfill worker at the gap.
 func (c *Classifier) handle(ctx context.Context, env Envelope) {
 	rows := Classify(env)
-	if c.hub == nil {
+	if c.hub == nil && c.manager == nil {
 		return
 	}
 	for _, row := range rows {
 		row.SessionID = env.SessionID
 		summary := buildSummary(row)
-		eventID, err := c.hub.AppendEventWithSummary(ctx, row, summary)
+		_, err := c.appendEvent(ctx, env.SessionID, row, summary)
 		if err == nil {
-			_ = eventID
 			continue
 		}
 		if summary == "" {
@@ -171,11 +186,21 @@ func (c *Classifier) handle(ctx context.Context, env Envelope) {
 		// WITHOUT summary so the row still persists with NULL embedding.
 		c.logger.Warn("classifier: embed insert failed, retrying without summary",
 			"session", env.SessionID, "type", row.EventType, "err", err)
-		if _, err := c.hub.AppendEvent(ctx, row); err != nil {
+		if _, err := c.appendEvent(ctx, env.SessionID, row, ""); err != nil {
 			c.logger.Warn("classifier: AppendEvent retry failed",
 				"session", env.SessionID, "type", row.EventType, "err", err)
 		}
 	}
+}
+
+// appendEvent routes the write through Manager (session-scoped lock)
+// when available, and falls back to the bare hub client otherwise.
+// Tests that construct a Classifier with hub only keep the plain path.
+func (c *Classifier) appendEvent(ctx context.Context, sessionID string, row sessstore.Event, summary string) (string, error) {
+	if c.manager != nil {
+		return c.manager.PublishHubEvent(ctx, sessionID, row, summary)
+	}
+	return c.hub.AppendEventWithSummary(ctx, row, summary)
 }
 
 // buildSummary returns the text Hugr should embed for the given row,

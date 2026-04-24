@@ -105,8 +105,10 @@ func New(opts Options) (*ChatContext, error) {
 	}, nil
 }
 
-// AttachSessions builds the Service against the given SessionManager.
-// Must be called before Provider() is used.
+// AttachSessions builds the Service against the given SessionManager
+// and wires the compactor's transcript writer to the same manager so
+// compaction events take the per-session write lock (spec 006 seq-
+// race fix). Must be called before Provider() is used.
 func (c *ChatContext) AttachSessions(sm *sessions.Manager) error {
 	svc, err := NewService(c.querier, sm, ServiceOptions{
 		AgentID: c.agentID, AgentShort: c.agentShrt, Logger: c.logger,
@@ -116,6 +118,7 @@ func (c *ChatContext) AttachSessions(sm *sessions.Manager) error {
 		return fmt.Errorf("chatcontext: build service: %w", err)
 	}
 	c.service = svc
+	c.compactor.AttachWriter(sm)
 	return nil
 }
 
