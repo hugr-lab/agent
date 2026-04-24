@@ -134,12 +134,15 @@ func (c *Client) Search(ctx context.Context, query string, opts SearchOpts) ([]S
 	var q string
 	if c.embedderEnabled && len(query) >= 3 {
 		vars["query"] = query
+		// `semantic:` already orders by similarity under the hood —
+		// no explicit order_by needed. The `distance` alias on
+		// `_distance_to_query(query:)` surfaces the per-row score
+		// back to Go for display / thresholding.
 		q = `query ($filter: hub_db_memory_items_filter, $limit: Int!, $query: String!) {
 				hub { db { agent {
 					memory_items(
 						filter: $filter
 						semantic: { query: $query, limit: $limit }
-						order_by: [{field: "_distance_to_query", direction: ASC, args: {query: $query}}]
 					) {
 						id agent_id content category volatility score source
 						valid_from valid_to created_at
