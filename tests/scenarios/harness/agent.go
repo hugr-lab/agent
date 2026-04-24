@@ -5,11 +5,17 @@
 // the wiring matches production exactly — no drift between cmd/agent
 // and the harness.
 //
-// A scenario is a directory containing scenario.yaml (+ optional
-// config_override.yaml). The runner drives user messages + GraphQL
-// queries defined in the YAML and leaves hub.db on disk for manual
-// DuckDB inspection. Nothing here is a strict assertion; LLM output
-// is non-deterministic, so scenarios are observational.
+// Config sourcing: harness loads tests/scenarios/config.yaml (shape
+// mirrors the production config.yaml but stripped to what tests need)
+// through the same pkg/config.LoadLocal path production uses, after
+// sourcing tests/scenarios/.test.env into the process environment.
+// That file is gitignored — copy .test.env.example and fill in your
+// LM Studio / remote Hugr URLs. Per-scenario overrides stack on top
+// via <scenarioDir>/config_override.yaml (llm.* + chatcontext.* today).
+//
+// A scenario run is observational — no hard assertions. Output goes
+// to t.Log and hub.db is preserved under tests/scenarios/.data/<name>
+// -<ts>/ for follow-up DuckDB inspection.
 package harness
 
 import (
@@ -26,26 +32,20 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/hugr-lab/hugen/internal/testenv"
-	"github.com/hugr-lab/hugen/pkg/chatcontext"
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/models"
 	hugenruntime "github.com/hugr-lab/hugen/pkg/runtime"
-	"github.com/hugr-lab/hugen/pkg/skills"
-	"github.com/hugr-lab/hugen/pkg/store/local"
-	"github.com/hugr-lab/hugen/pkg/tools"
 
 	qetypes "github.com/hugr-lab/query-engine/types"
 )
 
 // Opts tunes Setup. ScenarioName is the only required field.
 type Opts struct {
-	// ScenarioName names the hub.db artefact + the harness session id
+	// ScenarioName names the hub.db artefact + the default session id
 	// prefix. Required.
 	ScenarioName string
 
-	// ConfigOverridePath, when non-empty, is a yaml file whose contents
-	// are overlaid onto the baseline scenario config (see
-	// applyConfigOverride). Typically <scenarioDir>/config_override.yaml.
+	// ConfigOverridePath is a yaml file overlaid onto the baseline
+	// config after it loads (typically <scenarioDir>/config_override.yaml).
 	ConfigOverridePath string
 
 	// PersistDB, when non-empty, overrides the hub.db artefact path.
@@ -56,7 +56,7 @@ type Opts struct {
 
 // Agent bundles everything scenarios need.
 type Agent struct {
-	Runtime *hugenruntime.Runtime // Agent / Sessions / Engine / Tools / Skills
+	Runtime *hugenruntime.Runtime
 	AgentID string
 	AppName string
 	UserID  string
@@ -68,8 +68,8 @@ type Agent struct {
 // Engine is a shortcut for callers that just want the Querier.
 func (a *Agent) Engine() qetypes.Querier { return a.Runtime.Querier }
 
-// Close delegates to Runtime.Close. Already registered as t.Cleanup by
-// Setup; exposed so scenarios can call it early if needed.
+// Close delegates to Runtime.Close. Already wired as t.Cleanup by
+// Setup — exposed for early-close callers.
 func (a *Agent) Close() { a.Runtime.Close() }
 
 // Setup builds the runtime and wires t.Cleanup. Skips when required
@@ -78,8 +78,13 @@ func Setup(t *testing.T, o Opts) *Agent {
 	t.Helper()
 	require.NotEmpty(t, o.ScenarioName, "harness.Setup: ScenarioName required")
 
-	llmURL := testenv.EnvOrSkip(t, "LLM_LOCAL_URL")
-	embedURL := testenv.EnvOrSkip(t, "EMBED_LOCAL_URL")
+	// .test.env is the source of secrets / URLs for scenarios. Falls
+	// back to repo-root .env when absent (useful locally — CI should
+	// use a dedicated .test.env).
+	loadTestEnv(t)
+
+	testenv.EnvOrSkip(t, "LLM_LOCAL_URL")
+	testenv.EnvOrSkip(t, "EMBED_LOCAL_URL")
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -103,15 +108,36 @@ func Setup(t *testing.T, o Opts) *Agent {
 
 	skillsPath := buildSkillsDir(t, fixtureSkillsPath())
 
-	// --- Baseline scenario config ---
-	cfg := baselineConfig(skillsPath, dbPath, coreDBDir, llmURL, embedURL)
+	// --- Load tests/scenarios/config.yaml via the production path ---
+	boot, err := config.LoadBootstrap("") // .env already applied; skip re-read
+	require.NoError(t, err, "harness: bootstrap")
+
+	cfgPath := filepath.Join(scenariosRoot(), "config.yaml")
+	cfg, err := config.LoadLocal(cfgPath, boot)
+	require.NoError(t, err, "harness: load config %s", cfgPath)
+
+	// --- Override runtime-only fields the YAML can't know about ---
+	cfg.LocalDB.DB.Path = filepath.Join(coreDBDir, "engine.db")
+	cfg.LocalDB.DB.Settings.HomeDirectory = coreDBDir
+	cfg.LocalDB.MemoryPath = dbPath
+	cfg.Skills.Path = skillsPath
+	if !filepath.IsAbs(cfg.Agent.Constitution) {
+		cfg.Agent.Constitution = filepath.Join(repoRoot(), cfg.Agent.Constitution)
+	}
+	// Honour INTEGRATION_AGENT_MODEL for quick per-run model swaps.
+	if m := os.Getenv("INTEGRATION_AGENT_MODEL"); m != "" {
+		cfg.LLM.Model = m
+		if cfg.LLM.Routes != nil {
+			cfg.LLM.Routes["default"] = m
+		}
+	}
 
 	// --- Apply per-scenario override ---
 	if o.ConfigOverridePath != "" {
 		require.NoError(t, applyConfigOverride(cfg, o.ConfigOverridePath))
 	}
 
-	// --- Build ---
+	// --- Build runtime ---
 	ctx := context.Background()
 	rt, err := hugenruntime.Build(ctx, cfg, logger, hugenruntime.Options{})
 	require.NoError(t, err, "harness: runtime.Build")
@@ -135,81 +161,87 @@ func Setup(t *testing.T, o Opts) *Agent {
 	return a
 }
 
-// baselineConfig builds the minimal *config.Config used by every
-// scenario. Fields not overridden by a scenario's config_override.yaml
-// stay at these values.
-func baselineConfig(skillsPath, dbPath, coreDBDir, llmURL, embedURL string) *config.Config {
-	cfg := &config.Config{}
-	cfg.Identity = local.Identity{
-		ID:      "agt_ag01",
-		ShortID: "ag01",
-		Name:    "scenario-agent",
-		Type:    "hugr-data",
+// loadTestEnv prefers tests/scenarios/.test.env; falls back to the
+// repo-root .env (the default testenv.LoadDotEnv behaviour). Both are
+// optional — Setup's EnvOrSkip checks decide whether to run.
+func loadTestEnv(t *testing.T) {
+	t.Helper()
+	testEnv := filepath.Join(scenariosRoot(), ".test.env")
+	if data, err := os.ReadFile(testEnv); err == nil {
+		applyEnvFile(string(data))
+		return
 	}
-	cfg.Embedding = local.EmbeddingConfig{
-		Mode:      "local",
-		Model:     "gemma-embedding",
-		Dimension: 768,
-	}
-	cfg.LocalDBEnabled = true
-	cfg.LocalDB = local.Config{
-		DB: local.DBConfig{
-			Path: filepath.Join(coreDBDir, "engine.db"),
-			Settings: local.DBSettings{
-				MaxMemory:     4,
-				WorkerThreads: 2,
-				HomeDirectory: coreDBDir,
-				Timezone:      "UTC",
-			},
-		},
-		MemoryPath: dbPath,
-		Models: []local.ModelDef{
-			{
-				Name: "gemma4-26b",
-				Type: "llm-openai",
-				Path: llmURL + `?model="google/gemma-4-26b-a4b"&max_tokens=8096&thinking_budget=2048&timeout=10m`,
-			},
-			{
-				Name: "gemma-small",
-				Type: "llm-openai",
-				Path: llmURL + `?model="google/gemma-4-e2b-it"&timeout=120s`,
-			},
-			{
-				Name: "gemma-embedding",
-				Type: "embedding",
-				Path: embedURL + `?model="text-embedding-embeddinggemma-300m-qat"&timeout=30s`,
-			},
-		},
-	}
-	cfg.LLM = models.Config{
-		Model: "gemma4-26b",
-		Routes: map[string]string{
-			"default":      "gemma4-26b",
-			"tool_calling": "gemma4-26b",
-		},
-		ContextWindows: map[string]int{
-			"gemma4-26b":  50_000,
-			"gemma-small": 32_000,
-		},
-		DefaultBudget: 64_000,
-		MaxTokens:     8096,
-		Temperature:   0.4,
-	}
-	cfg.ChatContext = chatcontext.Config{CompactionThreshold: 0.7}
-	cfg.Skills = skills.Config{Path: skillsPath}
-	cfg.Agent.Constitution = filepath.Join(repoRoot(), "constitution", "base.md")
-	cfg.MCP = tools.MCPConfig{TTL: 60 * time.Second, FetchTimeout: 30 * time.Second}
-	return cfg
+	testenv.LoadDotEnv()
 }
 
-// configOverride is the subset of *config.Config fields a scenario is
-// allowed to override via config_override.yaml. Restricted on purpose
-// — the scenario shouldn't be re-declaring identity / paths / skills.
+// applyEnvFile mirrors internal/testenv.applyEnvFile but is inlined
+// here to avoid exporting it just for scenarios. Already-set vars
+// win over file-provided values so shell exports always take priority.
+func applyEnvFile(body string) {
+	for _, raw := range splitLines(body) {
+		line := trimSpace(raw)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		eq := indexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := trimSpace(line[:eq])
+		val := trimSpace(line[eq+1:])
+		if len(val) >= 2 {
+			first, last := val[0], val[len(val)-1]
+			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		if _, set := os.LookupEnv(key); set {
+			continue
+		}
+		_ = os.Setenv(key, val)
+	}
+}
+
+// --- tiny string helpers (avoid strings import bloat) ---
+func splitLines(s string) []string {
+	out := []string{}
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
+	}
+	return out
+}
+func trimSpace(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+// configOverride is the subset of *config.Config a scenario may
+// override via <scenarioDir>/config_override.yaml.
 type configOverride struct {
 	LLM *struct {
-		Model          *string         `yaml:"model"`
-		ContextWindows map[string]int  `yaml:"context_windows"`
-		DefaultBudget  *int            `yaml:"default_budget"`
+		Model          *string           `yaml:"model"`
+		ContextWindows map[string]int    `yaml:"context_windows"`
+		DefaultBudget  *int              `yaml:"default_budget"`
 		Routes         map[string]string `yaml:"routes"`
 	} `yaml:"llm"`
 	ChatContext *struct {
@@ -217,8 +249,6 @@ type configOverride struct {
 	} `yaml:"chatcontext"`
 }
 
-// applyConfigOverride overlays a scenario-level config_override.yaml
-// onto the already-built cfg.
 func applyConfigOverride(cfg *config.Config, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -235,16 +265,16 @@ func applyConfigOverride(cfg *config.Config, path string) error {
 		if ov.LLM.DefaultBudget != nil {
 			cfg.LLM.DefaultBudget = *ov.LLM.DefaultBudget
 		}
+		if cfg.LLM.ContextWindows == nil {
+			cfg.LLM.ContextWindows = map[string]int{}
+		}
 		for k, v := range ov.LLM.ContextWindows {
-			if cfg.LLM.ContextWindows == nil {
-				cfg.LLM.ContextWindows = map[string]int{}
-			}
 			cfg.LLM.ContextWindows[k] = v
 		}
+		if cfg.LLM.Routes == nil {
+			cfg.LLM.Routes = map[string]string{}
+		}
 		for k, v := range ov.LLM.Routes {
-			if cfg.LLM.Routes == nil {
-				cfg.LLM.Routes = map[string]string{}
-			}
 			cfg.LLM.Routes[k] = v
 		}
 	}
@@ -256,11 +286,13 @@ func applyConfigOverride(cfg *config.Config, path string) error {
 
 // --- path helpers ---
 
-func scenarioDataDir() string {
+func scenarioDataDir() string { return filepath.Join(scenariosRoot(), ".data") }
+
+func scenariosRoot() string {
 	if _, file, _, ok := runtime.Caller(0); ok {
-		return filepath.Join(filepath.Dir(filepath.Dir(file)), ".data")
+		return filepath.Dir(filepath.Dir(file)) // harness/ → scenarios/
 	}
-	return ".data/scenarios"
+	return "tests/scenarios"
 }
 
 func fixtureSkillsPath() string {
@@ -272,7 +304,7 @@ func fixtureSkillsPath() string {
 
 // buildSkillsDir creates a tmp skills dir seeded with the production
 // `_system` / `_memory` / `_context` skills + every subdir under the
-// fixture path. Keeps the fixture isolated from the live `skills/`
+// fixture path — keeps the fixture isolated from the live `skills/`
 // tree while still running on real system skills.
 func buildSkillsDir(t *testing.T, fixtureDir string) string {
 	t.Helper()

@@ -38,3 +38,6 @@ __debug_bin*
 
 # Scenario-runner leftover hub.db / engine.db files (one per run)
 tests/scenarios/.data/
+
+# Local test-env (copy from tests/scenarios/.test.env.example)
+tests/scenarios/.test.env
