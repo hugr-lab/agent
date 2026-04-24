@@ -1,13 +1,23 @@
 package missions
 
 import (
+	"context"
+
 	"google.golang.org/adk/tool"
 
 	"github.com/hugr-lab/hugen/pkg/missions/executor"
 	"github.com/hugr-lab/hugen/pkg/missions/planner"
 	"github.com/hugr-lab/hugen/pkg/sessions"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
 )
+
+// EventReader is the read-only event surface mission_sub_runs needs to
+// list a child mission's last N transcript rows. Satisfied by
+// *sessstore.Client in production.
+type EventReader interface {
+	GetEvents(ctx context.Context, sessionID string) ([]sessstore.Event, error)
+}
 
 // ServiceName is the tools.Manager provider key for the mission-graph
 // toolset. Skills that want mission_plan / mission_status declare
@@ -23,6 +33,7 @@ type Service struct {
 	executor *executor.Executor
 	sessions *sessions.Manager
 	skills   skills.Manager
+	events   EventReader
 
 	tools []tool.Tool
 }
@@ -33,6 +44,9 @@ type Config struct {
 	Executor *executor.Executor
 	Sessions *sessions.Manager
 	Skills   skills.Manager
+	// Events powers mission_sub_runs (last-N event listing). Optional;
+	// when nil the tool surfaces "event reader not configured".
+	Events EventReader
 }
 
 // NewService builds the mission-graph tools.Provider. Returned Tools
@@ -43,10 +57,13 @@ func NewService(cfg Config) *Service {
 		executor: cfg.Executor,
 		sessions: cfg.Sessions,
 		skills:   cfg.Skills,
+		events:   cfg.Events,
 	}
 	svc.tools = []tool.Tool{
 		&missionPlanTool{svc: svc},
 		&missionStatusTool{svc: svc},
+		&missionCancelTool{svc: svc},
+		&missionSubRunsTool{svc: svc},
 	}
 	return svc
 }

@@ -7,6 +7,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -238,6 +239,163 @@ func (e *Executor) OnFollowUp(
 			"coord", coordSessionID, "err", err)
 	}
 	return nil
+}
+
+// Cancel marks `missionID` abandoned and walks downstream to abandon
+// every dependent. Holds tickMu (full lock — waits) so a concurrent
+// Tick can't promote a dependent into running while the cascade is
+// being written.
+//
+// On the cancelled mission: if it was already running, its per-mission
+// ctx is cancelled (driver goroutine exits at next turn boundary) and
+// resultCh is dropped so drainTerminals won't double-emit a
+// mission_result. If the mission never started, the row is created
+// directly in terminal abandoned state.
+//
+// Returns ErrMissionNotFound when no DAG holds this id, and
+// ErrMissionTerminal when the mission is already in a terminal state
+// (with a wrapped status for the LLM envelope).
+func (e *Executor) Cancel(ctx context.Context, missionID string) (graph.CancelResult, error) {
+	e.tickMu.Lock()
+	defer e.tickMu.Unlock()
+
+	d, node := e.findNode(missionID)
+	if node == nil {
+		return graph.CancelResult{}, graph.ErrMissionNotFound
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	switch node.status {
+	case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+		return graph.CancelResult{}, fmt.Errorf("%w: %s is %s",
+			graph.ErrMissionTerminal, missionID, node.status)
+	}
+
+	reason := "cancelled by user"
+	e.abandonNode(ctx, node, reason)
+
+	var alsoAbandoned []string
+	queue := append([]string(nil), node.downstream...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		dep := d.missions[next]
+		if dep == nil {
+			continue
+		}
+		switch dep.status {
+		case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+			continue
+		}
+		e.abandonNode(ctx, dep, "upstream cancelled: "+missionID)
+		alsoAbandoned = append(alsoAbandoned, next)
+		queue = append(queue, dep.downstream...)
+	}
+
+	return graph.CancelResult{
+		Cancelled:     missionID,
+		AlsoAbandoned: alsoAbandoned,
+		Reason:        reason,
+	}, nil
+}
+
+// AbandonCoordinator fans out Cancel over every non-terminal mission
+// belonging to coordSessionID. Wired to SessionManager.OnSessionClose
+// so closing a coordinator drains any in-flight missions.
+//
+// Errors from a per-mission Cancel are logged but never propagated:
+// the cascade pass marks dependents terminal, so subsequent Cancels
+// silently no-op via ErrMissionTerminal.
+func (e *Executor) AbandonCoordinator(ctx context.Context, coordSessionID string) {
+	entry, ok := e.dags.Load(coordSessionID)
+	if !ok {
+		return
+	}
+	d := entry.(*dag)
+	d.mu.Lock()
+	var ids []string
+	for id, n := range d.missions {
+		switch n.status {
+		case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+			continue
+		default:
+			ids = append(ids, id)
+		}
+	}
+	d.mu.Unlock()
+	for _, id := range ids {
+		if _, err := e.Cancel(ctx, id); err != nil {
+			if errors.Is(err, graph.ErrMissionTerminal) {
+				continue
+			}
+			e.logger.WarnContext(ctx, "missions: abandon coordinator cancel",
+				"coord", coordSessionID, "id", id, "err", err)
+		}
+	}
+}
+
+// abandonNode is the per-node terminal write shared by Cancel and the
+// cascade walk. Caller MUST hold d.mu and tickMu. Idempotency
+// (already-terminal short-circuit) is the caller's responsibility.
+func (e *Executor) abandonNode(ctx context.Context, node *missionNode, reason string) {
+	node.status = graph.StatusAbandoned
+	node.terminated = time.Now()
+	node.reason = reason
+	if node.cancel != nil {
+		node.cancel()
+		node.cancel = nil
+	}
+	// Drop the result channel so drainTerminals won't double-emit when
+	// the dispatcher goroutine eventually publishes its own terminal
+	// result — the channel is buffered, the orphan write just drops.
+	node.resultCh = nil
+
+	if node.startedAt.IsZero() {
+		if err := e.store.RecordAbandoned(ctx,
+			node.id, node.coordID, node.coordID,
+			node.skill, node.role, node.task,
+			append([]string(nil), node.upstream...),
+			reason,
+		); err != nil {
+			e.logger.WarnContext(ctx, "missions: record abandoned on cancel",
+				"id", node.id, "err", err)
+		}
+	} else {
+		if err := e.store.MarkStatus(ctx, node.id, graph.StatusAbandoned); err != nil {
+			e.logger.WarnContext(ctx, "missions: mark abandoned on cancel",
+				"id", node.id, "err", err)
+		}
+	}
+	e.emitResult(ctx, node, missionResult{
+		status:    graph.StatusAbandoned,
+		errorMsg:  reason,
+		turnsUsed: node.turnsUsed,
+	})
+}
+
+// findNode locates a mission by id across every coordinator's DAG.
+// Returns (nil, nil) when no DAG holds this id. The returned dag's
+// mutex is NOT held — callers re-acquire it before mutating state.
+func (e *Executor) findNode(missionID string) (*dag, *missionNode) {
+	var (
+		foundD *dag
+		foundN *missionNode
+	)
+	e.dags.Range(func(_, v any) bool {
+		d := v.(*dag)
+		d.mu.Lock()
+		if n, ok := d.missions[missionID]; ok {
+			foundD = d
+			foundN = n
+			d.mu.Unlock()
+			return false
+		}
+		d.mu.Unlock()
+		return true
+	})
+	return foundD, foundN
 }
 
 // Tick reconciles every coordinator's DAG: drain terminal goroutines

@@ -86,6 +86,15 @@ delegate whenever the task has any domain depth.
 - One failed sub-run doesn't mean "retry automatically". Read the
   `mission_result` reason, decide: retry with amended task, try a
   different role, give up gracefully, or ask the user.
+- When the user changes their mind or a mission goes the wrong way,
+  call `mission_cancel(mission_id, reason)` — it abandons the named
+  mission and cascades the abandonment to every dependent in the
+  graph. Don't quietly ignore live work, and don't replan around it
+  without cancelling first.
+- Need to peek at what a specific mission is doing right now? Call
+  `mission_sub_runs(mission_id, limit?)` for the last few transcript
+  events of that child session — useful before deciding whether to
+  cancel, retry, or wait. Read-only; doesn't pollute your context.
 
 ## Communication
 

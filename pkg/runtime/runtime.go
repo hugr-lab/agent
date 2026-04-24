@@ -386,12 +386,20 @@ func Build(
 		Executor: missionsExec,
 		Sessions: sessionMgr,
 		Skills:   skillsMgr,
+		Events:   sessHub,
 	})
 	toolsMgr.AddProvider(missionsSvc)
 	rt.Missions = missionsExec
 	// Drop cached plans when the coordinator session closes so a
 	// restarted conversation never serves stale DAG ids.
 	sessionMgr.OnSessionClose(missionsPlanner.OnCoordinatorClose)
+	// Cancel + abandon every still-running mission when its coordinator
+	// closes — FR-011. Hook receives no ctx, so the cascade runs on a
+	// fresh background ctx; never blocks the close goroutine for long
+	// since Cancel only walks the in-memory DAG + writes terminal rows.
+	sessionMgr.OnSessionClose(func(coordID string) {
+		missionsExec.AbandonCoordinator(context.Background(), coordID)
+	})
 
 	// Drive the scheduler every 2s — the Executor reconciles its
 	// in-memory DAGs + promotes ready missions to running + drains

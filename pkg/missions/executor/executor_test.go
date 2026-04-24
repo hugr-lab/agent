@@ -4,6 +4,7 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -431,6 +432,141 @@ func TestExecutor_ResultSummaryEmbedded(t *testing.T) {
 		}
 	}
 	t.Fatal("no agent_result event seen")
+}
+
+func TestExecutor_Cancel_AbandonsDependents(t *testing.T) {
+	f := newFixture(t, 4)
+	plan := graph.PlanResult{
+		Missions: []graph.PlannerMission{
+			{ID: 1, Skill: "x", Role: "a", Task: "upstream"},
+			{ID: 2, Skill: "x", Role: "b", Task: "middle"},
+			{ID: 3, Skill: "x", Role: "c", Task: "leaf"},
+		},
+		Edges: []graph.PlannerEdge{
+			{From: 1, To: 2},
+			{From: 2, To: 3},
+		},
+	}
+	plan = f.insertPlan(t, plan)
+
+	ctx := context.Background()
+	f.exec.Tick(ctx)
+	started := f.driver.WaitStarted(t, 1)
+	require.Equal(t, plan.ChildIDs[1], started[0].ChildSessionID)
+	f.driver.AssertNoMoreStarts(t, 50*time.Millisecond)
+
+	// Complete A so B is promoted to running.
+	f.releaseAndTick(t, plan.ChildIDs[1], graph.DispatchResult{
+		Status: graph.StatusDone, Summary: "ok", TurnsUsed: 1,
+	})
+	startedB := f.driver.WaitStarted(t, 1)
+	require.Equal(t, plan.ChildIDs[2], startedB[0].ChildSessionID)
+
+	// Cancel B mid-flight; C never started because of the dependency.
+	res, err := f.exec.Cancel(ctx, plan.ChildIDs[2])
+	require.NoError(t, err)
+	assert.Equal(t, plan.ChildIDs[2], res.Cancelled)
+	assert.Equal(t, []string{plan.ChildIDs[3]}, res.AlsoAbandoned)
+	assert.Equal(t, "cancelled by user", res.Reason)
+
+	f.driver.AssertNoMoreStarts(t, 100*time.Millisecond)
+
+	ms, err := f.store.ListMissions(ctx, f.coord, "")
+	require.NoError(t, err)
+	byTask := map[string]graph.MissionRecord{}
+	for _, m := range ms {
+		byTask[m.Task] = m
+	}
+	assert.Equal(t, graph.StatusDone, byTask["upstream"].Status, "A untouched")
+	assert.Equal(t, graph.StatusAbandoned, byTask["middle"].Status, "B abandoned")
+	assert.Equal(t, graph.StatusAbandoned, byTask["leaf"].Status, "C abandoned (cascade)")
+
+	// Exactly one agent_result event per mission (no double-emit).
+	events, err := f.sess.GetEvents(ctx, f.coord)
+	require.NoError(t, err)
+	resultsByMission := map[string]int{}
+	for _, ev := range events {
+		if ev.EventType != sessstore.EventTypeAgentResult {
+			continue
+		}
+		mid, _ := ev.Metadata["mission_id"].(string)
+		resultsByMission[mid]++
+	}
+	assert.Equal(t, 1, resultsByMission[plan.ChildIDs[1]])
+	assert.Equal(t, 1, resultsByMission[plan.ChildIDs[2]])
+	assert.Equal(t, 1, resultsByMission[plan.ChildIDs[3]])
+}
+
+func TestExecutor_Cancel_AlreadyTerminal(t *testing.T) {
+	f := newFixture(t, 4)
+	plan := graph.PlanResult{
+		Missions: []graph.PlannerMission{{ID: 1, Skill: "x", Role: "y", Task: "t"}},
+	}
+	plan = f.insertPlan(t, plan)
+
+	ctx := context.Background()
+	f.exec.Tick(ctx)
+	f.driver.WaitStarted(t, 1)
+	f.releaseAndTick(t, plan.ChildIDs[1], graph.DispatchResult{
+		Status: graph.StatusDone, Summary: "done", TurnsUsed: 1,
+	})
+
+	_, err := f.exec.Cancel(ctx, plan.ChildIDs[1])
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, graph.ErrMissionTerminal))
+
+	// No additional agent_result row from the failed cancel attempt.
+	events, err := f.sess.GetEvents(ctx, f.coord)
+	require.NoError(t, err)
+	resultCount := 0
+	for _, ev := range events {
+		if ev.EventType == sessstore.EventTypeAgentResult {
+			resultCount++
+		}
+	}
+	assert.Equal(t, 1, resultCount)
+}
+
+func TestExecutor_Cancel_UnknownMission(t *testing.T) {
+	f := newFixture(t, 4)
+	_, err := f.exec.Cancel(context.Background(), "sub_does-not-exist")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, graph.ErrMissionNotFound))
+}
+
+func TestExecutor_AbandonCoordinator(t *testing.T) {
+	f := newFixture(t, 4)
+	plan := graph.PlanResult{
+		Missions: []graph.PlannerMission{
+			{ID: 1, Skill: "x", Role: "y", Task: "m1"},
+			{ID: 2, Skill: "x", Role: "y", Task: "m2"},
+			{ID: 3, Skill: "x", Role: "y", Task: "m3"},
+		},
+	}
+	plan = f.insertPlan(t, plan)
+
+	ctx := context.Background()
+	f.exec.Tick(ctx)
+	f.driver.WaitStarted(t, 3)
+
+	f.exec.AbandonCoordinator(ctx, f.coord)
+
+	ms, err := f.store.ListMissions(ctx, f.coord, "")
+	require.NoError(t, err)
+	require.Len(t, ms, 3)
+	for _, m := range ms {
+		assert.Equal(t, graph.StatusAbandoned, m.Status, "mission %s", m.Task)
+	}
+
+	events, err := f.sess.GetEvents(ctx, f.coord)
+	require.NoError(t, err)
+	resultCount := 0
+	for _, ev := range events {
+		if ev.EventType == sessstore.EventTypeAgentResult {
+			resultCount++
+		}
+	}
+	assert.Equal(t, 3, resultCount, "one agent_result per running mission")
 }
 
 func TestExecutor_ParallelMissionsConcurrent(t *testing.T) {

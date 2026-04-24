@@ -124,6 +124,16 @@ type DispatchResult struct {
 	Error        string
 }
 
+// CancelResult is what Executor.Cancel returns to the mission_cancel
+// tool: the directly-cancelled mission, the cascade of dependents that
+// got abandoned as a consequence (in BFS order), and the reason copy
+// surfaced to the LLM envelope.
+type CancelResult struct {
+	Cancelled     string
+	AlsoAbandoned []string
+	Reason        string
+}
+
 // Sentinel errors surfaced by the planner / executor / store.
 var (
 	ErrPlanParse       = errors.New("missions: planner unparseable output")

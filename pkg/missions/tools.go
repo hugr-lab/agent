@@ -2,6 +2,7 @@ package missions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/missions/graph"
 	"github.com/hugr-lab/hugen/pkg/sessions"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	"github.com/hugr-lab/hugen/pkg/tools"
 )
@@ -143,6 +145,268 @@ func (t *missionStatusTool) Run(ctx tool.Context, _ any) (map[string]any, error)
 		"tree":     tree,
 		"rendered": renderTree(nodes),
 	}, nil
+}
+
+// ------------------------------------------------------------------
+// mission_cancel
+// ------------------------------------------------------------------
+
+type missionCancelTool struct {
+	svc *Service
+}
+
+func (t *missionCancelTool) Name() string { return "mission_cancel" }
+func (t *missionCancelTool) Description() string {
+	return "Cancels a running or pending mission identified by its session id. Walks the dependency " +
+		"graph and abandons every dependent. Use when the user changes their mind, when an in-flight " +
+		"mission is taking the wrong direction, or before announcing completion if a mission is stuck."
+}
+func (t *missionCancelTool) IsLongRunning() bool { return false }
+
+func (t *missionCancelTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"mission_id": {
+					Type:        "STRING",
+					Description: "The session id of the mission to cancel — appears as `mission_id` in mission_plan and mission_status output.",
+				},
+				"reason": {
+					Type:        "STRING",
+					Description: "Optional human-readable note shown alongside the cancellation in audit logs.",
+				},
+			},
+			Required: []string{"mission_id"},
+		},
+	}
+}
+
+func (t *missionCancelTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *missionCancelTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errorEnvelope("mission_cancel: unexpected args"), nil
+	}
+	missionID, _ := m["mission_id"].(string)
+	if strings.TrimSpace(missionID) == "" {
+		return errorEnvelope("mission_id is required"), nil
+	}
+
+	sess, err := sessionFromContext(ctx, t.svc.sessions)
+	if err != nil {
+		return errorEnvelope(err.Error()), nil
+	}
+
+	// Visibility gate: the mission must belong to this coordinator's
+	// DAG. Snapshot is the canonical source — Cancel itself doesn't
+	// scope by coord, so we enforce the boundary at the tool layer.
+	if !t.coordOwnsMission(ctx, sess.ID(), missionID) {
+		return errorEnvelope("mission not found"), nil
+	}
+
+	res, err := t.svc.executor.Cancel(ctx, missionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, graph.ErrMissionNotFound):
+			return errorEnvelope("mission not found"), nil
+		case errors.Is(err, graph.ErrMissionTerminal):
+			return errorEnvelope(err.Error()), nil
+		default:
+			return errorEnvelope("mission_cancel: " + err.Error()), nil
+		}
+	}
+
+	if res.AlsoAbandoned == nil {
+		res.AlsoAbandoned = []string{}
+	}
+	return map[string]any{
+		"cancelled":      res.Cancelled,
+		"also_abandoned": res.AlsoAbandoned,
+		"reason":         res.Reason,
+	}, nil
+}
+
+func (t *missionCancelTool) coordOwnsMission(ctx context.Context, coordID, missionID string) bool {
+	for _, n := range t.svc.executor.Snapshot(ctx, coordID) {
+		if n.ID == missionID {
+			return true
+		}
+	}
+	return false
+}
+
+// ------------------------------------------------------------------
+// mission_sub_runs
+// ------------------------------------------------------------------
+
+type missionSubRunsTool struct {
+	svc *Service
+}
+
+func (t *missionSubRunsTool) Name() string { return "mission_sub_runs" }
+func (t *missionSubRunsTool) Description() string {
+	return "Returns the last N transcript events of a mission's own session — tool calls + results " +
+		"summarised, llm_response excerpts. Use to answer 'what is mission X doing right now?' " +
+		"without dumping the full transcript into your own context."
+}
+func (t *missionSubRunsTool) IsLongRunning() bool { return false }
+
+func (t *missionSubRunsTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"mission_id": {
+					Type:        "STRING",
+					Description: "The mission's session id (from mission_plan / mission_status).",
+				},
+				"limit": {
+					Type:        "INTEGER",
+					Description: "How many trailing events to return. Default 20, maximum 50.",
+				},
+			},
+			Required: []string{"mission_id"},
+		},
+	}
+}
+
+func (t *missionSubRunsTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *missionSubRunsTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errorEnvelope("mission_sub_runs: unexpected args"), nil
+	}
+	missionID, _ := m["mission_id"].(string)
+	if strings.TrimSpace(missionID) == "" {
+		return errorEnvelope("mission_id is required"), nil
+	}
+
+	limit := subRunsLimit(m["limit"])
+
+	sess, err := sessionFromContext(ctx, t.svc.sessions)
+	if err != nil {
+		return errorEnvelope(err.Error()), nil
+	}
+	if !subRunsCoordOwns(ctx, t.svc.executor, sess.ID(), missionID) {
+		return errorEnvelope("mission not visible from this coordinator"), nil
+	}
+
+	if t.svc.events == nil {
+		return errorEnvelope("event reader not configured"), nil
+	}
+	events, err := t.svc.events.GetEvents(ctx, missionID)
+	if err != nil {
+		return errorEnvelope("failed to read mission events: " + err.Error()), nil
+	}
+
+	tailStart := len(events) - limit
+	truncated := tailStart > 0
+	if tailStart < 0 {
+		tailStart = 0
+	}
+	tail := events[tailStart:]
+
+	out := make([]map[string]any, 0, len(tail))
+	for _, ev := range tail {
+		entry := map[string]any{
+			"seq":        ev.Seq,
+			"event_type": ev.EventType,
+		}
+		switch ev.EventType {
+		case sessstore.EventTypeToolCall:
+			entry["tool_name"] = ev.ToolName
+			entry["args_digest"] = digestArgs(ev.ToolArgs, 200)
+		case sessstore.EventTypeToolResult:
+			entry["tool_name"] = ev.ToolName
+			entry["result_digest"] = digestString(ev.ToolResult, 200)
+		default:
+			entry["content"] = digestString(ev.Content, 500)
+		}
+		out = append(out, entry)
+	}
+
+	return map[string]any{
+		"mission_id": missionID,
+		"events":     out,
+		"truncated":  truncated,
+	}, nil
+}
+
+func subRunsLimit(raw any) int {
+	const (
+		def = 20
+		max = 50
+	)
+	switch v := raw.(type) {
+	case nil:
+		return def
+	case float64:
+		if v <= 0 {
+			return def
+		}
+		n := int(v)
+		if n > max {
+			return max
+		}
+		return n
+	case int:
+		if v <= 0 {
+			return def
+		}
+		if v > max {
+			return max
+		}
+		return v
+	default:
+		return def
+	}
+}
+
+func subRunsCoordOwns(ctx context.Context, exec missionSnapshotter, coordID, missionID string) bool {
+	for _, n := range exec.Snapshot(ctx, coordID) {
+		if n.ID == missionID {
+			return true
+		}
+	}
+	return false
+}
+
+// missionSnapshotter is the executor surface mission_sub_runs needs —
+// kept narrow so unit tests can swap a fake snapshot without spinning
+// up an Executor.
+type missionSnapshotter interface {
+	Snapshot(ctx context.Context, coordSessionID string) []graph.MissionRecord
+}
+
+func digestArgs(args map[string]any, n int) string {
+	if len(args) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return digestString(string(b), n)
+}
+
+func digestString(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ------------------------------------------------------------------
