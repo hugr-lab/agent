@@ -14,6 +14,18 @@
 # Module "agent" nests under: { hub { db { agent { ... } } } }
 
 # ============================================================
+# Version — schema + embedder identity pins
+# ============================================================
+
+"""Internal pin table — schema version + embedder model identity written at provisioning time (spec 006 §5d). Queried at startup to enforce the "embedder model cannot change under existing vectors" invariant."""
+type version @table(name: "version") {
+  """Pin key: 'schema' | 'embedder_model' | 'embedding_model' (legacy) | 'embedding_dim'"""
+  name:    String! @pk
+  """Pinned value for the key (schema version, model name, dim)"""
+  version: String!
+}
+
+# ============================================================
 # Agent types — configuration templates for agent behavior
 # ============================================================
 

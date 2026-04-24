@@ -50,16 +50,30 @@ llm:
   temperature: 0.4
   routes:
     default: gemma4-26b
-    # tool_calling: gpt-oss-20b
+    # tool_calling: qwen3-27b     # route a specific intent to a cheaper model
     # summarization: gemma-small
+  # Spec 006 phase 1: the compactor reads per-model context windows
+  # so conversations on a small-window model compact earlier than on
+  # a 1M-token one. Keys are the `models:` entry name; any unrouted
+  # intent falls back to `default_budget`, then to a hard 128k floor.
+  context_windows:
+    gemma4-26b:   128000
+    qwen3-27b:    100000    # LM Studio's qwen/qwen3.6-27b loaded with -c 100k
+    gemma-4-27b:   50000    # gemma-4-27b loaded with -c 50k
+    gpt-oss-20b:  128000
+    gemma-small:    8192
+  default_budget: 128000
 
 # ── Embedding ───────────────────────────────────────────────
-# model must match a `models:` entry of type embedding. dimension is
-# frozen at first run of data/memory.db — changing it later is fatal
-# (delete data/memory.db to re-create the agent).
+# REQUIRED external dependency (spec 006 §5d). Pinned at first run of
+# data/memory.db via the `version` table — changing the model later
+# without re-provisioning hub.db is a fatal startup error (existing
+# vectors belong to the original model's space). Change `dimension`
+# alongside `model`; a mismatch against a running embedder probe is
+# also fatal.
 embedding:
-  mode: local                # local | remote | "" (FTS only)
-  model: gemma-embedding     # empty = disabled, FTS fallback only
+  mode: local                # local | remote
+  model: gemma-embedding
   dimension: 768
 
 # ── Skills ─────────────────────────────────────────────────
@@ -88,6 +102,17 @@ models:
   - name: gemma-small
     type: llm-openai
     path: '${LLM_LOCAL_URL}?model=gemma-4-e2b-it&timeout=120s'
+
+  # Small-window local models — useful for specialist sub-agents
+  # (cheap-model routes via llm.routes.tool_calling). Make sure the
+  # context_windows entry above matches however you loaded the model
+  # in LM Studio / vLLM / Ollama.
+  - name: qwen3-27b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="qwen/qwen3.6-27b"&max_tokens=8192&timeout=10m'
+  - name: gemma-4-27b
+    type: llm-openai
+    path: '${LLM_LOCAL_URL}?model="google/gemma-4-27b"&max_tokens=8192&timeout=10m'
 
   # Local embedding (LM Studio — OpenAI-compatible /v1/embeddings)
   - name: gemma-embedding
