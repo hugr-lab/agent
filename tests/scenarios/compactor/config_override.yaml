@@ -1,13 +1,13 @@
 llm:
   context_windows:
-    gemma4-26b: 1500
-    gemma-small: 1500
-  default_budget: 1500
+    gemma4-26b: 6000
+    gemma-small: 6000
+  default_budget: 6000
 
-# Important: Compactor.usageRatio only sees req.Contents (user +
-# agent messages) — NOT the system prompt or skill bodies. Budget
-# 1500 / threshold 0.2 → triggers once ~300 tokens of user+agent
-# text accumulate + len(contents) > MinTurns=4 (i.e. from turn 3
-# onward if messages are long enough).
+# Threshold 0.3 of 6000 = 1800 tokens. The autoloaded _system /
+# _memory / _context skill bodies push every prompt past ~1500
+# tokens even on the first turn, and Compactor.usageRatio now sees
+# the system prompt (not just req.Contents), so the fold fires from
+# turn 1 forward once len(contents) > MinTurns (default 4).
 chatcontext:
-  compaction_threshold: 0.2
+  compaction_threshold: 0.3

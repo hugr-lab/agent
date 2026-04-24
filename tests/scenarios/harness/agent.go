@@ -86,8 +86,12 @@ func Setup(t *testing.T, o Opts) *Agent {
 	testenv.EnvOrSkip(t, "LLM_LOCAL_URL")
 	testenv.EnvOrSkip(t, "EMBED_LOCAL_URL")
 
+	logLevel := slog.LevelInfo
+	if os.Getenv("SCENARIO_DEBUG") == "1" {
+		logLevel = slog.LevelDebug
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	}))
 
 	// --- Paths ---

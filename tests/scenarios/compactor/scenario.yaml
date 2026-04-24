@@ -2,10 +2,10 @@ name: compactor
 session_id: scenario-compactor-1
 config_override: config_override.yaml
 
-# The override shrinks the context window to 6k and the compaction
-# threshold to 0.3 (so ~1800 tokens trigger a compaction cycle). After
+# The override shrinks the context window to 6k and the compaction_summary
+# threshold to 0.3 (so ~1800 tokens trigger a compaction_summary cycle). After
 # three to four meaty turns the Compactor callback should fold the
-# oldest group into a compaction event.
+# oldest group into a compaction_summary event.
 
 steps:
   - say: |
@@ -32,13 +32,13 @@ steps:
       ClickHouse query gateway: phases, rollback criteria, and
       what tests gate each phase.
     queries:
-      - name: compaction_events
+      - name: compaction_summary_events
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map(select(.event_type == \"compaction\")) | {count: length, seqs: map(.seq)}") {
+            jq(query: ".hub.db.agent.session_events | map(select(.event_type == \"compaction_summary\")) | {count: length, seqs: map(.seq)}") {
               hub { db { agent {
                 session_events(
-                  filter: {session_id: {eq: $sid}, event_type: {eq: "compaction"}}
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "compaction_summary"}}
                   order_by: [{field: "seq", direction: ASC}]
                 ) { seq event_type content }
               }}}

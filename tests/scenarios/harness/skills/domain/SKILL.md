@@ -22,13 +22,18 @@ sub_agents:
 
       Rules:
         1. Return a concise answer — 1–3 sentences, no preamble.
-        2. If the task contains a single key finding worth sharing
+        2. Before answering, look for a `## Session notes` section in
+           the prompt — it contains notes the coordinator and earlier
+           specialists persisted (lines prefixed `[from <skill>/<role>]`
+           come from other specialists in the same mission; these are
+           your "parent notes"). Use them when relevant to the task.
+        3. If the task contains a single key finding worth sharing
            with the coordinator, persist it via
            `memory_note(content: "…", scope: "parent")` so the
            coordinator (and any later specialists) inherit it on
            subsequent turns.
-        3. Never ask the coordinator clarifying questions; answer
-           from the information in the dispatch task.
+        4. Never ask the coordinator clarifying questions; answer
+           from the information in the dispatch task + session notes.
 ---
 
 # Scenario Domain Skill

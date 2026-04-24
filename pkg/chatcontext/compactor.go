@@ -187,7 +187,7 @@ func (c *Compactor) before(ctx adkagent.CallbackContext, req *model.LLMRequest) 
 	if sid != "" {
 		ev := sessstore.Event{
 			SessionID: sid,
-			EventType: "compaction",
+			EventType: sessstore.EventTypeCompactionSummary,
 			Author:    "system",
 			Content:   summary,
 			Metadata: map[string]any{
@@ -325,19 +325,30 @@ func (c *Compactor) summarise(ctx context.Context, oldest []*genai.Content, merg
 // back to the historical 128 000 floor when neither config nor the
 // router know the model (BudgetFor's last-resort branch).
 func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
-	var chars int
-	for _, ct := range req.Contents {
-		if ct == nil {
-			continue
+	chars := contentChars(req.Contents...)
+	// System prompt + tool definitions are billed against the same
+	// context window the model has to fit the prompt into, so size the
+	// compaction trigger against them too. On hugr-agent the system
+	// prompt routinely carries constitution + memory hint + autoloaded
+	// skill bodies — easily 1 500–5 000 tokens that the ratio used to
+	// miss entirely.
+	if req.Config != nil {
+		if req.Config.SystemInstruction != nil {
+			chars += contentChars(req.Config.SystemInstruction)
 		}
-		for _, p := range ct.Parts {
-			if p == nil {
+		// Tool schemas inflate the request too. Each function
+		// declaration's name + description + parameters round-trips as
+		// JSON on the wire; estimate via the text payload and bump a
+		// small flat overhead per tool for the parameters schema.
+		for _, t := range req.Config.Tools {
+			if t == nil {
 				continue
 			}
-			chars += len(p.Text)
-			if p.FunctionResponse != nil {
-				// Rough approximation: assume JSON payload ~ 2x text
-				chars += 2000
+			for _, fd := range t.FunctionDeclarations {
+				if fd == nil {
+					continue
+				}
+				chars += len(fd.Name) + len(fd.Description) + 200
 			}
 		}
 	}
@@ -350,6 +361,28 @@ func (c *Compactor) usageRatio(req *model.LLMRequest) float64 {
 		budget = 128_000
 	}
 	return float64(est) / float64(budget)
+}
+
+// contentChars sums the visible text chars across one or more
+// genai.Content values, treating FunctionResponse parts as ~2 KB
+// (rough approximation of the JSON payload once serialised).
+func contentChars(cts ...*genai.Content) int {
+	var n int
+	for _, ct := range cts {
+		if ct == nil {
+			continue
+		}
+		for _, p := range ct.Parts {
+			if p == nil {
+				continue
+			}
+			n += len(p.Text)
+			if p.FunctionResponse != nil {
+				n += 2000
+			}
+		}
+	}
+	return n
 }
 
 // Callback returns the compactor as a llmagent.BeforeModelCallback
