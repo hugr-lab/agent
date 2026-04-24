@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,17 +183,17 @@ func loadTestEnv(t *testing.T) {
 // here to avoid exporting it just for scenarios. Already-set vars
 // win over file-provided values so shell exports always take priority.
 func applyEnvFile(body string) {
-	for _, raw := range splitLines(body) {
-		line := trimSpace(raw)
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
 		if line == "" || line[0] == '#' {
 			continue
 		}
-		eq := indexByte(line, '=')
+		eq := strings.IndexByte(line, '=')
 		if eq <= 0 {
 			continue
 		}
-		key := trimSpace(line[:eq])
-		val := trimSpace(line[eq+1:])
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
 		if len(val) >= 2 {
 			first, last := val[0], val[len(val)-1]
 			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
@@ -204,39 +205,6 @@ func applyEnvFile(body string) {
 		}
 		_ = os.Setenv(key, val)
 	}
-}
-
-// --- tiny string helpers (avoid strings import bloat) ---
-func splitLines(s string) []string {
-	out := []string{}
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
-}
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r') {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
 }
 
 // configOverride is the subset of *config.Config a scenario may

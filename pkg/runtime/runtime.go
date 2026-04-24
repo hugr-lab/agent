@@ -264,17 +264,13 @@ func Build(
 	rt.Classifier = cls
 	rt.Scheduler = sched
 
-	// Dispatcher has to be built BEFORE sessions.New because the
-	// SessionManager needs its ToolFor callback at construction time
-	// (per-skill subagent_* tools are bound during LoadSkill, including
-	// autoload at Create — spec 006 T105). Dispatcher in turn takes a
-	// *sessions.Manager, so we use the two-step pattern from chatcontext:
-	// construct dispatcher below against sessionMgr via AttachSessions.
-	//
-	// To keep the wiring linear, we use a closure indirection: the
-	// SubAgentToolBuilder captured here reads a pointer that's filled
-	// after dispatcher construction. Nil-safe — if anyone dispatches
-	// before AttachSessions on dispatcher, the closure is a no-op.
+	// Circular dep resolved via a captured pointer: sessions.Manager
+	// needs a SubAgentToolBuilder at Config time (per-skill subagent_*
+	// tools bind during LoadSkill, including autoload-at-Create), and
+	// Dispatcher needs *sessions.Manager. Back-fill dispatcherRef
+	// after NewDispatcher below — until then the closure returns nil
+	// and Session.bindSubAgents skips (safe: the generic
+	// `subagent_dispatch` tool from `_system` still covers dispatch).
 	var dispatcherRef *hugen.Dispatcher
 	subagentToolBuilder := func(skillName, role string, spec skills.SubAgentSpec) tool.Tool {
 		if dispatcherRef == nil {
