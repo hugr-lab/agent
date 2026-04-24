@@ -272,12 +272,23 @@ func parseOutput(raw string, running []graph.MissionRecord) (string, float64, er
 // buildPrompt renders the instruction + mission list + user message
 // into a single string. Kept minimal — the decision is simple enough
 // that a short prompt beats verbose framing on tool-calling models.
+//
+// Note on the meta-action carve-out: a "refinement" is the user
+// telling the running mission to do its work differently. Asking the
+// coordinator to cancel/stop/abandon/pause/resume the mission, or to
+// inspect its state, is meta-action — that belongs to the coordinator
+// and must NOT be rerouted into the child transcript.
 func buildPrompt(userMsg string, running []graph.MissionRecord) string {
 	var b strings.Builder
 	b.WriteString("Classify whether the user message is a refinement of a specific running mission ")
-	b.WriteString("or a new request. Reply ONLY with JSON of the shape ")
+	b.WriteString("or a new request. A refinement narrows or redirects what the mission is currently doing ")
+	b.WriteString("(e.g. \"focus only on high-severity\", \"use the 2024 data\"). Meta-action requests ")
+	b.WriteString("about a mission — cancel, stop, abandon, pause, resume, or inspect — are NOT refinements ")
+	b.WriteString("and must return match=null so the coordinator can act on them itself.\n\n")
+	b.WriteString("Reply ONLY with JSON of the shape ")
 	b.WriteString("{\"match\": <integer id from the list or null>, \"confidence\": <0.0-1.0>}. ")
-	b.WriteString("Set `match` to null when unsure or when the message is clearly a new topic.\n\n")
+	b.WriteString("Set `match` to null when unsure, when the message is clearly a new topic, or when ")
+	b.WriteString("it is a meta-action (cancel / stop / status / etc).\n\n")
 	b.WriteString("Running missions:\n")
 	for i, m := range running {
 		fmt.Fprintf(&b, "  [%d] %s/%s: %s\n", i+1, m.Skill, m.Role, truncateForPrompt(m.Task, 160))
