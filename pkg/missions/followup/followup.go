@@ -40,16 +40,26 @@ const (
 	defaultTimeout   = 3 * time.Second
 )
 
+// defaultPromptHeader is the embedded fallback used when the runtime
+// hasn't supplied a PromptHeader (typically: unit tests with no
+// filesystem). Production loads the prose from
+// skills/_coordinator/followup-classifier.md so operators can edit
+// the classification rules without rebuilding.
+const defaultPromptHeader = `Classify whether the user message is a refinement of a specific running mission or a new request. A refinement narrows or redirects what the mission is currently doing (e.g. "focus only on high-severity", "use the 2024 data"). Meta-action requests about a mission — cancel, stop, abandon, pause, resume, or inspect — are NOT refinements and must return match=null so the coordinator can act on them itself.
+
+Reply ONLY with JSON of the shape {"match": <integer id from the list or null>, "confidence": <0.0-1.0>}. Set ` + "`match`" + ` to null when unsure, when the message is clearly a new topic, or when it is a meta-action (cancel / stop / status / etc).`
+
 // Router decides, per coordinator turn, whether to reroute the
 // incoming user message into a running mission.
 type Router struct {
-	executor  *executor.Executor
-	router    *models.Router
-	threshold float64
-	tieBand   float64
-	enabled   bool
-	timeout   time.Duration
-	logger    *slog.Logger
+	executor     *executor.Executor
+	router       *models.Router
+	threshold    float64
+	tieBand      float64
+	enabled      bool
+	timeout      time.Duration
+	logger       *slog.Logger
+	promptHeader string
 }
 
 // Config bundles the Router's construction dependencies.
@@ -69,6 +79,13 @@ type Config struct {
 	// Enabled flips routing on/off at runtime. Zero-value (false)
 	// means disabled — callers opt in from config.
 	Enabled bool
+
+	// PromptHeader is the operator-editable instruction body the
+	// classifier sees before the running-missions list and the user
+	// message. Empty falls back to defaultPromptHeader so unit tests
+	// stay filesystem-free; runtime loads it from
+	// skills/_coordinator/followup-classifier.md.
+	PromptHeader string
 }
 
 // New builds a Router. Nil Executor or nil Router → routing is
@@ -87,19 +104,25 @@ func New(cfg Config) *Router {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultTimeout
 	}
+	header := strings.TrimSpace(cfg.PromptHeader)
+	if header == "" {
+		header = defaultPromptHeader
+	}
 	cfg.Logger.Info("missions/followup: router built",
 		"enabled", cfg.Enabled,
 		"threshold", cfg.Threshold,
 		"tie_band", cfg.TieBand,
-		"timeout", cfg.Timeout)
+		"timeout", cfg.Timeout,
+		"prompt_header_loaded", cfg.PromptHeader != "")
 	return &Router{
-		executor:  cfg.Executor,
-		router:    cfg.Router,
-		threshold: cfg.Threshold,
-		tieBand:   cfg.TieBand,
-		enabled:   cfg.Enabled,
-		timeout:   cfg.Timeout,
-		logger:    cfg.Logger,
+		executor:     cfg.Executor,
+		router:       cfg.Router,
+		threshold:    cfg.Threshold,
+		tieBand:      cfg.TieBand,
+		enabled:      cfg.Enabled,
+		timeout:      cfg.Timeout,
+		logger:       cfg.Logger,
+		promptHeader: header,
 	}
 }
 
@@ -197,7 +220,7 @@ func (r *Router) classify(
 		return "", 0, fmt.Errorf("router returned nil classifier model")
 	}
 
-	prompt := buildPrompt(userMsg, running)
+	prompt := buildPrompt(r.promptHeader, userMsg, running)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{
 			Role:  "user",
@@ -269,27 +292,16 @@ func parseOutput(raw string, running []graph.MissionRecord) (string, float64, er
 	}
 }
 
-// buildPrompt renders the instruction + mission list + user message
-// into a single string. Kept minimal — the decision is simple enough
-// that a short prompt beats verbose framing on tool-calling models.
-//
-// Note on the meta-action carve-out: a "refinement" is the user
-// telling the running mission to do its work differently. Asking the
-// coordinator to cancel/stop/abandon/pause/resume the mission, or to
-// inspect its state, is meta-action — that belongs to the coordinator
-// and must NOT be rerouted into the child transcript.
-func buildPrompt(userMsg string, running []graph.MissionRecord) string {
+// buildPrompt renders the operator-supplied instruction header (loaded
+// from skills/_coordinator/followup-classifier.md in production, the
+// embedded default in tests) followed by the structured running-
+// missions list and the verbatim user message. The header carries the
+// classification rules — including the meta-action carve-out so
+// cancel/stop/inspect requests aren't rerouted into child transcripts.
+func buildPrompt(header, userMsg string, running []graph.MissionRecord) string {
 	var b strings.Builder
-	b.WriteString("Classify whether the user message is a refinement of a specific running mission ")
-	b.WriteString("or a new request. A refinement narrows or redirects what the mission is currently doing ")
-	b.WriteString("(e.g. \"focus only on high-severity\", \"use the 2024 data\"). Meta-action requests ")
-	b.WriteString("about a mission — cancel, stop, abandon, pause, resume, or inspect — are NOT refinements ")
-	b.WriteString("and must return match=null so the coordinator can act on them itself.\n\n")
-	b.WriteString("Reply ONLY with JSON of the shape ")
-	b.WriteString("{\"match\": <integer id from the list or null>, \"confidence\": <0.0-1.0>}. ")
-	b.WriteString("Set `match` to null when unsure, when the message is clearly a new topic, or when ")
-	b.WriteString("it is a meta-action (cancel / stop / status / etc).\n\n")
-	b.WriteString("Running missions:\n")
+	b.WriteString(strings.TrimSpace(header))
+	b.WriteString("\n\nRunning missions:\n")
 	for i, m := range running {
 		fmt.Fprintf(&b, "  [%d] %s/%s: %s\n", i+1, m.Skill, m.Role, truncateForPrompt(m.Task, 160))
 	}

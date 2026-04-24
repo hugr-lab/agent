@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -456,14 +457,22 @@ func Build(
 	// short-circuited turn skips both the model call AND the
 	// compactor's work. Enabled by default; operators flip off via
 	// cfg.Missions.FollowUpEnabled when the behaviour needs tuning.
+	// Classification rules live in skills/_coordinator/followup-
+	// classifier.md so operators edit prompt prose without rebuilding.
+	followupHeader, err := loadFollowupHeader(skillsPath, logger)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: load followup classifier prompt: %w", err)
+	}
 	followupRouter := missionsfollowup.New(missionsfollowup.Config{
-		Executor:  missionsExec,
-		Router:    router,
-		Logger:    logger,
-		Threshold: cfg.Missions.FollowUpSimilarityThreshold,
-		TieBand:   cfg.Missions.FollowUpTieBand,
-		Timeout:   cfg.Missions.ClassifierTimeout,
-		Enabled:   cfg.Missions.FollowUpEnabled,
+		Executor:     missionsExec,
+		Router:       router,
+		Logger:       logger,
+		Threshold:    cfg.Missions.FollowUpSimilarityThreshold,
+		TieBand:      cfg.Missions.FollowUpTieBand,
+		Timeout:      cfg.Missions.ClassifierTimeout,
+		Enabled:      cfg.Missions.FollowUpEnabled,
+		PromptHeader: followupHeader,
 	})
 
 	a, err := hugen.NewAgent(hugen.Runtime{
@@ -570,6 +579,27 @@ func readConstitution(cfg *config.Config) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("runtime: read constitution %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// loadFollowupHeader reads the followup classifier prompt prose from
+// skills/_coordinator/followup-classifier.md, when present. Missing
+// file is fine — the router falls back to its embedded default. Read
+// errors other than not-found are surfaced so a corrupted file is
+// noticed at boot rather than masked.
+func loadFollowupHeader(skillsPath string, logger *slog.Logger) (string, error) {
+	if skillsPath == "" {
+		return "", nil
+	}
+	path := filepath.Join(skillsPath, "_coordinator", "followup-classifier.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			logger.Info("runtime: followup classifier prompt not found, using embedded default", "path", path)
+			return "", nil
+		}
+		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
 }
