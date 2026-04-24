@@ -35,6 +35,7 @@ import (
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
 	"github.com/hugr-lab/hugen/pkg/missions"
 	missionsexec "github.com/hugr-lab/hugen/pkg/missions/executor"
+	missionsfollowup "github.com/hugr-lab/hugen/pkg/missions/followup"
 	missionsplan "github.com/hugr-lab/hugen/pkg/missions/planner"
 	missionsstore "github.com/hugr-lab/hugen/pkg/missions/store"
 	"github.com/hugr-lab/hugen/pkg/models"
@@ -443,13 +444,30 @@ func Build(
 
 	instruction := mem.InstructionProvider(hugen.BaseInstructionProvider(sessionMgr))
 
+	// Spec 007 follow-up router — slots before the compactor so a
+	// short-circuited turn skips both the model call AND the
+	// compactor's work. Enabled by default; operators flip off via
+	// cfg.Missions.FollowUpEnabled when the behaviour needs tuning.
+	followupRouter := missionsfollowup.New(missionsfollowup.Config{
+		Executor:  missionsExec,
+		Router:    router,
+		Logger:    logger,
+		Threshold: cfg.Missions.FollowUpSimilarityThreshold,
+		TieBand:   cfg.Missions.FollowUpTieBand,
+		Timeout:   cfg.Missions.ClassifierTimeout,
+		Enabled:   cfg.Missions.FollowUpEnabled,
+	})
+
 	a, err := hugen.NewAgent(hugen.Runtime{
-		Router:               router,
-		Sessions:             sessionMgr,
-		Tokens:               tokens,
-		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{chat.Callback()},
-		InstructionProvider:  instruction,
-		Logger:               logger,
+		Router:   router,
+		Sessions: sessionMgr,
+		Tokens:   tokens,
+		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{
+			followupRouter.Callback(),
+			chat.Callback(),
+		},
+		InstructionProvider: instruction,
+		Logger:              logger,
 	})
 	if err != nil {
 		closeOnErr()

@@ -47,6 +47,11 @@ type scenarioStep struct {
 	// until every mission reaches a terminal status — or the budget
 	// expires. Accepts any time.ParseDuration value ("30s", "2m").
 	WaitForMissions string `yaml:"wait_for_missions"`
+	// WaitForMissionsRunning polls until at least one mission in the
+	// coordinator's DAG is in StatusRunning (and thus safe to send a
+	// refinement to via follow-up routing). Use before a refinement
+	// step so the router has an in-flight target to classify against.
+	WaitForMissionsRunning string `yaml:"wait_for_missions_running"`
 }
 
 type scenarioQuery struct {
@@ -126,12 +131,21 @@ func runScenario(t *testing.T, scenDir, scenPath string) {
 
 	for i, step := range sc.Steps {
 		t.Logf("════ step %d/%d ════", i+1, len(sc.Steps))
+		// Pre-conditions: wait for some DAG state BEFORE sending the
+		// next user message. Typical use case — follow-up routing
+		// refinement needs the targeted mission already running.
+		if step.WaitForMissionsRunning != "" {
+			waitMissionsRunning(ctx, t, a, sc.SessionID, step.WaitForMissionsRunning)
+			drainClassifier(t, a, 5*time.Second)
+		}
 		if step.Say != "" {
 			a.RunTurn(ctx, t, sc.SessionID, step.Say)
 		}
 		// Drain the async classifier so subsequent queries + the Dump
 		// see every llm_response / tool_* event the turn emitted.
 		drainClassifier(t, a, 5*time.Second)
+		// Post-conditions: wait for the DAG to terminate before we
+		// sample the final evidence.
 		if step.WaitForMissions != "" {
 			waitMissionsTerminal(ctx, t, a, sc.SessionID, step.WaitForMissions)
 			drainClassifier(t, a, 5*time.Second)
@@ -208,6 +222,46 @@ func waitMissionsTerminal(
 		case <-ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// waitMissionsRunning polls the Executor's DAG until at least one
+// mission is in StatusRunning — sentinel used before a refinement
+// step so the follow-up router has an in-flight target. Exits early
+// when the budget expires (scenario stays observational — no fatal).
+func waitMissionsRunning(
+	ctx context.Context,
+	t *testing.T,
+	a *harness.Agent,
+	coordSessionID string,
+	budget string,
+) {
+	t.Helper()
+	if a.Runtime == nil || a.Runtime.Missions == nil {
+		return
+	}
+	d, err := time.ParseDuration(budget)
+	if err != nil {
+		t.Logf("wait_for_missions_running: parse %q: %v", budget, err)
+		return
+	}
+	deadline := time.Now().Add(d)
+	for {
+		running := a.Runtime.Missions.RunningMissions(coordSessionID)
+		if len(running) > 0 {
+			t.Logf("wait_for_missions_running: %d running after %s",
+				len(running), time.Since(deadline.Add(-d)).Truncate(time.Millisecond))
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Logf("wait_for_missions_running: timeout after %s — no mission reached running", d)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
 		}
 	}
 }

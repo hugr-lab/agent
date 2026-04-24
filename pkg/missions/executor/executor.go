@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/missions/graph"
 	"github.com/hugr-lab/hugen/pkg/missions/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 )
 
 // Executor drives the mission graph state machine. Holds an
@@ -162,6 +164,80 @@ func (e *Executor) Snapshot(ctx context.Context, coordSessionID string) []graph.
 		return nil
 	}
 	return ms
+}
+
+// RunningMissions returns the subset of this coordinator's DAG in
+// StatusRunning. Empty slice when the coordinator has no in-memory
+// DAG. Used by the follow-up router to decide whether a user message
+// could plausibly be refining an in-flight mission.
+func (e *Executor) RunningMissions(coordSessionID string) []graph.MissionRecord {
+	entry, ok := e.dags.Load(coordSessionID)
+	if !ok {
+		return nil
+	}
+	d := entry.(*dag)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []graph.MissionRecord
+	for _, n := range d.missions {
+		if n.status != graph.StatusRunning {
+			continue
+		}
+		out = append(out, graph.MissionRecord{
+			ID:             n.id,
+			CoordSessionID: coordSessionID,
+			Skill:          n.skill,
+			Role:           n.role,
+			Task:           n.task,
+			Status:         n.status,
+			DependsOn:      append([]string(nil), n.upstream...),
+			TurnsUsed:      n.turnsUsed,
+			StartedAt:      n.startedAt,
+		})
+	}
+	return out
+}
+
+// OnFollowUp appends a user message as a new turn in the target
+// mission's session AND writes the audit trail on the coordinator.
+// FR-013: the refinement joins the child transcript naturally (next
+// dispatcher turn sees it as a user_message) and the coordinator
+// keeps a queryable record of where the route landed.
+func (e *Executor) OnFollowUp(
+	ctx context.Context,
+	coordSessionID, userMsg, targetMissionID string,
+	confidence float64,
+) error {
+	if targetMissionID == "" {
+		return fmt.Errorf("missions: follow-up target mission id is empty")
+	}
+	if strings.TrimSpace(userMsg) == "" {
+		return fmt.Errorf("missions: follow-up user message is empty")
+	}
+	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: targetMissionID,
+		EventType: sessstore.EventTypeUserMessage,
+		Author:    "user",
+		Content:   userMsg,
+	}); err != nil {
+		return fmt.Errorf("missions: append follow-up to mission %s: %w", targetMissionID, err)
+	}
+	meta := map[string]any{
+		"target_mission_id":     targetMissionID,
+		"classifier_confidence": confidence,
+	}
+	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: coordSessionID,
+		EventType: sessstore.EventTypeUserFollowupRouted,
+		Author:    "user",
+		Content:   truncate(userMsg, 2048),
+		Metadata:  meta,
+	}); err != nil {
+		// Best effort — routing already succeeded on the child side.
+		e.logger.WarnContext(ctx, "missions: emit user_followup_routed",
+			"coord", coordSessionID, "err", err)
+	}
+	return nil
 }
 
 // Tick reconciles every coordinator's DAG: drain terminal goroutines
