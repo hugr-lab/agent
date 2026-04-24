@@ -457,21 +457,45 @@ func TestManager_Create_ForkSession_PassesForkAfterSeq(t *testing.T) {
 	assert.Equal(t, 7, *sess.forkAfterSeq)
 }
 
-// TestManager_Create_SubAgentNoSkillCatalog — sub-agent sessions
-// MUST NOT include the "Available Skills" catalog block in their
-// Snapshot prompt (spec 006 §3a — sub-agent doesn't pick skills
-// mid-mission). Phase-1 implementation point: the catalog is
-// rendered conditionally; verify the gate works once Snapshot has
-// the relevant guard. Until that lives in pkg/skills/render, this
-// test documents the expectation as a TODO assertion.
-//
-// NOTE (phase 1, T105 deferred): Snapshot still always renders the
-// catalog. This assertion is left commented in to lock the contract
-// once the rendering tweak ships in Phase 3.
-//
-//	snap := sess.Snapshot()
-//	assert.NotContains(t, snap.Prompt, "Available Skills",
-//	    "sub-agent snapshot must omit the skill catalog (spec 006 §3a)")
+// TestManager_Create_SubAgentNoSkillCatalog locks US1 snapshot
+// contract (spec 006 §3a): sub-agent sessions must NOT include the
+// "Available Skills" catalog block in their Snapshot prompt — a
+// specialist is on a single mission and shouldn't be tempted to
+// replan with the full catalogue. The catalog MUST still render for
+// root sessions (regression guard).
 func TestManager_Create_SubAgentNoSkillCatalog(t *testing.T) {
-	t.Skip("Snapshot catalog gating moves to Phase 3 (T105) — see comment.")
+	h := newAutoloadHarness(t)
+	ctx := context.Background()
+
+	// Baseline: root session sees the catalog.
+	rootResp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-root",
+	})
+	require.NoError(t, err)
+	rootSnap := rootResp.Session.(*Session).Snapshot()
+	assert.Contains(t, rootSnap.Prompt, "Available Skills",
+		"root snapshot must keep the skill catalogue (regression guard)")
+
+	// Sub-agent session: catalog omitted; parent skill body (the one
+	// the dispatcher will LoadSkill) is the only skill-shaped content.
+	subResp, err := h.m.Create(ctx, &adksession.CreateRequest{
+		AppName: "a", UserID: "u", SessionID: "s-sub",
+		State: map[string]any{
+			"__session_type__":          "subagent",
+			"__parent_session_id__":     "s-root",
+			"__spawned_from_event_id__": "evt_dispatch",
+			"__mission__":               "focused mission",
+		},
+	})
+	require.NoError(t, err)
+	sub := subResp.Session.(*Session)
+	// Simulate the Dispatcher's LoadSkill of the parent skill on the
+	// child so we can verify the parent body IS present.
+	require.NoError(t, sub.LoadSkill(ctx, "_both"))
+
+	subSnap := sub.Snapshot()
+	assert.NotContains(t, subSnap.Prompt, "Available Skills",
+		"sub-agent snapshot must omit the skill catalogue (spec 006 §3a)")
+	assert.Contains(t, subSnap.Prompt, "## Skill: _both",
+		"sub-agent snapshot must still include the parent skill body")
 }

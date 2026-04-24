@@ -31,7 +31,7 @@ func (r *agentRuntime) close(logger *slog.Logger) {
 		return
 	}
 	logger.Info("shutting down: closing runtime")
-	r.Runtime.Close()
+	r.Close()
 }
 
 // buildAuthForBootstrap is Phase A+B.1: builds the single hugr Source
@@ -104,7 +104,7 @@ func buildRuntime(
 	// Default HUGR_MCP_URL so inline endpoint specs in skills can still
 	// reference ${HUGR_MCP_URL} if they want an anonymous MCP binding.
 	if os.Getenv("HUGR_MCP_URL") == "" && cfg.Hugr.URL != "" {
-		os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
+		_ = os.Setenv("HUGR_MCP_URL", cfg.Hugr.URL+"/mcp")
 	}
 
 	opts := hugenruntime.Options{

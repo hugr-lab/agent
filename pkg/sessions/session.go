@@ -474,15 +474,22 @@ func (s *Session) buildPrompt(ctx context.Context) string {
 	refs := append([]string(nil), s.state.Refs...)
 	s.state.mu.RUnlock()
 
-	var catalog []skills.SkillMeta
-	if catalogSet {
-		catalog = catalogOverride
-	} else if list, err := s.skills.List(ctx); err == nil {
-		catalog = list
-	}
-	if text := s.skills.RenderCatalog(catalog); text != "" {
-		b.WriteString("\n\n")
-		b.WriteString(text)
+	// US1 snapshot contract (spec 006 §3a): sub-agent sessions carry
+	// only the parent skill's body — no full catalogue. The specialist
+	// operates on a single mission; exposing every available skill
+	// would invite it to re-plan outside its lane and burn turns.
+	// Root (and fork) sessions keep the full catalogue.
+	if s.sessionType != sessstore.SessionTypeSubAgent {
+		var catalog []skills.SkillMeta
+		if catalogSet {
+			catalog = catalogOverride
+		} else if list, err := s.skills.List(ctx); err == nil {
+			catalog = list
+		}
+		if text := s.skills.RenderCatalog(catalog); text != "" {
+			b.WriteString("\n\n")
+			b.WriteString(text)
+		}
 	}
 
 	loadedBySkill := map[string][]string{}

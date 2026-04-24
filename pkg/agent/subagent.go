@@ -280,6 +280,16 @@ func (d *Dispatcher) Run(
 		if ev == nil {
 			continue
 		}
+		// ADK wraps tool.Run errors as FunctionResponse parts with an
+		// "error" key on the Response map (internal/llminternal/base_flow.go).
+		// A specialist that can't recover from a tool crashing loops
+		// burning turns until the cap; fail loud instead so the coordinator
+		// sees the root cause in DispatchResult.Error.
+		if name, msg, ok := toolRunError(ev); ok {
+			d.markChild(runCtx, childID, "failed")
+			result.Error = fmt.Sprintf("tool %q returned error: %s", name, msg)
+			return cap(result, spec.SummaryMaxTok), nil
+		}
 		// Capture the most recent agent text as candidate summary.
 		if text, finalTurn := agentTurnText(ev); finalTurn {
 			result.TurnsUsed++
@@ -425,6 +435,35 @@ func agentTurnText(ev *adksession.Event) (string, bool) {
 		b.WriteString(p.Text)
 	}
 	return b.String(), true
+}
+
+// toolRunError inspects a FunctionResponse event and returns the
+// failing tool's name + error message when ADK captured a tool.Run
+// error (see internal/llminternal/base_flow.go — errors are surfaced
+// as Response{"error": "..."}). Returns (_, _, false) when the event
+// is not a tool-failure response.
+func toolRunError(ev *adksession.Event) (name, msg string, ok bool) {
+	if ev == nil || ev.Content == nil {
+		return "", "", false
+	}
+	for _, p := range ev.Content.Parts {
+		if p == nil || p.FunctionResponse == nil {
+			continue
+		}
+		errVal, has := p.FunctionResponse.Response["error"]
+		if !has || errVal == nil {
+			continue
+		}
+		switch v := errVal.(type) {
+		case string:
+			return p.FunctionResponse.Name, v, true
+		case error:
+			return p.FunctionResponse.Name, v.Error(), true
+		default:
+			return p.FunctionResponse.Name, fmt.Sprint(v), true
+		}
+	}
+	return "", "", false
 }
 
 // hasFunctionCall reports whether any part of the event content is a

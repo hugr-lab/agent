@@ -137,8 +137,10 @@ func Build(
 	closeOnErr := func() { rt.Close() }
 
 	var (
-		localQuerier  qetypes.Querier
-		remoteQuerier qetypes.Querier = opts.HugrClient
+		localQuerier qetypes.Querier
+		// remoteQuerier falls back to the local engine below when
+		// opts.HugrClient is nil (scenario / fully-local mode).
+		remoteQuerier = opts.HugrClient
 		localModels   []string
 	)
 	if cfg.LocalDBEnabled {

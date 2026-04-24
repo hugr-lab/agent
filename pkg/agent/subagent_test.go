@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
@@ -67,13 +69,33 @@ type dispatchHarness struct {
 
 func newDispatchHarness(t *testing.T, specialistScript []models.ScriptedResponse) *dispatchHarness {
 	t.Helper()
+	return newDispatchHarnessWithTool(t, specialistScript, nil)
+}
+
+// newDispatchHarnessWithTool is like newDispatchHarness but lets the
+// caller inject a runnable `schema_lookup` tool — enabling tests that
+// need the ADK runner to actually execute tool calls (turn-cap,
+// tool-failure paths).
+func newDispatchHarnessWithTool(
+	t *testing.T,
+	specialistScript []models.ScriptedResponse,
+	runFn func(ctx tool.Context, args any) (map[string]any, error),
+) *dispatchHarness {
+	t.Helper()
 
 	skillsRoot := makeDispatchSkillsDir(t)
 	skMgr, err := skills.NewFileManager(skillsRoot)
 	require.NoError(t, err)
 
 	tm := tools.New(nil)
-	tm.AddProvider(tools.FakeProvider{N: "hugr-main", T: tools.FakeTools("schema_lookup")})
+	if runFn == nil {
+		tm.AddProvider(tools.FakeProvider{N: "hugr-main", T: tools.FakeTools("schema_lookup")})
+	} else {
+		tm.AddProvider(tools.FakeProvider{
+			N: "hugr-main",
+			T: []tool.Tool{&tools.RunnableFakeTool{N: "schema_lookup", RunFunc: runFn}},
+		})
+	}
 
 	sm, err := sessions.New(sessions.Config{
 		Skills:       skMgr,
@@ -271,4 +293,86 @@ func TestDispatcher_Run_PreflightRefusesOversizeTask(t *testing.T) {
 		"refusal must NOT create a child session row")
 	assert.Equal(t, 0, h.specialistLLM.Turns(),
 		"specialist LLM must not be called on pre-flight refusal")
+}
+
+// ----- T111: turn-cap -----
+
+// TestDispatcher_Run_TurnCap scripts a specialist that never stops
+// calling the tool. max_turns (5) is reached — the child session must
+// end up `abandoned` and DispatchResult.Error must carry the
+// "turn cap reached after 5 turns" phrase so the coordinator sees
+// the root cause in its tool_result payload.
+func TestDispatcher_Run_TurnCap(t *testing.T) {
+	// Specialist loops forever: each turn emits another tool_call,
+	// never a final text. Seven entries covers MaxTurns=5 with slack.
+	loop := make([]models.ScriptedResponse, 0, 7)
+	for i := 0; i < 7; i++ {
+		loop = append(loop, models.ScriptedResponse{
+			ToolCalls: []models.ScriptedToolCall{{
+				Name: "schema_lookup",
+				Args: map[string]any{"iter": i},
+			}},
+		})
+	}
+	h := newDispatchHarnessWithTool(t, loop,
+		func(_ tool.Context, _ any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		})
+	h.makeCoordinator(t, "coord-turncap")
+	spec := h.loadSpec(t)
+
+	res, err := h.dispatcher.Run(
+		context.Background(),
+		"coord-turncap", "evt-turncap",
+		"domain", "schema_explorer",
+		spec,
+		"loop forever",
+		"",
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.ChildSessionID, "turn-cap must still open a child session")
+	assert.Contains(t, res.Error, "turn cap reached after 5 turns")
+	// markChild failures are best-effort (no hub wired in tests), so
+	// we can't verify the stored status directly here. The Error
+	// field + non-empty ChildSessionID are the coordinator's contract.
+	assert.Equal(t, 5, res.TurnsUsed,
+		"TurnsUsed must reflect the configured MaxTurns")
+}
+
+// ----- T113: tool-failure -----
+
+// TestDispatcher_Run_ToolFailure scripts a specialist that makes one
+// tool call to a tool that returns an error. The Dispatcher must
+// detect the tool-error FunctionResponse payload, mark the child
+// `failed`, and surface the cause in DispatchResult.Error under
+// the documented `tool "<name>" returned error: ...` shape.
+func TestDispatcher_Run_ToolFailure(t *testing.T) {
+	h := newDispatchHarnessWithTool(t,
+		[]models.ScriptedResponse{{
+			ToolCalls: []models.ScriptedToolCall{{
+				Name: "schema_lookup",
+				Args: map[string]any{"module": "tf"},
+			}},
+		}},
+		func(_ tool.Context, _ any) (map[string]any, error) {
+			return nil, fmt.Errorf("upstream schema service unreachable")
+		})
+	h.makeCoordinator(t, "coord-toolerr")
+	spec := h.loadSpec(t)
+
+	res, err := h.dispatcher.Run(
+		context.Background(),
+		"coord-toolerr", "evt-toolerr",
+		"domain", "schema_explorer",
+		spec,
+		"fetch tf schema",
+		"",
+	)
+	require.NoError(t, err)
+	assert.NotEmpty(t, res.ChildSessionID)
+	assert.Contains(t, res.Error, `tool "schema_lookup" returned error:`)
+	assert.Contains(t, res.Error, "upstream schema service unreachable")
+	// Specialist used exactly one turn (the one tool call) before the
+	// Dispatcher bailed on the error response.
+	assert.LessOrEqual(t, res.TurnsUsed, 1)
 }
