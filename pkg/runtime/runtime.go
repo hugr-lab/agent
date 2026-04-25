@@ -489,6 +489,7 @@ func Build(
 	}
 	rt.Artifacts = artManager
 	toolsMgr.AddProvider(artManager)
+	missionsExec.SetArtifactGranter(artManager, cfg.Identity.ID)
 
 	// Daily TTL cleanup. Cron spec is operator-tunable (default
 	// "0 3 * * *"). Errors logged + counted as removed=0 for that

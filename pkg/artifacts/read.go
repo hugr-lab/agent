@@ -48,6 +48,16 @@ func (m *Manager) OpenReader(ctx context.Context, callerSession, id string) (io.
 	return rc, stat, nil
 }
 
+// InfoExists is the shim missions.Executor (US6) uses to ask
+// "does this id exist and can callerSession see it?" without
+// pulling the full ArtifactDetail value type into the missions
+// package. Returns nil on visible+existing; ErrUnknownArtifact
+// otherwise.
+func (m *Manager) InfoExists(ctx context.Context, callerSession, id string) error {
+	_, err := m.Info(ctx, callerSession, id)
+	return err
+}
+
 // Info returns the full metadata for an artifact subject to caller
 // visibility. Returns ErrUnknownArtifact when the id is missing or
 // not visible to callerSession.

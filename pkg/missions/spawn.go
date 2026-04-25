@@ -103,6 +103,11 @@ func (t *spawnSubMissionTool) Declaration() *genai.FunctionDeclaration {
 					Items:       &genai.Schema{Type: "STRING"},
 					Description: "Optional list of mission_ids in this coordinator's graph that must reach `done` before the new mission starts.",
 				},
+				"input_artifacts": {
+					Type:        "ARRAY",
+					Items:       &genai.Schema{Type: "STRING"},
+					Description: "Optional list of artifact ids to grant the new mission access to. Must already be visible to the coordinator. Each grants the child session an explicit overlay so it sees these artifacts on its first artifact_list call regardless of their visibility scope.",
+				},
 			},
 			Required: []string{"skill", "role", "task"},
 		},
@@ -134,6 +139,7 @@ func (s *SpawnService) Spawn(ctx context.Context, callerSessionID string, args a
 		return errorEnvelope("spawn_sub_mission: skill, role, task are required")
 	}
 	dependsOn := decodeDeps(m["depends_on"])
+	inputArtifacts := decodeStringSlice(m["input_artifacts"])
 
 	if s.sessions == nil {
 		return errorEnvelope("spawn_sub_mission: session manager unavailable")
@@ -175,7 +181,7 @@ func (s *SpawnService) Spawn(ctx context.Context, callerSessionID string, args a
 		return errorEnvelope(fmt.Sprintf("spawn depth limit reached (max %d)", limit))
 	}
 
-	missionID, err := s.executor.RegisterSingle(coordID, skill, role, task, dependsOn)
+	missionID, err := s.executor.RegisterSingle(coordID, skill, role, task, dependsOn, inputArtifacts...)
 	if err != nil {
 		return errorEnvelope("spawn_sub_mission: " + err.Error())
 	}
@@ -243,6 +249,10 @@ func (s *SpawnService) walkDepth(caller *sessions.Session) (int, string, error) 
 	}
 	return 0, "", fmt.Errorf("walk parent chain: caller has no root ancestor")
 }
+
+// decodeStringSlice is decodeDeps' generic twin — used for
+// input_artifacts and any future []string LLM arg.
+func decodeStringSlice(raw any) []string { return decodeDeps(raw) }
 
 // decodeDeps coerces the LLM-supplied depends_on field (any) into a
 // []string. Accepts []any, []string, or nil.
