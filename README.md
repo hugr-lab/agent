@@ -78,6 +78,48 @@ HugrModel  System   MCP
 - **System Tools**: `skill_list`, `skill_load`, `skill_ref`, `context_status`
 - **Skills** are on-disk packages (SKILL.md + references/ + mcp.yaml) loaded on demand
 
+### Mission graph (phase 2 — spec 007)
+
+Multi-step user goals decompose into a dependency graph of specialist
+sub-agents that run asynchronously while the coordinator stays
+responsive:
+
+- **mission_plan(goal)** — coordinator tool that classifies a goal as
+  multi-step and persists a `{missions, edges}` graph. Idempotent per
+  session (5-min LRU cache).
+- **Executor scheduler tick** — every 2 s the executor reconciles its
+  in-memory DAG: drains terminal goroutines, cascades abandonment on
+  failure, promotes ready missions to running (parallelism cap = 4 by
+  default).
+- **Follow-up router** — a Before-Model callback that classifies the
+  incoming user message against running missions; on a confident match
+  it routes the refinement into the target mission's transcript instead
+  of spawning a duplicate plan. Cancel/stop/inspect requests stay with
+  the coordinator (meta-action carve-out).
+- **mission_status / mission_cancel / mission_sub_runs** — coordinator-
+  scoped tools for visibility and steering. Cancelling a running
+  mission abandons every dependent in BFS order.
+- **spawn_sub_mission** — sub-agent-scoped tool gated by
+  `can_spawn: true` + `max_depth`; queues a peer mission in the same
+  coordinator's graph (not nested inside the caller).
+- **Completion marker** — when a graph fully terminates the executor
+  emits a synthetic `<system: missions complete>` user_message on the
+  coordinator with a structured `completion_payload`. Branch 8 of
+  `_coordinator/SKILL.md` keys off this marker to produce one summary
+  turn.
+- **Restart resumption** — on boot, the executor rebuilds every
+  coordinator's DAG from `hub.db`, freshness-checks active rows, and
+  reaps stale ones (no duplicate `mission_spawn` re-emission).
+
+Operator-tunable prompts live in `skills/_coordinator/`:
+`planner-prompt.md`, `followup-classifier.md`. Edit prose without
+rebuilding.
+
+End-to-end scenarios under `tests/scenarios/`:
+`mission_graph`, `follow_up_routing`, `mission_cancel`. See
+`specs/007-missions-async/quickstart.md` for the dev-reproduction
+walkthrough.
+
 ## Development
 
 ```bash

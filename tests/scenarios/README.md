@@ -46,8 +46,28 @@ tests/scenarios/
     └── config_override.yaml  ← optional overlay (llm.* / chatcontext.*)
 ```
 
-Currently committed: `simple/`, `dispatch/`, `accumulation/`,
-`compactor/`.
+Currently committed:
+
+- **Phase-1 (sub-agent dispatch)**: `simple/`, `dispatch/`,
+  `accumulation/`, `compactor/`.
+- **Phase-2 mission graph (spec 007)**:
+  - `mission_graph/` — multi-step plan via `mission_plan`, status
+    polling via `mission_status`, drain via `wait_for_missions`. Asserts
+    spawn/result events on the coordinator + the `<system: missions
+    complete>` marker after both children land.
+  - `follow_up_routing/` — plan starts → user sends a refinement while
+    the summariser is running → follow-up router classifies the message
+    and routes it into the child's transcript (`user_followup_routed`
+    audit row on the coordinator). `wait_for_missions_running` is the
+    pre-step sentinel that ensures the router has a target.
+  - `mission_cancel/` — plan starts → user asks to cancel the
+    summariser → coordinator calls `mission_cancel`, both rows land
+    `abandoned` (cascade). Verifies the meta-action carve-out: the
+    cancel doesn't get rerouted into the child via follow-up routing.
+
+Each scenario logs every GraphQL query result + dumps the final
+`hub.db` path so DuckDB inspection is one `duckdb -readonly <path>`
+away.
 
 ## Environment
 

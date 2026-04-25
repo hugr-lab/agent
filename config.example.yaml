@@ -132,3 +132,29 @@ models:
   # - name: text-embedding-3-small
   #   type: embedding
   #   path: 'https://api.openai.com/v1/embeddings?model=text-embedding-3-small&api_key="${OPENAI_API_KEY}"&timeout=10s'
+
+# ── Mission graph (spec 007) ────────────────────────────────
+# Coordinator-driven async mission DAG: planner decomposes the goal,
+# scheduler promotes ready missions every 2 s, follow-up router reads
+# user refinements while missions are in flight, completion marker
+# re-enters the coordinator with a structured payload.
+missions:
+  # Follow-up routing: when a user message arrives during running
+  # missions, classify whether it's a refinement of a specific one;
+  # route the message into that child's transcript instead of spawning
+  # a duplicate mission.
+  follow_up_enabled: true                # off → every user msg goes through normal coord planning
+  follow_up_similarity_threshold: 0.55   # classifier-confidence floor; below → no routing
+  follow_up_tie_band: 0.05               # ambiguity slack above the floor; conf must exceed (threshold + tie_band)
+  classifier_timeout: 3s                 # caps the single classifier LLM call; busy local LLM endpoints may need 30s
+
+  # Restore: on boot, sub-agent rows whose last event is older than
+  # this cutoff are marked abandoned (reason="restart: stale"). Too
+  # short → live but slow missions die on every restart; too long →
+  # operators wait minutes before stuck rows reap.
+  stale_mission_timeout: 5m
+
+  # spawn_sub_mission depth cap applied when the caller role's
+  # max_depth is 0. Counts parent_session_id hops back to the
+  # coordinator. Phase-1 dispatchers are at depth 1.
+  max_spawn_depth_agent: 4
