@@ -148,12 +148,6 @@ missions:
   follow_up_tie_band: 0.05               # ambiguity slack above the floor; conf must exceed (threshold + tie_band)
   classifier_timeout: 3s                 # caps the single classifier LLM call; busy local LLM endpoints may need 30s
 
-  # Restore: on boot, sub-agent rows whose last event is older than
-  # this cutoff are marked abandoned (reason="restart: stale"). Too
-  # short → live but slow missions die on every restart; too long →
-  # operators wait minutes before stuck rows reap.
-  stale_mission_timeout: 5m
-
   # spawn_sub_mission depth cap applied when the caller role's
   # max_depth is 0. Counts parent_session_id hops back to the
   # coordinator. Phase-1 dispatchers are at depth 1.

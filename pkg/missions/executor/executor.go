@@ -29,7 +29,6 @@ type Executor struct {
 	events      EventWriter
 	driver      MissionDriver
 	parallelism int
-	staleAfter  time.Duration
 	nowFn       func() time.Time
 	logger      *slog.Logger
 
@@ -57,11 +56,6 @@ type Config struct {
 	Driver      MissionDriver
 	Logger      *slog.Logger
 	Parallelism int
-
-	// StaleAfter caps how long an active mission can sit without
-	// emitting an event before Restore considers it dead and marks
-	// it abandoned. Zero falls back to 5 minutes (config default).
-	StaleAfter time.Duration
 }
 
 // New builds an Executor. Parallelism < 1 is clamped to 4. Logger is
@@ -73,28 +67,14 @@ func New(cfg Config) *Executor {
 	if cfg.Parallelism < 1 {
 		cfg.Parallelism = 4
 	}
-	if cfg.StaleAfter <= 0 {
-		cfg.StaleAfter = 5 * time.Minute
-	}
 	return &Executor{
 		store:       cfg.Store,
 		events:      cfg.Events,
 		driver:      cfg.Driver,
 		parallelism: cfg.Parallelism,
-		staleAfter:  cfg.StaleAfter,
 		nowFn:       time.Now,
 		logger:      cfg.Logger,
 	}
-}
-
-// SetNowFn overrides the clock the Executor consults for staleness
-// checks. Tests use this to align their notion of "now" with hub.db's
-// server-stamped event timestamps; production never calls it.
-func (e *Executor) SetNowFn(fn func() time.Time) {
-	if fn == nil {
-		fn = time.Now
-	}
-	e.nowFn = fn
 }
 
 // ------------------------------------------------------------------
@@ -312,23 +292,33 @@ func (e *Executor) OnFollowUp(
 
 // RestoreReport is the summary RestoreState returns so the runtime
 // can log a single line on boot describing what survived the
-// restart.
+// restart. `Resumed` stays for backwards compatibility with the
+// per-coord reporting tests but is always zero under the current
+// "abandon all in-flight on restart" policy.
 type RestoreReport struct {
 	Coordinators   int // distinct coords whose DAG was rebuilt
-	Resumed        int // missions reattached as running
+	Resumed        int // always 0 — restart abandons in-flight missions
 	Pending        int // missions still pending (deps unsatisfied)
 	Ready          int // missions promoted to ready (all deps done)
-	StaleAbandoned int // active rows whose last event was older than StaleAfter
+	StaleAbandoned int // non-terminal active rows reaped on restart
 }
 
 // RestoreState rebuilds every coordinator's DAG from hub.db on boot.
 // Loads ALL sub-agent rows (including terminal) so pending missions
-// can correctly evaluate their upstream done-ness; for each non-
-// terminal row, freshness-checks the last event timestamp and
-// abandons stale ones (FR-019). Active rows whose last event is
-// fresh are reattached as `running` — no `mission_spawn` event is
-// re-emitted (FR-020), spec-006's transcript replay path resumes
-// the model.
+// can correctly evaluate their upstream done-ness, then marks every
+// non-terminal active row abandoned with reason="restart: process
+// died" (FR-019).
+//
+// Design choice — why we don't auto-resume: ADK's runner.Run needs a
+// `newMessage` to drive a turn, so "continue an in-progress turn
+// after process restart" can't avoid re-issuing the original task.
+// That means re-running work the LLM may have already finished,
+// burning tokens and risking double side-effects. The shipping
+// policy chooses safety + honesty: in-flight missions die cleanly
+// on restart, the user gets a `mission_result{status:abandoned}`
+// row on the coordinator, and they can replan if they want.
+// Operators wanting "best-effort resume" can mission_plan again on
+// the coordinator's next turn.
 //
 // Caller must invoke once before the scheduler kicks off the first
 // Tick. Concurrent Restore + Tick is undefined behaviour.
@@ -368,26 +358,21 @@ func (e *Executor) RestoreState(ctx context.Context) (RestoreReport, error) {
 				terminated: m.TerminatedAt,
 			}
 
-			// Active in hub → either resume or stale-abandon.
+			// Active in hub means in-flight before the crash; the LLM
+			// turn doesn't survive process death, so abandon cleanly.
 			if m.Status == graph.StatusRunning {
-				last, lastErr := e.store.LastEventAt(ctx, m.ID)
-				stale := lastErr == nil && !last.IsZero() && now.Sub(last) > e.staleAfter
-				if stale {
-					node.status = graph.StatusAbandoned
-					node.terminated = now
-					node.reason = "restart: stale"
-					if err := e.store.MarkStatus(ctx, m.ID, graph.StatusAbandoned); err != nil {
-						e.logger.WarnContext(ctx, "missions: restore mark stale",
-							"id", m.ID, "err", err)
-					}
-					e.emitResult(ctx, node, missionResult{
-						status:   graph.StatusAbandoned,
-						errorMsg: "restart: stale",
-					})
-					rep.StaleAbandoned++
-				} else {
-					rep.Resumed++
+				node.status = graph.StatusAbandoned
+				node.terminated = now
+				node.reason = "restart: process died"
+				if err := e.store.MarkStatus(ctx, m.ID, graph.StatusAbandoned); err != nil {
+					e.logger.WarnContext(ctx, "missions: restore mark abandoned",
+						"id", m.ID, "err", err)
 				}
+				e.emitResult(ctx, node, missionResult{
+					status:   graph.StatusAbandoned,
+					errorMsg: "restart: process died",
+				})
+				rep.StaleAbandoned++
 			}
 			d.missions[m.ID] = node
 		}

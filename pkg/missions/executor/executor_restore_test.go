@@ -111,7 +111,7 @@ func (f *restoreFixture) seedMission(
 
 // freshExec builds a new Executor on top of f's store/sess so each
 // test exercises a fresh in-memory DAG.
-func (f *restoreFixture) freshExec(t *testing.T, staleAfter time.Duration) *executor.Executor {
+func (f *restoreFixture) freshExec(t *testing.T) *executor.Executor {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(testWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	driver := newFakeDriver(f.sess)
@@ -121,7 +121,6 @@ func (f *restoreFixture) freshExec(t *testing.T, staleAfter time.Duration) *exec
 		Driver:      driver,
 		Logger:      logger,
 		Parallelism: 4,
-		StaleAfter:  staleAfter,
 	})
 }
 
@@ -134,29 +133,16 @@ func (w testWriter) Write(p []byte) (int, error) {
 
 // ---- Tests -------------------------------------------------------
 
-func TestExecutor_RestoreState_MarksStale(t *testing.T) {
+func TestExecutor_RestoreState_AbandonsActiveOnRestart(t *testing.T) {
 	f := newRestoreFixture(t)
 	ctx := context.Background()
 
-	// Active mission with one event already on disk. Use a microscopic
-	// StaleAfter so the just-emitted event is already "stale" by the
-	// time Restore reads it — a robust substitute for time-travelling
-	// hub.db's server-stamped created_at column.
+	// Any non-terminal sub-agent row at boot time is a casualty of the
+	// previous process — the LLM turn doesn't survive process death,
+	// so Restore reaps it cleanly with reason="restart: process died".
 	id := f.seedMission(t, "sub-stale", "y", "stalled", "active", nil, 0)
 
-	// hub.db stamps event created_at on the server side; the
-	// timezone offset between our Go process and the DuckDB engine is
-	// non-deterministic across hosts (CI in UTC, dev in CEST, etc),
-	// so we anchor "now" to the seeded event's timestamp + a buffer
-	// past the stale cutoff. That keeps the staleness math working
-	// regardless of how hub.db reports time.
-	dbg, dbgErr := f.sess.GetEvents(ctx, id)
-	require.NoError(t, dbgErr)
-	require.NotEmpty(t, dbg, "seeded event must be visible to GetEvents")
-	seededAt := dbg[len(dbg)-1].CreatedAt
-
-	exec := f.freshExec(t, time.Millisecond)
-	exec.SetNowFn(func() time.Time { return seededAt.Add(time.Hour) })
+	exec := f.freshExec(t)
 	rep, err := exec.RestoreState(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, rep.StaleAbandoned)
@@ -184,7 +170,7 @@ func TestExecutor_RestoreState_MarksStale(t *testing.T) {
 		}
 		results++
 		assert.Equal(t, "abandoned", ev.Metadata["status"])
-		assert.Equal(t, "restart: stale", ev.Metadata["reason"])
+		assert.Equal(t, "restart: process died", ev.Metadata["reason"])
 	}
 	assert.Equal(t, 1, results)
 }
@@ -206,12 +192,13 @@ func TestExecutor_RestoreState_NoDuplicateSpawn(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Restore should NOT emit a second mission_spawn for the same id.
-	exec := f.freshExec(t, 5 * time.Minute)
+	// Restore must not duplicate the existing mission_spawn event;
+	// active rows get abandoned, not re-spawned.
+	exec := f.freshExec(t)
 	rep, err := exec.RestoreState(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 1, rep.Resumed)
-	assert.Equal(t, 0, rep.StaleAbandoned)
+	assert.Equal(t, 0, rep.Resumed, "restart abandons active rows, never resumes")
+	assert.Equal(t, 1, rep.StaleAbandoned)
 
 	events, err := f.sess.GetEvents(ctx, f.coord)
 	require.NoError(t, err)
@@ -235,18 +222,16 @@ func TestExecutor_RestoreState_ReadyPromotion(t *testing.T) {
 	upID := f.seedMission(t, "sub-up", "u", "upstream", "completed", nil, 0)
 	downID := f.seedMission(t, "sub-down", "d", "downstream", "active", []string{upID}, 0)
 
-	exec := f.freshExec(t, 5 * time.Minute)
+	exec := f.freshExec(t)
 	rep, err := exec.RestoreState(ctx)
 	require.NoError(t, err)
 
-	// `active` rows resume as running by default; the test seeds
-	// downstream as `active` so it counts as Resumed, not Ready.
-	// Force the scenario by seeding it as `pending` via Status field —
-	// but `sessions.status` only has the persisted enum values
-	// (active/completed/failed/abandoned), so we exercise a fresh
-	// downstream by seeding it as active (Resumed) and asserting the
-	// upstream's terminal-done state was preserved through Restore.
-	assert.Equal(t, 1, rep.Resumed, "downstream resumed as running")
+	// Under the "abandon all in-flight on restart" policy, active
+	// rows count as StaleAbandoned, not Resumed. The terminal upstream
+	// stays Done; the downstream lands Abandoned with the restart
+	// reason.
+	assert.Equal(t, 0, rep.Resumed)
+	assert.Equal(t, 1, rep.StaleAbandoned)
 
 	snapshot := exec.Snapshot(ctx, f.coord)
 	statuses := map[string]string{}
@@ -254,7 +239,7 @@ func TestExecutor_RestoreState_ReadyPromotion(t *testing.T) {
 		statuses[n.ID] = n.Status
 	}
 	assert.Equal(t, graph.StatusDone, statuses[upID], "upstream stays done")
-	assert.Equal(t, graph.StatusRunning, statuses[downID], "downstream resumed")
+	assert.Equal(t, graph.StatusAbandoned, statuses[downID], "downstream reaped on restart")
 }
 
 func TestExecutor_RestoreState_CascadeOnTerminalUpstream(t *testing.T) {
@@ -270,16 +255,15 @@ func TestExecutor_RestoreState_CascadeOnTerminalUpstream(t *testing.T) {
 	// (e.g. crash between marking upstream and cascading).
 	upID := f.seedMission(t, "sub-up-failed", "u", "fails", "failed", nil, 0)
 	_ = upID
-	// Seed a fresh downstream as "active" with depends_on referencing
-	// the failed upstream. With the current Restore implementation
-	// active rows reattach as running — a downstream cascade only
-	// fires on PENDING rows. So this scenario stays at "no cascade,
-	// downstream stays active" and we assert that explicitly: the
-	// invariant we care about is that Restore never crashes on a
-	// hub state with a partially-cascaded graph.
+	// Active downstream gets abandoned on restart regardless of the
+	// upstream's failed state — the "abandon all in-flight" policy
+	// reaps everything non-terminal. The exact reason on the
+	// downstream is "restart: process died" (not the cascade reason)
+	// because the active branch fires before the pending-cascade
+	// branch.
 	downID := f.seedMission(t, "sub-down-orphan", "d", "downstream", "active", []string{upID}, 0)
 
-	exec := f.freshExec(t, 5 * time.Minute)
+	exec := f.freshExec(t)
 	rep, err := exec.RestoreState(ctx)
 	require.NoError(t, err)
 	require.NotZero(t, rep.Coordinators)
@@ -290,6 +274,6 @@ func TestExecutor_RestoreState_CascadeOnTerminalUpstream(t *testing.T) {
 		statuses[n.ID] = n.Status
 	}
 	assert.Equal(t, graph.StatusFailed, statuses[upID])
-	assert.Equal(t, graph.StatusRunning, statuses[downID],
-		"active downstream is not auto-reaped on Restore — operator/coordinator drives the next cascade")
+	assert.Equal(t, graph.StatusAbandoned, statuses[downID],
+		"active downstream is reaped on restart")
 }

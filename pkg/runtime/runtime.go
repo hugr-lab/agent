@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/tool"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
@@ -388,7 +389,6 @@ func Build(
 		Driver:      missionsDriver,
 		Logger:      logger,
 		Parallelism: 4,
-		StaleAfter:  cfg.Missions.StaleMissionTimeout,
 	})
 	// Spec 007 US5: rebuild every coordinator's DAG from hub.db
 	// before the scheduler kicks in. Stale-active rows get marked
@@ -526,6 +526,34 @@ func Build(
 		logger.Warn("runtime: restore open sessions", "err", err)
 	}
 
+	// Spec 007 US4 — auto-fire one coordinator turn after every
+	// graph completion. The completion-marker user_message is already
+	// on disk via Executor.maybeCompletionSummary; runner.Run with
+	// msg=nil drives a turn against the existing event chain so the
+	// coordinator's branch-8 summary fires without waiting for the
+	// user to type. AppName/UserID come from the coord session's own
+	// metadata so the runner uses the same identity ADK saw on the
+	// last user-driven turn. Errors are warnings — if RunOnce fails
+	// (e.g. transient LLM error) the marker stays on disk and the
+	// coord picks it up on the user's next turn.
+	missionsExec.RunOnce = func(ctx context.Context, coordSessionID string) error {
+		appName, userID := coordIdentity(sessionMgr, coordSessionID)
+		r, rerr := runner.New(runner.Config{
+			AppName:        appName,
+			Agent:          a,
+			SessionService: sessionMgr,
+		})
+		if rerr != nil {
+			return fmt.Errorf("runtime: runonce build runner: %w", rerr)
+		}
+		for _, runErr := range r.Run(ctx, userID, coordSessionID, nil, agent.RunConfig{}) {
+			if runErr != nil {
+				return fmt.Errorf("runtime: runonce: %w", runErr)
+			}
+		}
+		return nil
+	}
+
 	bgCtx, bgCancel := context.WithCancel(ctx)
 	rt.bgCtx = bgCtx
 	rt.bgCancel = bgCancel
@@ -611,6 +639,30 @@ func readConstitution(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("runtime: read constitution %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// coordIdentity returns the (app_name, user_id) pair carried by the
+// coordinator session — used by RunOnce so the auto-fired turn
+// matches the identity ADK saw on the last user-driven turn. Falls
+// back to safe defaults when the session is unknown so the call
+// still succeeds.
+func coordIdentity(sm *sessions.Manager, coordSessionID string) (appName, userID string) {
+	appName = "hugr-agent"
+	userID = "user"
+	if sm == nil || coordSessionID == "" {
+		return
+	}
+	sess, err := sm.Session(coordSessionID)
+	if err != nil || sess == nil {
+		return
+	}
+	if v := sess.AppName(); v != "" {
+		appName = v
+	}
+	if v := sess.UserID(); v != "" {
+		userID = v
+	}
+	return
 }
 
 // loadCoordinatorPrompt reads an operator-editable prompt prose file
