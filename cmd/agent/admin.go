@@ -74,10 +74,16 @@ type Muxer interface {
 // artifactDownloadConfig is the operator-tunable subset the download
 // handler reads. Threaded through registerArtifactDownload so the
 // admin file does not import pkg/config directly.
+//
+// WriteChunk is reserved: the contract calls for a per-chunk write
+// deadline (reset every WriteChunk bytes), but phase-3 ships a
+// single deadline covering the whole stream. The field stays in the
+// shape so a future incremental upgrade can wire it without churning
+// callers.
 type artifactDownloadConfig struct {
-	MaxBytes      int64         // 0 → unlimited
-	WriteChunk    int64         // 0 → 1 MiB
-	WriteTimeout  time.Duration // 0 → 60s
+	MaxBytes     int64         // 0 → unlimited
+	WriteChunk   int64         // 0 → 1 MiB; reserved (see doc above)
+	WriteTimeout time.Duration // 0 → 60s
 }
 
 // artifactReader is the subset of *artifacts.Manager the download
@@ -173,9 +179,7 @@ func registerArtifactDownload(mux Muxer, mgr artifactReader, cfg artifactDownloa
 		w.Header().Set("Content-Disposition", contentDisposition(detail.Name, detail.Type))
 		w.Header().Set("Cache-Control", "private, max-age=0")
 
-		if rc2, ok := http.NewResponseController(w), true; ok {
-			_ = rc2.SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
-		}
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(cfg.WriteTimeout))
 		if _, err := io.Copy(w, rc); err != nil {
 			logger.Error("artifacts: download: stream", "id", id, "err", err)
 			// Status header already flushed; nothing more we can do

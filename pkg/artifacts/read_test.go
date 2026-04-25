@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hugr-lab/hugen/pkg/artifacts"
+	artstore "github.com/hugr-lab/hugen/pkg/artifacts/store"
 )
 
 func TestManager_OpenReader_HappyPath(t *testing.T) {
@@ -62,6 +63,34 @@ func TestManager_OpenReader_AdminUserOnly(t *testing.T) {
 	rc, _, err := f.mgr.OpenReader(ctx, f.coordID, ref.ID)
 	require.NoError(t, err)
 	rc.Close()
+}
+
+func TestManager_OpenReader_UnregisteredBackend(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// Insert a row directly that points at the s3 stub (which the
+	// fixture does NOT register as the active backend). OpenReader
+	// must return ErrUnregisteredBackend rather than 200-streaming
+	// random bytes.
+	_, err := f.store.Insert(ctx, artstore.Record{
+		ID:             "art_phantom_backend",
+		AgentID:        "agt_ag01",
+		Name:           "phantom",
+		Type:           "csv",
+		StorageKey:     "art_phantom_backend.csv",
+		StorageBackend: "s3", // not the active backend in this fixture
+		Description:    "row pointing at an unregistered backend",
+		SessionID:      f.coordID,
+		Visibility:     "user",
+		TTL:            "session",
+	})
+	require.NoError(t, err)
+
+	_, _, err = f.mgr.OpenReader(ctx, "", "art_phantom_backend")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, artifacts.ErrUnregisteredBackend),
+		"expected ErrUnregisteredBackend, got %v", err)
 }
 
 func TestManager_OpenReader_UnknownID(t *testing.T) {
