@@ -441,6 +441,71 @@ func intArg(m map[string]any, key string) int {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// artifact_chain
+// ─────────────────────────────────────────────────────────────────
+
+type artifactChainTool struct {
+	m *Manager
+}
+
+func (t *artifactChainTool) Name() string { return "artifact_chain" }
+
+func (t *artifactChainTool) Description() string {
+	return "Coordinator-only. Walks the derived_from lineage of an artifact (oldest first → current last). Each entry carries id, name, type, visibility. Invisible ancestors are returned as {name: '<hidden>'} placeholders so depth is preserved without leaking metadata. Sub-agents calling this get {error, code: 'not_coordinator'}."
+}
+
+func (t *artifactChainTool) IsLongRunning() bool { return false }
+
+func (t *artifactChainTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"id": {Type: "STRING", Description: "Artifact id (the chain's leaf — walk goes up from here)."},
+			},
+			Required: []string{"id"},
+		},
+	}
+}
+
+func (t *artifactChainTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *artifactChainTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("artifact_chain", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	id := stringArg(m, "id")
+	if id == "" {
+		return errEnvelope("artifact_chain", fmt.Errorf("id required"), "invalid_args")
+	}
+	chain, err := t.m.Chain(ctx, ctx.SessionID(), id)
+	if err != nil {
+		return errEnvelope("artifact_chain", err, classifyError(err))
+	}
+	out := make([]map[string]any, 0, len(chain))
+	for _, r := range chain {
+		entry := map[string]any{
+			"id":   r.ID,
+			"name": r.Name,
+		}
+		if r.Type != "" {
+			entry["type"] = r.Type
+		}
+		if r.Visibility != "" {
+			entry["visibility"] = string(r.Visibility)
+		}
+		out = append(out, entry)
+	}
+	return map[string]any{"chain": out, "depth": len(out)}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
 // shared envelope helpers
 // ─────────────────────────────────────────────────────────────────
 

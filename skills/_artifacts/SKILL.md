@@ -1,6 +1,6 @@
 ---
 name: _artifacts
-version: "0.5.0"
+version: "0.6.0"
 description: >
   Persistent artifact registry. Publish bulky outputs (Parquet, CSV,
   HTML, charts, generated reports) as references that the
@@ -171,9 +171,22 @@ remove `user`-visibility artifacts. Anything else returns
 `{error, code: not_authorised}`. Idempotent on re-call (subsequent
 calls return `unknown_artifact`).
 
+## Lineage walks (coordinator only)
+
+`artifact_chain(id)` returns the `derived_from` lineage of an
+artifact, oldest first → leaf last. Each entry carries `id`,
+`name`, `type`, `visibility`. Invisible ancestors appear as
+`{name: "<hidden>"}` placeholders so the coordinator sees the
+chain depth without leaking metadata of inaccessible nodes. The
+walk stops at the first hidden ancestor (we don't know what it
+was derived from without reading the row).
+
+Sub-agents calling this get `{error, code: not_coordinator}` —
+escalate to the coordinator if you need a lineage trace.
+
 ## Surface still pending
 
-`artifact_query` (analytical SQL across artifacts) and
-`artifact_chain` (lineage walk) land in follow-up stories. Phase-3
-ships publish, info, list, visibility, and remove — the lifecycle
-loop is closed.
+`artifact_query` (analytical SQL across artifacts) lands when the
+local DuckDB sandbox MCP server arrives. Phase-3 ships publish,
+info, list, visibility, remove, and chain — the artifact
+lifecycle is fully closed.

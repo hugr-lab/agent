@@ -157,6 +157,7 @@ func (m *Manager) buildTools() []tool.Tool {
 		&artifactListTool{m: m},
 		&artifactVisibilityTool{m: m},
 		&artifactRemoveTool{m: m},
+		&artifactChainTool{m: m},
 	}
 }
 
@@ -172,12 +173,6 @@ func (m *Manager) AgentID() string { return m.deps.AgentID }
 // already has the cfg + deps it needs to flesh them out without
 // further plumbing.
 // ─────────────────────────────────────────────────────────────────
-
-// Chain stub; full body lands in T075 (US9).
-func (m *Manager) Chain(ctx context.Context, _ string, _ string) ([]ArtifactRef, error) {
-	_ = ctx
-	return nil, errNotImplementedYet("Chain", "T075 / US9")
-}
 
 // LocalPathFor stub; full body lands in T044 (US3).
 func (m *Manager) LocalPathFor(ctx context.Context, _ string, _ string) (string, error) {

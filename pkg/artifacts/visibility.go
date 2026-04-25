@@ -272,6 +272,82 @@ func (m *Manager) Remove(ctx context.Context, callerSession, id string) error {
 	return nil
 }
 
+// Chain returns the derived-from lineage of an artifact, oldest
+// ancestor first, current artifact last. Coordinator-only (FR-016)
+// — sub-agents calling this get ErrNotCoordinator.
+//
+// Invisible ancestors are replaced with placeholder ArtifactRefs
+// (Name="<hidden>", Visibility=""), preserving the chain length so
+// the coordinator sees the depth without leaking metadata. Walks
+// up to chainMaxDepth links to bound work on cycles or pathological
+// chains.
+const chainMaxDepth = 32
+
+func (m *Manager) Chain(ctx context.Context, callerSession, id string) ([]ArtifactRef, error) {
+	// Coordinator gate.
+	sess, err := m.deps.SessionEvents.GetSession(ctx, callerSession)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: Chain: %w", err)
+	}
+	if sess == nil {
+		return nil, fmt.Errorf("artifacts: Chain: caller session %q not found", callerSession)
+	}
+	if sess.ParentSessionID != "" {
+		return nil, ErrNotCoordinator
+	}
+
+	// Visibility check on the entry point. If the caller can't see
+	// the starting artifact, fail closed.
+	rec, ok, err := m.resolveVisibleArtifact(ctx, callerSession, id)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: Chain: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownArtifact, id)
+	}
+
+	chain := []ArtifactRef{recordToRef(rec)}
+	cursor := rec
+	for depth := 0; depth < chainMaxDepth; depth++ {
+		if cursor.DerivedFrom == "" {
+			break
+		}
+		// Resolve next ancestor through the visibility chokepoint.
+		next, visible, err := m.resolveVisibleArtifact(ctx, callerSession, cursor.DerivedFrom)
+		if err != nil {
+			return nil, fmt.Errorf("artifacts: Chain: walk: %w", err)
+		}
+		if !visible {
+			// Ancestor exists but is hidden from this caller. Emit
+			// a placeholder so chain depth is preserved without
+			// leaking metadata. Then we have to stop walking — we
+			// don't know the hidden ancestor's parent without
+			// reading the row, which would leak.
+			chain = append([]ArtifactRef{{
+				ID:   cursor.DerivedFrom,
+				Name: "<hidden>",
+			}}, chain...)
+			break
+		}
+		chain = append([]ArtifactRef{recordToRef(next)}, chain...)
+		cursor = next
+	}
+	return chain, nil
+}
+
+func recordToRef(rec artstore.Record) ArtifactRef {
+	return ArtifactRef{
+		ID:             rec.ID,
+		Name:           rec.Name,
+		Type:           rec.Type,
+		Visibility:     Visibility(rec.Visibility),
+		SizeBytes:      rec.SizeBytes,
+		Tags:           rec.Tags,
+		CreatedAt:      rec.CreatedAt,
+		StorageBackend: rec.StorageBackend,
+	}
+}
+
 // scopeRank returns the broadness rank of a visible_via tag. Higher =
 // broader. Used by ListVisible to pick the broadest scope when an
 // artifact appears in multiple branches of the view.

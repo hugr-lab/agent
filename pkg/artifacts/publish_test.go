@@ -221,7 +221,7 @@ func TestManager_NameTools(t *testing.T) {
 	f := newFixture(t)
 	assert.Equal(t, "_artifacts", f.mgr.Name())
 	tools := f.mgr.Tools()
-	require.Len(t, tools, 5, "US1..US4 ship publish + info + list + visibility + remove")
+	require.Len(t, tools, 6, "US1..US9 ship publish + info + list + visibility + remove + chain")
 	names := make([]string, 0, len(tools))
 	for _, tt := range tools {
 		names = append(names, tt.Name())
@@ -232,6 +232,7 @@ func TestManager_NameTools(t *testing.T) {
 		"artifact_list",
 		"artifact_visibility",
 		"artifact_remove",
+		"artifact_chain",
 	}, names)
 }
 
