@@ -851,6 +851,7 @@ func artifactsConfigFromOperatorConfig(cfg config.ArtifactsConfig) artifacts.Con
 	}
 	return artifacts.Config{
 		InlineBytesMax:  cfg.InlineBytesMax,
+		ADKLoadMaxBytes: cfg.DownloadMaxBytes,
 		SchemaInspect:   schemaInspect,
 		TTLSessionGrace: int64(cfg.TTLSession.Seconds()),
 		TTL7dSeconds:    int64(cfg.TTL7d.Seconds()),

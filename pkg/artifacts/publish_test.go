@@ -221,8 +221,9 @@ func TestManager_NameTools(t *testing.T) {
 	f := newFixture(t)
 	assert.Equal(t, "_artifacts", f.mgr.Name())
 	tools := f.mgr.Tools()
-	require.Len(t, tools, 1, "US1 ships exactly artifact_publish")
-	assert.Equal(t, "artifact_publish", tools[0].Name())
+	require.Len(t, tools, 2, "US1+US2 ship artifact_publish + artifact_info")
+	names := []string{tools[0].Name(), tools[1].Name()}
+	assert.ElementsMatch(t, []string{"artifact_publish", "artifact_info"}, names)
 }
 
 // writeFile is a small helper around os.WriteFile with perms 0600.

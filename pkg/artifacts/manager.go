@@ -9,6 +9,7 @@ import (
 
 	adkartifact "google.golang.org/adk/artifact"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 
 	artstore "github.com/hugr-lab/hugen/pkg/artifacts/store"
 	"github.com/hugr-lab/hugen/pkg/artifacts/storage"
@@ -65,6 +66,12 @@ type Config struct {
 	// InlineBytesMax caps the size of inline_bytes payloads accepted
 	// by artifact_publish.
 	InlineBytesMax int64
+
+	// ADKLoadMaxBytes caps the buffer size returned by Manager.Load.
+	// Zero falls back to InlineBytesMax. Production runtimes wire the
+	// operator's cfg.Artifacts.DownloadMaxBytes here so ADK consumers
+	// inherit the same ceiling as the HTTP download endpoint.
+	ADKLoadMaxBytes int64
 
 	// SchemaInspect controls whether Manager.Publish probes tabular
 	// sources for row/col counts via DuckDB DESCRIBE / COUNT(*).
@@ -144,6 +151,7 @@ func (m *Manager) Tools() []tool.Tool { return m.tools }
 func (m *Manager) buildTools() []tool.Tool {
 	return []tool.Tool{
 		&artifactPublishTool{m: m},
+		&artifactInfoTool{m: m},
 	}
 }
 
@@ -178,12 +186,6 @@ func (m *Manager) ListVisible(ctx context.Context, _ string, _ ListFilter) ([]Ar
 	return nil, errNotImplementedYet("ListVisible", "T051 / US4")
 }
 
-// Info stub; full body lands in T036 (US2).
-func (m *Manager) Info(ctx context.Context, _ string, _ string) (ArtifactDetail, error) {
-	_ = ctx
-	return ArtifactDetail{}, errNotImplementedYet("Info", "T036 / US2")
-}
-
 // Chain stub; full body lands in T075 (US9).
 func (m *Manager) Chain(ctx context.Context, _ string, _ string) ([]ArtifactRef, error) {
 	_ = ctx
@@ -194,12 +196,6 @@ func (m *Manager) Chain(ctx context.Context, _ string, _ string) ([]ArtifactRef,
 func (m *Manager) LocalPathFor(ctx context.Context, _ string, _ string) (string, error) {
 	_ = ctx
 	return "", errNotImplementedYet("LocalPathFor", "T044 / US3")
-}
-
-// OpenReader stub; full body lands in T034 (US2).
-func (m *Manager) OpenReader(ctx context.Context, _ string, _ string) (io.ReadCloser, Stat, error) {
-	_ = ctx
-	return nil, Stat{}, errNotImplementedYet("OpenReader", "T034 / US2")
 }
 
 // Cleanup stub; full body lands in T068 (US7).
@@ -262,6 +258,33 @@ func (m *Manager) Save(ctx context.Context, req *adkartifact.SaveRequest) (*adka
 	return &adkartifact.SaveResponse{Version: 1}, nil
 }
 
+// mimeFromType is the inverse of typeFromMIME — maps our `type`
+// enum onto a canonical IANA media type. Returns
+// "application/octet-stream" for unrecognised types so HTTP
+// Content-Type and ADK genai.Blob.MIMEType always have a value.
+func mimeFromType(t string) string {
+	switch t {
+	case "json":
+		return "application/json"
+	case "csv":
+		return "text/csv"
+	case "html":
+		return "text/html; charset=utf-8"
+	case "txt":
+		return "text/plain; charset=utf-8"
+	case "md":
+		return "text/markdown; charset=utf-8"
+	case "svg":
+		return "image/svg+xml"
+	case "pdf":
+		return "application/pdf"
+	case "parquet":
+		return "application/vnd.apache.parquet"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 // typeFromMIME maps a MIME string onto our `type` enum. Returns
 // "bin" for unrecognised types so the file extension lookup in the
 // fs backend always has a value.
@@ -288,53 +311,140 @@ func typeFromMIME(mt string) string {
 	}
 }
 
-// Load implements adkartifact.Service.
+// Load implements adkartifact.Service. Resolves the artifact id from
+// (sessionID, fileName), opens the bytes through OpenReader, and
+// returns a buffered genai.Part. The buffer is capped at
+// cfg.ADKLoadMaxBytes (defaults to InlineBytesMax when unset) so
+// runaway loads can't blow up agent memory.
 func (m *Manager) Load(ctx context.Context, req *adkartifact.LoadRequest) (*adkartifact.LoadResponse, error) {
-	_ = ctx
 	if req == nil {
 		return nil, errors.New("artifacts: Load: nil request")
 	}
-	return nil, errNotImplementedYet("Load", "T035 / US2")
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("artifacts: Load: %w", err)
+	}
+	rec, found, err := m.store().GetByName(ctx, req.SessionID, req.FileName)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: Load: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: %s/%s", ErrUnknownArtifact, req.SessionID, req.FileName)
+	}
+	rc, _, err := m.OpenReader(ctx, req.SessionID, rec.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	limit := m.cfg.ADKLoadMaxBytes
+	if limit <= 0 {
+		limit = m.cfg.InlineBytesMax
+	}
+	var reader io.Reader = rc
+	if limit > 0 {
+		reader = io.LimitReader(rc, limit+1)
+	}
+	buf, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: Load: read: %w", err)
+	}
+	if limit > 0 && int64(len(buf)) > limit {
+		return nil, fmt.Errorf("artifacts: Load: %s exceeds ADK load cap (%d bytes)", rec.ID, limit)
+	}
+	mt := mimeFromType(rec.Type)
+	return &adkartifact.LoadResponse{Part: &genai.Part{
+		InlineData: &genai.Blob{
+			Data:        buf,
+			MIMEType:    mt,
+			DisplayName: rec.Name,
+		},
+	}}, nil
 }
 
-// Delete implements adkartifact.Service.
+// Delete implements adkartifact.Service. Resolves id by name and
+// routes to the domain Remove method (which lands fully in T053 /
+// US4). Foundation phase still returns the not-implemented envelope
+// from Remove.
 func (m *Manager) Delete(ctx context.Context, req *adkartifact.DeleteRequest) error {
-	_ = ctx
 	if req == nil {
 		return errors.New("artifacts: Delete: nil request")
 	}
-	return errNotImplementedYet("Delete", "T055 / US4")
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("artifacts: Delete: %w", err)
+	}
+	rec, found, err := m.store().GetByName(ctx, req.SessionID, req.FileName)
+	if err != nil {
+		return fmt.Errorf("artifacts: Delete: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("%w: %s/%s", ErrUnknownArtifact, req.SessionID, req.FileName)
+	}
+	return m.Remove(ctx, req.SessionID, rec.ID)
 }
 
-// List implements adkartifact.Service.
+// List implements adkartifact.Service. Returns the names visible to
+// (sessionID). Routes through ListVisible (T051 / US4); foundation
+// phase still returns the not-implemented envelope from ListVisible.
 func (m *Manager) List(ctx context.Context, req *adkartifact.ListRequest) (*adkartifact.ListResponse, error) {
-	_ = ctx
 	if req == nil {
 		return nil, errors.New("artifacts: List: nil request")
 	}
-	return nil, errNotImplementedYet("List", "T055 / US4")
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("artifacts: List: %w", err)
+	}
+	refs, err := m.ListVisible(ctx, req.SessionID, ListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(refs))
+	for _, r := range refs {
+		names = append(names, r.Name)
+	}
+	return &adkartifact.ListResponse{FileNames: names}, nil
 }
 
 // Versions implements adkartifact.Service. Phase 3 treats artifacts
 // as immutable single-version objects — every Versions call returns
-// `[1]` for known artifacts. Implemented as a thin shim once Info
-// lands in US2 (T036). For the foundation slice, returns the
-// not-implemented envelope.
+// `[1]` for known artifacts.
 func (m *Manager) Versions(ctx context.Context, req *adkartifact.VersionsRequest) (*adkartifact.VersionsResponse, error) {
-	_ = ctx
 	if req == nil {
 		return nil, errors.New("artifacts: Versions: nil request")
 	}
-	return nil, errNotImplementedYet("Versions", "T036 / US2")
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("artifacts: Versions: %w", err)
+	}
+	_, found, err := m.store().GetByName(ctx, req.SessionID, req.FileName)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: Versions: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: %s/%s", ErrUnknownArtifact, req.SessionID, req.FileName)
+	}
+	return &adkartifact.VersionsResponse{Versions: []int64{1}}, nil
 }
 
 // GetArtifactVersion implements adkartifact.Service.
 func (m *Manager) GetArtifactVersion(ctx context.Context, req *adkartifact.GetArtifactVersionRequest) (*adkartifact.GetArtifactVersionResponse, error) {
-	_ = ctx
 	if req == nil {
 		return nil, errors.New("artifacts: GetArtifactVersion: nil request")
 	}
-	return nil, errNotImplementedYet("GetArtifactVersion", "T036 / US2")
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("artifacts: GetArtifactVersion: %w", err)
+	}
+	rec, found, err := m.store().GetByName(ctx, req.SessionID, req.FileName)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: GetArtifactVersion: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: %s/%s", ErrUnknownArtifact, req.SessionID, req.FileName)
+	}
+	return &adkartifact.GetArtifactVersionResponse{
+		ArtifactVersion: &adkartifact.ArtifactVersion{
+			Version:    1,
+			MimeType:   mimeFromType(rec.Type),
+			CreateTime: float64(rec.CreatedAt.Unix()),
+		},
+	}, nil
 }
 
 // Compile-time interface assertions.

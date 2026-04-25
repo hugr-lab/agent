@@ -1,6 +1,6 @@
 ---
 name: _artifacts
-version: "0.3.0"
+version: "0.3.1"
 description: >
   Persistent artifact registry. Publish bulky outputs (Parquet, CSV,
   HTML, charts, generated reports) as references that the
@@ -104,9 +104,35 @@ codes:
 - `internal` — anything else; the message carries the underlying
   reason.
 
-## What about reading artifacts?
+## Inspecting metadata
 
-The other six tools (`artifact_remove`, `artifact_visibility`,
-`artifact_list`, `artifact_query`, `artifact_info`,
-`artifact_chain`) are not yet active in this build. They land in
-follow-up tasks; for now you can only publish.
+`artifact_info(id)` returns the registered metadata for an artifact
+you can see: `name`, `type`, `size_bytes`, `description`, `tags`,
+`storage_backend`, `created_at`, plus tabular fields (`row_count`,
+`col_count`, `file_schema`) when available. Use it before
+`artifact_query` to confirm the artifact still exists and to learn
+its schema. Visibility miss returns `{error, code: "unknown_artifact"}`
+— the call cannot leak the existence of artifacts you do not own.
+
+## Rendering artifacts in user replies
+
+When you finish a coordinator turn that produced user-visible
+artifacts, render each one as a markdown download link:
+
+```markdown
+[Q1 incidents (BW region)](artifact:art_ag01_…_…)
+```
+
+The link target uses the literal `artifact:` URI scheme — the
+front-end resolver swaps it for the `/admin/artifacts/{id}`
+download URL at render time. **Only render artifacts whose
+visibility is `user`** (or that the coordinator has explicitly
+widened). Self / parent / graph scoped artifacts are private to
+the mission graph and must NOT appear in the user-facing reply.
+
+## What about the rest of the surface?
+
+The remaining tools (`artifact_remove`, `artifact_visibility`,
+`artifact_list`, `artifact_query`, `artifact_chain`) land in
+follow-up stories. For phase-3 US1+US2 you can publish, look up
+metadata, and download via the admin endpoint.

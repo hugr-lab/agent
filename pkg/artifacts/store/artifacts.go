@@ -202,6 +202,41 @@ func (c *Client) Get(ctx context.Context, id string) (Record, bool, error) {
 	return rows[0].toRecord(), true, nil
 }
 
+// GetByName returns the most-recently-created artifact with the
+// given display name within (agentID, sessionID) scope. Returns
+// (Record{}, false, nil) when no row matches. ADK shims (Load /
+// Delete) use this to resolve a (sessionID, fileName) tuple to an
+// artifact id.
+func (c *Client) GetByName(ctx context.Context, sessionID, name string) (Record, bool, error) {
+	if sessionID == "" {
+		return Record{}, false, fmt.Errorf("artifacts/store: GetByName requires sessionID")
+	}
+	if name == "" {
+		return Record{}, false, fmt.Errorf("artifacts/store: GetByName requires name")
+	}
+	rows, err := queries.RunQuery[[]artifactRow](ctx, c.querier,
+		`query ($agent: String!, $sid: String!, $name: String!) {
+			hub { db { agent {
+				artifacts(filter: {agent_id: {eq: $agent}, session_id: {eq: $sid}, name: {eq: $name}}, order_by: [{field: "created_at", direction: DESC}], limit: 1) {
+					`+artifactColumns+`
+				}
+			}}}
+		}`,
+		map[string]any{"agent": c.agentID, "sid": sessionID, "name": name},
+		"hub.db.agent.artifacts",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrNoData) || errors.Is(err, types.ErrWrongDataPath) {
+			return Record{}, false, nil
+		}
+		return Record{}, false, fmt.Errorf("artifacts/store: get by name: %w", err)
+	}
+	if len(rows) == 0 {
+		return Record{}, false, nil
+	}
+	return rows[0].toRecord(), true, nil
+}
+
 // ListFilter narrows ListByAgent to a subset of rows. All fields
 // are optional; the zero filter returns every artifact owned by
 // this agent.

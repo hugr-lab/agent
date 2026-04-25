@@ -151,6 +151,92 @@ func (t *artifactPublishTool) Run(ctx tool.Context, args any) (map[string]any, e
 }
 
 // ─────────────────────────────────────────────────────────────────
+// artifact_info
+// ─────────────────────────────────────────────────────────────────
+
+type artifactInfoTool struct {
+	m *Manager
+}
+
+func (t *artifactInfoTool) Name() string { return "artifact_info" }
+
+func (t *artifactInfoTool) Description() string {
+	return "Returns the metadata for an artifact you have visibility into: name, type, size, description, tags, schema, and lineage. Use this before artifact_query to confirm the artifact still exists and inspect its file_schema. Returns {error, code: unknown_artifact} when the id is missing or invisible to you."
+}
+
+func (t *artifactInfoTool) IsLongRunning() bool { return false }
+
+func (t *artifactInfoTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"id": {
+					Type:        "STRING",
+					Description: "Artifact id (e.g. art_ag01_<unix>_<rnd>).",
+				},
+			},
+			Required: []string{"id"},
+		},
+	}
+}
+
+func (t *artifactInfoTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *artifactInfoTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("artifact_info", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	id := stringArg(m, "id")
+	if id == "" {
+		return errEnvelope("artifact_info", fmt.Errorf("id required"), "invalid_args")
+	}
+	detail, err := t.m.Info(ctx, ctx.SessionID(), id)
+	if err != nil {
+		return errEnvelope("artifact_info", err, classifyError(err))
+	}
+	out := map[string]any{
+		"id":              detail.ID,
+		"name":            detail.Name,
+		"type":            detail.Type,
+		"visibility":      string(detail.Visibility),
+		"size_bytes":      detail.SizeBytes,
+		"description":     detail.Description,
+		"ttl":             string(detail.TTL),
+		"storage_backend": detail.StorageBackend,
+		"created_at":      detail.CreatedAt,
+	}
+	if len(detail.Tags) > 0 {
+		out["tags"] = detail.Tags
+	}
+	if detail.OriginalPath != "" {
+		out["original_path"] = detail.OriginalPath
+	}
+	if detail.SessionID != "" {
+		out["session_id"] = detail.SessionID
+	}
+	if detail.DerivedFrom != "" {
+		out["derived_from"] = detail.DerivedFrom
+	}
+	if detail.RowCount != nil {
+		out["row_count"] = *detail.RowCount
+	}
+	if detail.ColCount != nil {
+		out["col_count"] = *detail.ColCount
+	}
+	if len(detail.FileSchema) > 0 {
+		out["file_schema"] = detail.FileSchema
+	}
+	return out, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
 // shared envelope helpers
 // ─────────────────────────────────────────────────────────────────
 
