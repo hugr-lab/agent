@@ -185,12 +185,6 @@ func (m *Manager) LocalPathFor(ctx context.Context, _ string, _ string) (string,
 	return "", errNotImplementedYet("LocalPathFor", "T044 / US3")
 }
 
-// Cleanup stub; full body lands in T068 (US7).
-func (m *Manager) Cleanup(ctx context.Context) (int, error) {
-	_ = ctx
-	return 0, errNotImplementedYet("Cleanup", "T068 / US7")
-}
-
 // ─────────────────────────────────────────────────────────────────
 // ADK artifact.Service implementation
 //

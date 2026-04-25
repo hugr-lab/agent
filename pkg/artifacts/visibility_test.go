@@ -32,6 +32,12 @@ type vfixture struct {
 }
 
 func newVfixture(t *testing.T) *vfixture {
+	return newVfixtureCfg(t, artifacts.Config{InlineBytesMax: 1 << 20})
+}
+
+// newVfixtureCfg lets a test override the manager Config (used by
+// the cleanup tests to flip TTLSessionGrace).
+func newVfixtureCfg(t *testing.T, cfg artifacts.Config) *vfixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	service, _ := testenv.Engine(t)
@@ -49,7 +55,10 @@ func newVfixture(t *testing.T) *vfixture {
 	be, err := artfs.New(artfs.Config{Dir: filepath.Join(t.TempDir(), "art")})
 	require.NoError(t, err)
 
-	mgr, err := artifacts.New(artifacts.Config{InlineBytesMax: 1 << 20}, artifacts.Deps{
+	if cfg.InlineBytesMax == 0 {
+		cfg.InlineBytesMax = 1 << 20
+	}
+	mgr, err := artifacts.New(cfg, artifacts.Deps{
 		Querier: service, Storage: be, SessionEvents: sess,
 		Logger: logger, AgentID: "agt_ag01", AgentShort: "ag01",
 	})

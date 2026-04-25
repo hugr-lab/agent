@@ -490,6 +490,28 @@ func Build(
 	rt.Artifacts = artManager
 	toolsMgr.AddProvider(artManager)
 
+	// Daily TTL cleanup. Cron spec is operator-tunable (default
+	// "0 3 * * *"). Errors logged + counted as removed=0 for that
+	// pass; nothing aborts the agent.
+	cleanupSpec := cfg.Artifacts.CleanupSchedule
+	if cleanupSpec == "" {
+		cleanupSpec = "0 3 * * *"
+	}
+	if err := sched.Cron("artifacts-cleanup", cleanupSpec, func(ctx context.Context) error {
+		removed, err := artManager.Cleanup(ctx)
+		if err != nil {
+			logger.Warn("artifacts: cleanup pass", "err", err)
+			return err
+		}
+		if removed > 0 {
+			logger.Info("artifacts: cleanup pass", "removed", removed)
+		}
+		return nil
+	}); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: register artifacts-cleanup: %w", err)
+	}
+
 	logger.Info("runtime: internal services registered",
 		"providers", []string{
 			skills.ServiceName, memory.ServiceName, chatcontext.ServiceName,
