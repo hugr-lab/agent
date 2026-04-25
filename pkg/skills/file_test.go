@@ -345,7 +345,8 @@ sub_agents:
 
 // TestLoad_CoordinatorSkill_Frontmatter covers the shipping
 // skills/_coordinator/SKILL.md — guards the frontmatter contract
-// that spec 007 locks down (version, autoload, autoload_for).
+// that spec 007 locks down (version, autoload, autoload_for, and the
+// canonical `_mission_tools` provider binding).
 func TestLoad_CoordinatorSkill_Frontmatter(t *testing.T) {
 	mgr, err := NewFileManager("../../skills")
 	require.NoError(t, err)
@@ -356,7 +357,9 @@ func TestLoad_CoordinatorSkill_Frontmatter(t *testing.T) {
 	assert.Equal(t, "0.2.0", sk.Version)
 	assert.True(t, sk.Autoload)
 	assert.Equal(t, []string{SessionTypeRoot}, sk.AutoloadFor)
-	assert.Empty(t, sk.Providers, "_coordinator attaches tools via CoordinatorToolsBuilder — no provider block")
+	require.Len(t, sk.Providers, 1,
+		"_coordinator declares the _mission_tools provider — no special-case wiring")
+	assert.Equal(t, "_mission_tools", sk.Providers[0].Provider)
 }
 
 func TestLoad_SubAgents_PhaseTwoFields_Validation(t *testing.T) {
