@@ -134,6 +134,36 @@ type CancelResult struct {
 	Reason        string
 }
 
+// CompletionMarker is the verbatim user_message content the Executor
+// emits when a coordinator's mission graph fully terminates. The
+// coordinator's SKILL.md decision tree branch 8 keys off this marker
+// to produce a single summary turn instead of a normal user-driven
+// reply.
+const CompletionMarker = "<system: missions complete>"
+
+// MissionOutcome is one entry in the completion payload — the
+// summarised result of a single mission, dehydrated for the
+// coordinator's user-message metadata. Summary is the same text the
+// agent_result event carried; Reason is set on failed/abandoned.
+type MissionOutcome struct {
+	MissionID string `json:"mission_id"`
+	Skill     string `json:"skill"`
+	Role      string `json:"role"`
+	Status    string `json:"status"` // done | failed | abandoned
+	Summary   string `json:"summary,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	TurnsUsed int    `json:"turns_used,omitempty"`
+}
+
+// CompletionPayload is the JSON shape attached to the synthetic
+// user_message's metadata.completion_payload when a coordinator's
+// graph terminates. AllSucceeded is true iff every Outcome is
+// StatusDone.
+type CompletionPayload struct {
+	Outcomes     []MissionOutcome `json:"outcomes"`
+	AllSucceeded bool             `json:"all_succeeded"`
+}
+
 // Sentinel errors surfaced by the planner / executor / store.
 var (
 	ErrPlanParse       = errors.New("missions: planner unparseable output")

@@ -49,12 +49,16 @@ delegate whenever the task has any domain depth.
    plan in one sentence and return control to the user. The
    scheduler promotes missions in the background.
 8. **Synthetic `<system: missions complete>` user message?** The
-   executor fired this after every mission in the graph reached a
-   terminal status. Read the `completion_payload` metadata; produce
-   one coordinator-authored summary turn describing both successes
-   and failures. Do NOT inline raw mission transcripts or dump
-   `agent_result` payloads verbatim — the user expects a human
-   summary.
+   executor fired this verbatim marker after every mission in the
+   graph reached a terminal status. The user did not type it — it is
+   a system signal carrying `completion_payload` in its metadata
+   with `outcomes[]` (`{mission_id, skill, role, status, summary,
+   reason, turns_used}`) and `all_succeeded`. Produce ONE coordinator-
+   authored summary turn covering both successes and failures, lead
+   with the headline result, name failed missions and their reason
+   in one short sentence each. Do NOT echo the marker, do NOT inline
+   raw mission transcripts, do NOT dump `agent_result` payloads
+   verbatim — the user expects a human summary.
 9. **Genuinely unclear?** → ask the user a short clarifying
    question. Better than a wrong plan.
 

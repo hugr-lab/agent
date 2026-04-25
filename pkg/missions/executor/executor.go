@@ -615,14 +615,20 @@ func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
 
 // maybeCompletionSummary fires exactly once per graph when every
 // mission reaches a terminal status AND the latest tick caused the
-// final transition.
+// final transition. Emits a synthetic user_message on the coordinator
+// session carrying the structured completion payload in metadata, so
+// the next coordinator turn (whether user-driven or RunOnce-driven)
+// reads `<system: missions complete>` in its prompt and produces the
+// SKILL.md branch-8 summary reply. When RunOnce is set, the executor
+// also fires it asynchronously to drive that turn without waiting on
+// the user.
 func (e *Executor) maybeCompletionSummary(
 	ctx context.Context,
 	coordID string,
 	d *dag,
 	terminals []string,
 ) {
-	if e.RunOnce == nil || len(terminals) == 0 {
+	if len(terminals) == 0 {
 		return
 	}
 	d.mu.Lock()
@@ -639,9 +645,42 @@ func (e *Executor) maybeCompletionSummary(
 	if !pending && !alreadyFired {
 		d.completionFired = true
 	}
+	payload := graph.CompletionPayload{}
+	if !pending && !alreadyFired {
+		payload.AllSucceeded = true
+		for _, n := range d.missions {
+			outcome := graph.MissionOutcome{
+				MissionID: n.id,
+				Skill:     n.skill,
+				Role:      n.role,
+				Status:    n.status,
+				Summary:   n.summary,
+				Reason:    n.reason,
+				TurnsUsed: n.turnsUsed,
+			}
+			if n.status != graph.StatusDone {
+				payload.AllSucceeded = false
+			}
+			payload.Outcomes = append(payload.Outcomes, outcome)
+		}
+	}
 	d.mu.Unlock()
 
 	if pending || alreadyFired {
+		return
+	}
+
+	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: coordID,
+		EventType: sessstore.EventTypeUserMessage,
+		Author:    "user",
+		Content:   graph.CompletionMarker,
+		Metadata:  map[string]any{"completion_payload": payload},
+	}); err != nil {
+		e.logger.WarnContext(ctx, "missions: completion marker", "coord", coordID, "err", err)
+	}
+
+	if e.RunOnce == nil {
 		return
 	}
 	go func() {

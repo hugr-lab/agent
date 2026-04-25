@@ -569,6 +569,112 @@ func TestExecutor_AbandonCoordinator(t *testing.T) {
 	assert.Equal(t, 3, resultCount, "one agent_result per running mission")
 }
 
+func TestExecutor_CompletionSummary_SingleTurn(t *testing.T) {
+	f := newFixture(t, 4)
+	plan := graph.PlanResult{
+		Missions: []graph.PlannerMission{
+			{ID: 1, Skill: "x", Role: "y", Task: "alpha"},
+			{ID: 2, Skill: "x", Role: "y", Task: "beta"},
+		},
+	}
+	plan = f.insertPlan(t, plan)
+
+	ctx := context.Background()
+	f.exec.Tick(ctx)
+	started := f.driver.WaitStarted(t, 2)
+	require.Len(t, started, 2)
+
+	for _, a := range started {
+		f.driver.Release(a.ChildSessionID, graph.DispatchResult{
+			Status: graph.StatusDone, Summary: "ok " + a.Task, TurnsUsed: 1,
+		})
+	}
+	f.waitReported(t, len(started))
+	f.exec.Tick(ctx)
+
+	events, err := f.sess.GetEvents(ctx, f.coord)
+	require.NoError(t, err)
+	markers := 0
+	var payload map[string]any
+	for _, ev := range events {
+		if ev.EventType != sessstore.EventTypeUserMessage {
+			continue
+		}
+		if ev.Content != graph.CompletionMarker {
+			continue
+		}
+		markers++
+		raw, _ := ev.Metadata["completion_payload"].(map[string]any)
+		payload = raw
+	}
+	require.Equal(t, 1, markers, "exactly one completion marker user_message")
+	require.NotNil(t, payload, "completion_payload metadata is set")
+	assert.Equal(t, true, payload["all_succeeded"])
+	outs, _ := payload["outcomes"].([]any)
+	assert.Len(t, outs, 2)
+
+	// Idempotent — second Tick must not fire again.
+	f.exec.Tick(ctx)
+	events, err = f.sess.GetEvents(ctx, f.coord)
+	require.NoError(t, err)
+	dup := 0
+	for _, ev := range events {
+		if ev.EventType == sessstore.EventTypeUserMessage && ev.Content == graph.CompletionMarker {
+			dup++
+		}
+	}
+	assert.Equal(t, 1, dup, "completion marker stays single across reTicks")
+}
+
+func TestExecutor_CompletionSummary_MixedOutcome(t *testing.T) {
+	f := newFixture(t, 4)
+	plan := graph.PlanResult{
+		Missions: []graph.PlannerMission{
+			{ID: 1, Skill: "x", Role: "y", Task: "ok"},
+			{ID: 2, Skill: "x", Role: "y", Task: "boom"},
+		},
+	}
+	plan = f.insertPlan(t, plan)
+
+	ctx := context.Background()
+	f.exec.Tick(ctx)
+	started := f.driver.WaitStarted(t, 2)
+	require.Len(t, started, 2)
+
+	for _, a := range started {
+		res := graph.DispatchResult{Status: graph.StatusDone, Summary: "fine", TurnsUsed: 1}
+		if a.Task == "boom" {
+			res = graph.DispatchResult{Status: graph.StatusFailed, Error: "boom", TurnsUsed: 2}
+		}
+		f.driver.Release(a.ChildSessionID, res)
+	}
+	f.waitReported(t, len(started))
+	f.exec.Tick(ctx)
+
+	events, err := f.sess.GetEvents(ctx, f.coord)
+	require.NoError(t, err)
+	var payload map[string]any
+	for _, ev := range events {
+		if ev.EventType == sessstore.EventTypeUserMessage && ev.Content == graph.CompletionMarker {
+			payload, _ = ev.Metadata["completion_payload"].(map[string]any)
+			break
+		}
+	}
+	require.NotNil(t, payload)
+	assert.Equal(t, false, payload["all_succeeded"])
+	outs, _ := payload["outcomes"].([]any)
+	require.Len(t, outs, 2)
+
+	statuses := map[string]bool{}
+	for _, raw := range outs {
+		o, _ := raw.(map[string]any)
+		s, _ := o["status"].(string)
+		statuses[s] = true
+	}
+	assert.True(t, statuses[graph.StatusDone])
+	assert.True(t, statuses[graph.StatusFailed])
+}
+
 func TestExecutor_ParallelMissionsConcurrent(t *testing.T) {
 	f := newFixture(t, 4)
 	plan := graph.PlanResult{
