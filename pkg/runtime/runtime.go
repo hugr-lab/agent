@@ -30,6 +30,10 @@ import (
 	"google.golang.org/genai"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/artifacts"
+	artstorage "github.com/hugr-lab/hugen/pkg/artifacts/storage"
+	artfs "github.com/hugr-lab/hugen/pkg/artifacts/storage/fs"
+	arts3 "github.com/hugr-lab/hugen/pkg/artifacts/storage/s3"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/chatcontext"
 	"github.com/hugr-lab/hugen/pkg/config"
@@ -71,6 +75,12 @@ type Runtime struct {
 	// Missions is the phase-2 mission graph executor. Nil when no
 	// missions-config was provided at runtime.Build.
 	Missions *missionsexec.Executor
+
+	// Artifacts is the phase-3 artifact registry manager. Implements
+	// both tools.Provider (for the tools.Manager surface) and
+	// google.golang.org/adk/artifact.Service (for the A2A / dev-UI
+	// path), so the same value flows through every consumer.
+	Artifacts *artifacts.Manager
 
 	// Engine is the embedded query-engine (nil in hub-only mode).
 	Engine *qe.Service
@@ -452,10 +462,39 @@ func Build(
 		return nil, fmt.Errorf("runtime: register missions-tick: %w", err)
 	}
 
+	// Spec 008 — artifact registry. Storage backend is selected by
+	// operator config; fs is the day-1 implementation, s3 ships as
+	// a stub that registers cleanly but refuses I/O. Manager
+	// implements both tools.Provider AND adk artifact.Service —
+	// same value flows to the tools.Manager, the A2A path, and the
+	// dev-UI without adapter shims.
+	registerArtifactBackends()
+	storageBackend, err := openArtifactStorage(cfg.Artifacts, logger)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: open artifact storage: %w", err)
+	}
+	artManager, err := artifacts.New(artifactsConfigFromOperatorConfig(cfg.Artifacts), artifacts.Deps{
+		Querier:         memoryQuerier,
+		Storage:         storageBackend,
+		SessionEvents:   sessHub,
+		Logger:          logger,
+		AgentID:         cfg.Identity.ID,
+		AgentShort:      cfg.Identity.ShortID,
+		EmbedderEnabled: embedderEnabled,
+	})
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build artifact manager: %w", err)
+	}
+	rt.Artifacts = artManager
+	toolsMgr.AddProvider(artManager)
+
 	logger.Info("runtime: internal services registered",
 		"providers", []string{
 			skills.ServiceName, memory.ServiceName, chatcontext.ServiceName,
 			hugen.SubAgentProviderName, missions.ServiceName,
+			artifacts.ServiceName,
 		})
 
 	for _, pc := range cfg.Providers {
@@ -743,6 +782,80 @@ func loadCoordinatorPrompt(skillsPath, name string, logger *slog.Logger) (string
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// artifactBackendsRegistered ensures storage.Register fires exactly
+// once per process (storage.Register panics on duplicate; tests
+// build multiple Runtimes in a single binary).
+var artifactBackendsRegistered sync.Once
+
+// registerArtifactBackends installs fs + s3 factories into the
+// storage registry. Idempotent across Runtime constructions.
+//
+// Per Constitution §III the registry MUST NOT be populated from
+// init() in the backend packages — the runtime owns wiring.
+func registerArtifactBackends() {
+	artifactBackendsRegistered.Do(func() {
+		artstorage.Register(artfs.Name, artfs.NewFactory)
+		artstorage.Register(arts3.Name, arts3.NewFactory)
+	})
+}
+
+// openArtifactStorage selects the active backend from operator
+// config and returns the live Storage. Logs a clear warning when
+// the operator picked the s3 stub so they can see at boot that
+// publishes will be refused.
+func openArtifactStorage(cfg config.ArtifactsConfig, logger *slog.Logger) (artstorage.Storage, error) {
+	switch cfg.Backend {
+	case "fs", "":
+		s, err := artstorage.Open(artfs.Name, artfs.Config{
+			Dir:        cfg.FS.Dir,
+			CreateMode: cfg.FS.CreateMode,
+		})
+		if err != nil {
+			return nil, err
+		}
+		logger.Info("artifacts: storage backend",
+			"backend", artfs.Name,
+			"dir", cfg.FS.Dir)
+		return s, nil
+	case "s3":
+		s, err := artstorage.Open(arts3.Name, arts3.Config{
+			Bucket:  cfg.S3.Bucket,
+			Region:  cfg.S3.Region,
+			Prefix:  cfg.S3.Prefix,
+			RoleARN: cfg.S3.RoleARN,
+		})
+		if err != nil {
+			return nil, err
+		}
+		logger.Warn("artifacts: storage backend (stub — publishes will be rejected with ErrNotImplemented; switch artifacts.backend back to 'fs' for production)",
+			"backend", arts3.Name,
+			"bucket", cfg.S3.Bucket,
+			"region", cfg.S3.Region)
+		return s, nil
+	default:
+		return nil, fmt.Errorf("runtime: unknown artifacts.backend %q (want fs|s3)", cfg.Backend)
+	}
+}
+
+// artifactsConfigFromOperatorConfig translates the operator's
+// pkg/config.ArtifactsConfig into the manager's package-internal
+// Config. Backend-specific keys (cfg.FS.Dir, cfg.S3.*) intentionally
+// do NOT cross this boundary — they were already consumed by
+// openArtifactStorage. The manager itself never reads them.
+func artifactsConfigFromOperatorConfig(cfg config.ArtifactsConfig) artifacts.Config {
+	schemaInspect := true
+	if cfg.SchemaInspect != nil {
+		schemaInspect = *cfg.SchemaInspect
+	}
+	return artifacts.Config{
+		InlineBytesMax:  cfg.InlineBytesMax,
+		SchemaInspect:   schemaInspect,
+		TTLSessionGrace: int64(cfg.TTLSession.Seconds()),
+		TTL7dSeconds:    int64(cfg.TTL7d.Seconds()),
+		TTL30dSeconds:   int64(cfg.TTL30d.Seconds()),
+	}
 }
 
 // buildLocalHugr brings up the embedded query-engine backed by

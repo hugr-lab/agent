@@ -10,6 +10,7 @@ import (
 	adkartifact "google.golang.org/adk/artifact"
 	"google.golang.org/adk/tool"
 
+	artstore "github.com/hugr-lab/hugen/pkg/artifacts/store"
 	"github.com/hugr-lab/hugen/pkg/artifacts/storage"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/query-engine/types"
@@ -49,6 +50,11 @@ type Deps struct {
 	// Required.
 	AgentID    string
 	AgentShort string
+
+	// EmbedderEnabled toggles the `summary:` argument on
+	// insert_artifacts so Hugr embeds description server-side.
+	// Threaded through to artifacts/store.Client.
+	EmbedderEnabled bool
 }
 
 // Config is the package-internal subset of pkg/config.ArtifactsConfig
@@ -76,11 +82,21 @@ type Config struct {
 // directly — same pattern as pkg/memory/service.go and
 // pkg/missions/spawn.go.
 type Manager struct {
-	cfg     Config
-	deps    Deps
-	log     *slog.Logger
-	tools   []tool.Tool
+	cfg   Config
+	deps  Deps
+	log   *slog.Logger
+	tools []tool.Tool
+
+	// cachedStore is built lazily on first store-facing method call.
+	// Single Client per Manager; Manager-side methods funnel through
+	// store() to grab it.
+	cachedStore *artstoreClient
 }
+
+// artstoreClient is an alias to keep the manager's struct field
+// definition above package-private without leaking the
+// pkg/artifacts/store import path into manager.go's interface.
+type artstoreClient = artstore.Client
 
 // New constructs a Manager, validates required deps, and pre-builds
 // the tool slice. Returns an error if any required dep is missing —
@@ -121,11 +137,14 @@ func (m *Manager) Name() string { return ServiceName }
 // Tools implements tools.Provider.
 func (m *Manager) Tools() []tool.Tool { return m.tools }
 
-// buildTools returns the slice of unexported artifact tools. Empty
-// in this commit; populated by US1+ tasks per
-// specs/008-artifact-registry/contracts/artifact-tools.md.
+// buildTools returns the slice of unexported artifact tools. The
+// slice grows story-by-story: US1 adds artifact_publish; US2 adds
+// artifact_info; US3 adds artifact_query; US4 adds artifact_remove +
+// artifact_visibility + artifact_list; US9 adds artifact_chain.
 func (m *Manager) buildTools() []tool.Tool {
-	return nil
+	return []tool.Tool{
+		&artifactPublishTool{m: m},
+	}
 }
 
 // AgentID returns the scope the Manager was constructed for.
@@ -140,12 +159,6 @@ func (m *Manager) AgentID() string { return m.deps.AgentID }
 // already has the cfg + deps it needs to flesh them out without
 // further plumbing.
 // ─────────────────────────────────────────────────────────────────
-
-// Publish stub; full body lands in T026 (US1).
-func (m *Manager) Publish(ctx context.Context, _ PublishRequest) (ArtifactRef, error) {
-	_ = ctx
-	return ArtifactRef{}, errNotImplementedYet("Publish", "T026 / US1")
-}
 
 // Remove stub; full body lands in T053 (US4).
 func (m *Manager) Remove(ctx context.Context, _ string, _ string) error {
@@ -189,12 +202,6 @@ func (m *Manager) OpenReader(ctx context.Context, _ string, _ string) (io.ReadCl
 	return nil, Stat{}, errNotImplementedYet("OpenReader", "T034 / US2")
 }
 
-// AddGrant stub; full body lands in T049 (US4) / T063 (US6).
-func (m *Manager) AddGrant(ctx context.Context, _ string, _ string, _ string, _ string) error {
-	_ = ctx
-	return errNotImplementedYet("AddGrant", "T049 / US4")
-}
-
 // Cleanup stub; full body lands in T068 (US7).
 func (m *Manager) Cleanup(ctx context.Context) (int, error) {
 	_ = ctx
@@ -210,13 +217,75 @@ func (m *Manager) Cleanup(ctx context.Context) (int, error) {
 // above (Publish / OpenReader / Remove / ListVisible).
 // ─────────────────────────────────────────────────────────────────
 
-// Save implements adkartifact.Service.
+// Save implements adkartifact.Service. The ADK contract is opaque
+// to our Visibility / Tags / DerivedFrom / TTL knobs — Save calls
+// always land as visibility=self, ttl=session, no tags, no
+// derivation. Producers that need richer metadata go through the
+// artifact_publish tool instead.
+//
+// Returns version=1 for every successful Save; phase 3 treats
+// artifacts as immutable single-version objects (research §1).
 func (m *Manager) Save(ctx context.Context, req *adkartifact.SaveRequest) (*adkartifact.SaveResponse, error) {
-	_ = ctx
 	if req == nil {
 		return nil, errors.New("artifacts: Save: nil request")
 	}
-	return nil, errNotImplementedYet("Save", "T028 / US1")
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("artifacts: Save: %w", err)
+	}
+
+	// genai.Part may carry inline blob bytes (Part.InlineData) or
+	// text (Part.Text). For our purposes both flow through Publish
+	// as inline bytes; text becomes a UTF-8 byte slice typed as
+	// "txt".
+	pubReq := PublishRequest{
+		CallerSessionID: req.SessionID,
+		Name:            req.FileName,
+		Visibility:      VisibilitySelf,
+		TTL:             TTLSession,
+	}
+	switch {
+	case req.Part.InlineData != nil && len(req.Part.InlineData.Data) > 0:
+		pubReq.Source = PublishSource{InlineBytes: req.Part.InlineData.Data}
+		pubReq.Type = typeFromMIME(req.Part.InlineData.MIMEType)
+		pubReq.Description = req.FileName
+	case req.Part.Text != "":
+		pubReq.Source = PublishSource{InlineBytes: []byte(req.Part.Text)}
+		pubReq.Type = "txt"
+		pubReq.Description = req.FileName
+	default:
+		return nil, errors.New("artifacts: Save: empty part (need InlineData or Text)")
+	}
+
+	if _, err := m.Publish(ctx, pubReq); err != nil {
+		return nil, err
+	}
+	return &adkartifact.SaveResponse{Version: 1}, nil
+}
+
+// typeFromMIME maps a MIME string onto our `type` enum. Returns
+// "bin" for unrecognised types so the file extension lookup in the
+// fs backend always has a value.
+func typeFromMIME(mt string) string {
+	switch {
+	case mt == "":
+		return "bin"
+	case mt == "application/json" || mt == "text/json":
+		return "json"
+	case mt == "text/csv":
+		return "csv"
+	case mt == "text/html":
+		return "html"
+	case mt == "text/plain" || mt == "text/markdown":
+		return "txt"
+	case mt == "image/svg+xml":
+		return "svg"
+	case mt == "application/pdf":
+		return "pdf"
+	case mt == "application/x-parquet" || mt == "application/vnd.apache.parquet":
+		return "parquet"
+	default:
+		return "bin"
+	}
 }
 
 // Load implements adkartifact.Service.

@@ -648,6 +648,116 @@ type session_reviews @table(name: "session_reviews") @module(name: "agent") {
 }
 
 # ============================================================
+# Artifacts (spec 008) — persistent registry for files produced by
+# sessions. Bytes live OUTSIDE hub.db in the active Storage backend
+# (pkg/artifacts/storage); this row is metadata-only. Description is
+# embedded server-side via Hugr's `summary:` argument when the
+# embedder data source is attached, identical to memory_items and
+# session_events.
+# ============================================================
+
+"""A reference to a file produced by a session. Metadata-only — bytes live in pkg/artifacts/storage. Description is vectorised server-side for semantic search via the @embeddings directive."""
+type artifacts @table(name: "artifacts") @module(name: "agent")
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderModel }}", vector: "description_embedding", distance: Cosine){{ end }} {
+  """Synthetic sortable id: art_{agentShort}_{ts}_{rnd}"""
+  id:                 String! @pk
+  """Agent that owns this artifact"""
+  agent_id:           String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that owns this artifact"
+    references_query: "artifacts"
+    references_description: "Artifacts published by this agent"
+  )
+  """Producer-supplied display name (no extension; type field carries the type)"""
+  name:               String!
+  """Artifact type: parquet | csv | json | html | svg | pdf | txt | md | bin | ..."""
+  type:               String!
+  """Opaque to the manager; backend-specific key resolved by Storage.Open(ObjectRef{Backend, Key})"""
+  storage_key:        String!
+  """Backend name that wrote the bytes (fs | s3). Persisted so a future config flip keeps historical reads working."""
+  storage_backend:    String!
+  """Optional: caller-supplied source path before publish (for audit/debug)"""
+  original_path:      String
+  """Human-readable description; embedded server-side into description_embedding"""
+  description:        String!
+  {{ if gt .VectorSize 0 }}
+  """Vector embedding of description (cosine similarity)"""
+  description_embedding: Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
+  """Creator session id"""
+  session_id:         String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Session that created this artifact"
+    references_query: "artifacts"
+    references_description: "Artifacts created in this session"
+  )
+  """Equals session_id when the creator is a sub-agent session; NULL when the creator is a coordinator (root) session"""
+  mission_session_id: String
+  """Parent artifact id (lineage chain)"""
+  derived_from:       String  @field_references(
+    references_name: "artifacts"
+    field: "id"
+    query: "parent"
+    description: "Artifact this one was derived from"
+    references_query: "derivatives"
+    references_description: "Artifacts derived from this one"
+  )
+  """Visibility: self | parent | graph | user. Strict-widening only."""
+  visibility:         String! @default(value: "self")
+  """Created at timestamp"""
+  created_at:         Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  """Stat'd size in bytes"""
+  size_bytes:         Int
+  """Tabular only: row count from DESCRIBE / COUNT(*) probe at publish time"""
+  row_count:          Int
+  """Tabular only: column count"""
+  col_count:          Int
+  """Tabular only: column schema as DuckDB DESCRIBE output (JSON)"""
+  file_schema:        JSON
+  """Free-form tags for filtering in artifact_list"""
+  tags:               [String!]
+  """TTL classification: session | 7d | 30d | permanent"""
+  ttl:                String! @default(value: "session")
+}
+
+# ============================================================
+# Artifact grants (spec 008) — explicit access overlay. Coordinator-
+# only. Records widen-only deviations from artifacts.visibility for a
+# specific (agent_id, session_id) pair. Issued by Manager.WidenVisibility
+# (and at mission spawn time when MissionSpec.InputArtifacts is set).
+# ============================================================
+
+"""Explicit grant authorising a (agent_id, session_id) pair to see an artifact whose visibility level alone would otherwise hide it. Idempotent on composite PK."""
+type artifact_grants @table(name: "artifact_grants") @module(name: "agent") {
+  """Artifact this grant applies to"""
+  artifact_id: String! @pk @field_references(
+    references_name: "artifacts"
+    field: "id"
+    query: "artifact"
+    description: "Artifact this grant applies to"
+    references_query: "grants"
+    references_description: "Explicit grants extending this artifact's visibility"
+  )
+  """Agent receiving access"""
+  agent_id:    String! @pk
+  """Session receiving access"""
+  session_id:  String! @pk @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Session receiving access"
+  )
+  """Agent_id of the grant issuer (the coordinator)"""
+  granted_by:  String!
+  """When the grant was issued"""
+  granted_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.granted_at")
+}
+
+# ============================================================
 # Data source config:
 #   Name:     "hub.db"
 #   AsModule: true

@@ -186,7 +186,10 @@ func registerProviderAuth(ctx context.Context, cfg *config.Config, reg *auth.Sou
 // a single A2A listener. OIDC callbacks live on the same mux, so the
 // redirect_uri matches prod.
 func serveA2A(ctx context.Context, a *app) error {
-	artifactSvc := artifact.InMemoryService()
+	// Spec 008: a.runtime.Artifacts is the persistent registry that
+	// implements adk artifact.Service directly. The previous
+	// artifact.InMemoryService() stub is gone.
+	artifactSvc := a.runtime.Artifacts
 	attachA2A(a.authMux, a.runtime, artifactSvc, a.cfg.A2A.BaseURL)
 
 	srv := &http.Server{
@@ -204,7 +207,10 @@ func serveA2A(ctx context.Context, a *app) error {
 // the ADK webui + REST + /dev helpers on cfg.DevUI.Port, loopback-
 // only. Two listeners, one runtime.
 func serveDevUI(ctx context.Context, a *app) error {
-	artifactSvc := artifact.InMemoryService()
+	// Spec 008: a.runtime.Artifacts is the persistent registry that
+	// implements adk artifact.Service directly. The previous
+	// artifact.InMemoryService() stub is gone.
+	artifactSvc := a.runtime.Artifacts
 	attachA2A(a.authMux, a.runtime, artifactSvc, a.cfg.A2A.BaseURL)
 
 	devHandler, err := buildDevRouter(a.runtime, artifactSvc,
