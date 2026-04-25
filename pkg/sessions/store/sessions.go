@@ -86,6 +86,50 @@ func (c *Client) UpdateSessionStatus(ctx context.Context, id, status string) err
 	)
 }
 
+// ListSubAgentSessions returns every sub-agent session row owned by
+// this agent regardless of status — including completed / failed /
+// abandoned. Used by Executor.RestoreState to rebuild a coordinator's
+// full mission DAG (active rows alone don't carry the terminal
+// upstreams that pending missions depend on).
+func (c *Client) ListSubAgentSessions(ctx context.Context) ([]Record, error) {
+	type row struct {
+		ID                 string         `json:"id"`
+		AgentID            string         `json:"agent_id"`
+		OwnerID            string         `json:"owner_id"`
+		ParentSessionID    string         `json:"parent_session_id"`
+		ForkAfterSeq       *int           `json:"fork_after_seq"`
+		SessionType        string         `json:"session_type"`
+		SpawnedFromEventID string         `json:"spawned_from_event_id"`
+		Status             string         `json:"status"`
+		Mission            string         `json:"mission"`
+		Metadata           map[string]any `json:"metadata"`
+		CreatedAt          time.Time      `json:"created_at"`
+		UpdatedAt          time.Time      `json:"updated_at"`
+	}
+	rows, err := queries.RunQuery[[]row](ctx, c.querier,
+		`query ($agent: String!) {
+			hub { db { agent {
+				sessions(filter: {agent_id: {eq: $agent}, session_type: {eq: "subagent"}}) {
+					id agent_id owner_id parent_session_id fork_after_seq session_type spawned_from_event_id status mission metadata created_at updated_at
+				}
+			}}}
+		}`,
+		map[string]any{"agent": c.agentID},
+		"hub.db.agent.sessions",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]Record, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Record(r))
+	}
+	return out, nil
+}
+
 // ListActiveSessions returns all sessions owned by this agent with
 // status="active". Used by SessionManager.RestoreOpen on startup.
 func (c *Client) ListActiveSessions(ctx context.Context) ([]Record, error) {

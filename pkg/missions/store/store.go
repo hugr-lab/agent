@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/hugr-lab/query-engine/types"
 
@@ -90,6 +91,41 @@ func (s *Store) ListAgentMissions(ctx context.Context) ([]graph.MissionRecord, e
 		out = append(out, recordFromSession(r, coord))
 	}
 	return out, nil
+}
+
+// ListAllAgentMissions returns every sub-agent row owned by this agent
+// regardless of status — Restore needs terminal upstreams to recompute
+// pending/ready states on missions whose deps already finished before
+// the restart.
+func (s *Store) ListAllAgentMissions(ctx context.Context) ([]graph.MissionRecord, error) {
+	rows, err := s.sess.ListSubAgentSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("missions: list all agent missions: %w", err)
+	}
+	out := make([]graph.MissionRecord, 0, len(rows))
+	for _, r := range rows {
+		coord, _ := r.Metadata[graph.MetadataKeyCoordSession].(string)
+		if coord == "" {
+			coord = r.ParentSessionID
+		}
+		out = append(out, recordFromSession(r, coord))
+	}
+	return out, nil
+}
+
+// LastEventAt returns the CreatedAt of the most recent event in the
+// given session. Empty time + nil error when the session has no
+// events yet (a fresh row that crashed before its first event lands).
+// Used by Restore for the staleness-cutoff check.
+func (s *Store) LastEventAt(ctx context.Context, sessionID string) (time.Time, error) {
+	events, err := s.sess.GetEvents(ctx, sessionID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("missions: last event timestamp: %w", err)
+	}
+	if len(events) == 0 {
+		return time.Time{}, nil
+	}
+	return events[len(events)-1].CreatedAt, nil
 }
 
 // MarkStatus transitions a mission's persisted status. Maps runtime

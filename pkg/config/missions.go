@@ -26,4 +26,13 @@ type MissionsConfig struct {
 	// ClassifierTimeout caps the single classifier LLM call made per
 	// eligible user message. 0 falls back to 3s.
 	ClassifierTimeout time.Duration `mapstructure:"classifier_timeout"`
+
+	// StaleMissionTimeout is the cutoff Restore uses to decide
+	// whether an active sub-agent session is dead after a restart:
+	// if `now - last_event > StaleMissionTimeout` the mission is
+	// marked abandoned with reason="restart: stale". 0 falls back
+	// to 5m. Trade-off: too short → live but slow missions get
+	// killed on every restart; too long → operators wait minutes
+	// before stuck rows are reaped.
+	StaleMissionTimeout time.Duration `mapstructure:"stale_mission_timeout"`
 }

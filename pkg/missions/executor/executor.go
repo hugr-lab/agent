@@ -29,6 +29,8 @@ type Executor struct {
 	events      EventWriter
 	driver      MissionDriver
 	parallelism int
+	staleAfter  time.Duration
+	nowFn       func() time.Time
 	logger      *slog.Logger
 
 	// RunOnce, when set, is invoked by the completion-summary fan-out
@@ -55,6 +57,11 @@ type Config struct {
 	Driver      MissionDriver
 	Logger      *slog.Logger
 	Parallelism int
+
+	// StaleAfter caps how long an active mission can sit without
+	// emitting an event before Restore considers it dead and marks
+	// it abandoned. Zero falls back to 5 minutes (config default).
+	StaleAfter time.Duration
 }
 
 // New builds an Executor. Parallelism < 1 is clamped to 4. Logger is
@@ -66,13 +73,28 @@ func New(cfg Config) *Executor {
 	if cfg.Parallelism < 1 {
 		cfg.Parallelism = 4
 	}
+	if cfg.StaleAfter <= 0 {
+		cfg.StaleAfter = 5 * time.Minute
+	}
 	return &Executor{
 		store:       cfg.Store,
 		events:      cfg.Events,
 		driver:      cfg.Driver,
 		parallelism: cfg.Parallelism,
+		staleAfter:  cfg.StaleAfter,
+		nowFn:       time.Now,
 		logger:      cfg.Logger,
 	}
+}
+
+// SetNowFn overrides the clock the Executor consults for staleness
+// checks. Tests use this to align their notion of "now" with hub.db's
+// server-stamped event timestamps; production never calls it.
+func (e *Executor) SetNowFn(fn func() time.Time) {
+	if fn == nil {
+		fn = time.Now
+	}
+	e.nowFn = fn
 }
 
 // ------------------------------------------------------------------
@@ -239,6 +261,160 @@ func (e *Executor) OnFollowUp(
 			"coord", coordSessionID, "err", err)
 	}
 	return nil
+}
+
+// RestoreReport is the summary RestoreState returns so the runtime
+// can log a single line on boot describing what survived the
+// restart.
+type RestoreReport struct {
+	Coordinators   int // distinct coords whose DAG was rebuilt
+	Resumed        int // missions reattached as running
+	Pending        int // missions still pending (deps unsatisfied)
+	Ready          int // missions promoted to ready (all deps done)
+	StaleAbandoned int // active rows whose last event was older than StaleAfter
+}
+
+// RestoreState rebuilds every coordinator's DAG from hub.db on boot.
+// Loads ALL sub-agent rows (including terminal) so pending missions
+// can correctly evaluate their upstream done-ness; for each non-
+// terminal row, freshness-checks the last event timestamp and
+// abandons stale ones (FR-019). Active rows whose last event is
+// fresh are reattached as `running` — no `mission_spawn` event is
+// re-emitted (FR-020), spec-006's transcript replay path resumes
+// the model.
+//
+// Caller must invoke once before the scheduler kicks off the first
+// Tick. Concurrent Restore + Tick is undefined behaviour.
+func (e *Executor) RestoreState(ctx context.Context) (RestoreReport, error) {
+	rows, err := e.store.ListAllAgentMissions(ctx)
+	if err != nil {
+		return RestoreReport{}, fmt.Errorf("missions: restore — list: %w", err)
+	}
+
+	byCoord := map[string][]graph.MissionRecord{}
+	for _, r := range rows {
+		if r.CoordSessionID == "" {
+			continue
+		}
+		byCoord[r.CoordSessionID] = append(byCoord[r.CoordSessionID], r)
+	}
+
+	var rep RestoreReport
+	now := e.nowFn()
+	for coord, missions := range byCoord {
+		rep.Coordinators++
+		d := e.ensureDag(coord)
+		d.mu.Lock()
+
+		for _, m := range missions {
+			node := &missionNode{
+				id:         m.ID,
+				coordID:    coord,
+				skill:      m.Skill,
+				role:       m.Role,
+				task:       m.Task,
+				status:     m.Status,
+				upstream:   append([]string(nil), m.DependsOn...),
+				summary:    m.Summary,
+				reason:     m.Reason,
+				startedAt:  m.StartedAt,
+				terminated: m.TerminatedAt,
+			}
+
+			// Active in hub → either resume or stale-abandon.
+			if m.Status == graph.StatusRunning {
+				last, lastErr := e.store.LastEventAt(ctx, m.ID)
+				stale := lastErr == nil && !last.IsZero() && now.Sub(last) > e.staleAfter
+				if stale {
+					node.status = graph.StatusAbandoned
+					node.terminated = now
+					node.reason = "restart: stale"
+					if err := e.store.MarkStatus(ctx, m.ID, graph.StatusAbandoned); err != nil {
+						e.logger.WarnContext(ctx, "missions: restore mark stale",
+							"id", m.ID, "err", err)
+					}
+					e.emitResult(ctx, node, missionResult{
+						status:   graph.StatusAbandoned,
+						errorMsg: "restart: stale",
+					})
+					rep.StaleAbandoned++
+				} else {
+					rep.Resumed++
+				}
+			}
+			d.missions[m.ID] = node
+		}
+
+		// Wire downstream slots from upstream so the cascade walk +
+		// promoteReady have full graph visibility.
+		for _, n := range d.missions {
+			for _, up := range n.upstream {
+				if upN, ok := d.missions[up]; ok {
+					upN.downstream = append(upN.downstream, n.id)
+				}
+			}
+		}
+
+		// Recompute pending → ready / abandoned based on persisted
+		// upstream statuses. Run AFTER edge wiring so the dep lookup
+		// sees terminal upstreams.
+		for _, n := range d.missions {
+			if n.status != graph.StatusPending {
+				continue
+			}
+			var (
+				allDone     = true
+				anyTerminal bool
+			)
+			for _, up := range n.upstream {
+				upN, ok := d.missions[up]
+				if !ok {
+					// Upstream missing → treat as terminal-failed
+					// (edge of the DAG we don't see). Conservative.
+					anyTerminal = true
+					allDone = false
+					break
+				}
+				switch upN.status {
+				case graph.StatusFailed, graph.StatusAbandoned:
+					anyTerminal = true
+					allDone = false
+				case graph.StatusDone:
+					// keep allDone
+				default:
+					allDone = false
+				}
+			}
+			switch {
+			case anyTerminal:
+				n.status = graph.StatusAbandoned
+				n.reason = "restart: upstream terminal"
+				rep.StaleAbandoned++
+				if err := e.store.MarkStatus(ctx, n.id, graph.StatusAbandoned); err != nil {
+					e.logger.WarnContext(ctx, "missions: restore cascade",
+						"id", n.id, "err", err)
+				}
+				e.emitResult(ctx, n, missionResult{
+					status:   graph.StatusAbandoned,
+					errorMsg: n.reason,
+				})
+			case allDone:
+				n.status = graph.StatusReady
+				rep.Ready++
+			default:
+				rep.Pending++
+			}
+		}
+		d.mu.Unlock()
+	}
+
+	e.logger.Info("missions: restore complete",
+		"coordinators", rep.Coordinators,
+		"resumed", rep.Resumed,
+		"ready", rep.Ready,
+		"pending", rep.Pending,
+		"stale_abandoned", rep.StaleAbandoned)
+	return rep, nil
 }
 
 // Cancel marks `missionID` abandoned and walks downstream to abandon

@@ -388,7 +388,16 @@ func Build(
 		Driver:      missionsDriver,
 		Logger:      logger,
 		Parallelism: 4,
+		StaleAfter:  cfg.Missions.StaleMissionTimeout,
 	})
+	// Spec 007 US5: rebuild every coordinator's DAG from hub.db
+	// before the scheduler kicks in. Stale-active rows get marked
+	// abandoned with reason="restart: stale"; fresh rows are
+	// reattached without re-emitting mission_spawn (FR-020).
+	if _, err := missionsExec.RestoreState(ctx); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: missions restore: %w", err)
+	}
 	missionsSvc := missions.NewService(missions.Config{
 		Planner:  missionsPlanner,
 		Executor: missionsExec,
