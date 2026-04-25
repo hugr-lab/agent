@@ -35,4 +35,11 @@ type MissionsConfig struct {
 	// killed on every restart; too long → operators wait minutes
 	// before stuck rows are reaped.
 	StaleMissionTimeout time.Duration `mapstructure:"stale_mission_timeout"`
+
+	// MaxSpawnDepthAgent is the agent-wide ceiling on
+	// spawn_sub_mission depth applied when the caller role's
+	// max_depth is 0. Counted as parent_session_id hops back to
+	// the coordinator. 0 falls back to 4 (a-bit-of-headroom
+	// default — phase-1 dispatchers are depth 1).
+	MaxSpawnDepthAgent int `mapstructure:"max_spawn_depth_agent"`
 }

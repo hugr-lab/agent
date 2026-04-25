@@ -406,6 +406,20 @@ func Build(
 		Events:   sessHub,
 	})
 	toolsMgr.AddProvider(missionsSvc)
+	// Spec 007 US6 — sub-agent spawn surface. Lives in its own
+	// provider (`_mission_spawn`) so the coordinator's _coordinator
+	// skill can opt in to mission_tools without inadvertently
+	// exposing spawn_sub_mission. The skills/_subagent autoload
+	// skill (autoload_for: [subagent]) wires the provider onto every
+	// sub-agent session; the tool itself enforces can_spawn +
+	// max_depth at run time.
+	spawnSvc := missions.NewSpawnService(missions.SpawnConfig{
+		Executor:      missionsExec,
+		Sessions:      sessionMgr,
+		Skills:        skillsMgr,
+		MaxSpawnDepth: cfg.Missions.MaxSpawnDepthAgent,
+	})
+	toolsMgr.AddProvider(spawnSvc)
 	rt.Missions = missionsExec
 	// Drop cached plans when the coordinator session closes so a
 	// restarted conversation never serves stale DAG ids.

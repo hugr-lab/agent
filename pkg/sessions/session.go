@@ -646,6 +646,25 @@ func (s *Session) metadataSkillRole() (string, string) {
 	return s.metaSkill, s.metaRole
 }
 
+// Skill returns the (skill, role) the sub-agent session was dispatched
+// under, or empty strings when the session is a coordinator / fork.
+// Read-only; cached at Create + restore. Used by spec-007's
+// spawn_sub_mission tool to enforce the can_spawn / max_depth gates
+// without re-reading hub.db.
+func (s *Session) Skill() string {
+	if s == nil {
+		return ""
+	}
+	return s.metaSkill
+}
+
+func (s *Session) Role() string {
+	if s == nil {
+		return ""
+	}
+	return s.metaRole
+}
+
 // AppendEvent writes a transcript event to the hub for this session
 // with mutual exclusion against every other writer on the same
 // session. Call this from any path (synchronous skill events,

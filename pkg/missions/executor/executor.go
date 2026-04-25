@@ -151,6 +151,53 @@ func (e *Executor) Register(coordSessionID string, plan *graph.PlanResult) {
 	}
 }
 
+// RegisterSingle adds one mission node to an existing coordinator's
+// DAG. Used by spawn_sub_mission — the spawning sub-agent calls this
+// at tool-run time to enqueue a single child mission. Returns the
+// generated session id for the new mission.
+//
+// Caller is responsible for the depth + role-permission checks; this
+// method enforces only the local invariants (mission id uniqueness,
+// dependency targets exist within the same coordinator's DAG, no
+// cycle).
+func (e *Executor) RegisterSingle(
+	coordSessionID, skill, role, task string,
+	dependsOn []string,
+) (string, error) {
+	d := e.ensureDag(coordSessionID)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, dep := range dependsOn {
+		if _, ok := d.missions[dep]; !ok {
+			return "", fmt.Errorf("missions: spawn dependency %q not found in coordinator %q",
+				dep, coordSessionID)
+		}
+	}
+
+	missionID := "sub_" + uuid.NewString()
+	node := &missionNode{
+		id:       missionID,
+		coordID:  coordSessionID,
+		skill:    skill,
+		role:     role,
+		task:     task,
+		status:   graph.StatusPending,
+		upstream: append([]string(nil), dependsOn...),
+	}
+	for _, dep := range dependsOn {
+		if upN, ok := d.missions[dep]; ok {
+			upN.downstream = append(upN.downstream, missionID)
+		}
+	}
+	d.missions[missionID] = node
+	// Reset completionFired so a graph that previously wrapped up but
+	// got a fresh spawn re-arms its completion summary on the next
+	// terminal transition.
+	d.completionFired = false
+	return missionID, nil
+}
+
 // Snapshot returns a stable read-only view of the coordinator's DAG,
 // merging in-memory runtime status with persisted mission rows. Safe
 // to call concurrently with Tick. When the in-memory DAG is empty
