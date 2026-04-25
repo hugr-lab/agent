@@ -23,6 +23,13 @@ var (
 // pkg/runtime/runtime.go at boot, NOT from init() in the backend
 // packages. The registry is process-global because there's exactly
 // one runtime per process; tests can flush via reset for isolation.
+//
+// Phase-3 registers exactly one ACTIVE backend (the one named by
+// cfg.Artifacts.Backend). A future spec extension can add an
+// `additional_backends` list so historical reads against fs-stored
+// artifacts keep working when an operator flips Backend to s3 —
+// each registered Factory becomes resolvable when the manager
+// looks up an artifact's recorded storage_backend.
 func Register(name string, f Factory) {
 	if name == "" {
 		panic("artifacts/storage: Register: empty name")
