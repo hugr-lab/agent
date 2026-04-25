@@ -59,31 +59,36 @@ func (m *Manager) Cleanup(ctx context.Context) (int, error) {
 
 // fetchCleanupCandidates returns the agent's artifacts whose TTL
 // class is in the cleanup-eligible set ('session' | '7d' | '30d').
-// Permanent rows are skipped at the source.
+// Permanent rows are skipped here so eligibleForCleanup never sees
+// them. One round-trip; phase-3 scale (≤ 10K rows / agent) doesn't
+// warrant pagination.
 func (m *Manager) fetchCleanupCandidates(ctx context.Context) ([]artstore.Record, error) {
-	classes := []string{"session", "7d", "30d"}
-	out := make([]artstore.Record, 0)
-	for _, ttl := range classes {
-		rows, err := m.store().ListByAgent(ctx, artstore.ListFilter{Type: ""})
-		if err != nil {
-			return nil, err
+	rows, err := m.store().ListByAgent(ctx, artstore.ListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]artstore.Record, 0, len(rows))
+	for _, r := range rows {
+		switch r.TTL {
+		case string(TTLSession), string(TTL7d), string(TTL30d):
+			out = append(out, r)
 		}
-		for _, r := range rows {
-			if r.TTL == ttl {
-				out = append(out, r)
-			}
-		}
-		// ListByAgent already returns every row; one pass would do
-		// — but classifying by enum keeps the loop body uniform and
-		// makes the call shape explicit. Break early to avoid the
-		// duplicate fetches.
-		break
 	}
 	return out, nil
 }
 
 // eligibleForCleanup applies the per-class deadline check. Returns
 // (true, nil) when the artifact is past its eligibility threshold.
+//
+// Timezone caveat: the engine returns `created_at` as a TIMESTAMPTZ
+// originating from CURRENT_TIMESTAMP / NOW(); on hosts whose system
+// clock isn't UTC, the value may be wall-clock-local but tagged
+// `+0000` by the JSON serializer. Production deployments run in
+// UTC containers where this collapses; for local development with
+// a non-UTC clock the comparison is shifted by the host offset
+// (artifact "appears" to be in the future), so a fresh artifact
+// won't be reaped until `(host_offset_seconds + threshold)` have
+// elapsed — never the other way around. We accept this for phase 3.
 func (m *Manager) eligibleForCleanup(ctx context.Context, rec artstore.Record, now time.Time) (bool, error) {
 	switch rec.TTL {
 	case string(TTLPermanent):

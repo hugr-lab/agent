@@ -128,3 +128,4 @@ func newGraceFixture(t *testing.T, grace time.Duration) *vfixture {
 		TTLSessionGrace: int64(grace.Seconds()),
 	})
 }
+
