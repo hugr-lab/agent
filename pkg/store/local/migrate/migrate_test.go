@@ -145,7 +145,31 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.2", ver)
+	assert.Equal(t, "0.0.3", ver)
+
+	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
+	// land additively. Both must exist on a fresh DuckDB provision.
+	for _, table := range []string{"artifacts", "artifact_grants"} {
+		t.Run("artifacts/"+table, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
+				table,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected table %s to exist", table)
+		})
+	}
+
+	// Project rule: indexes only on Postgres. DuckDB stays index-free
+	// for the artifact tables — verify zero secondary indexes after
+	// the 0.0.3 migration.
+	var artIdxCount int
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM duckdb_indexes
+         WHERE table_name IN ('artifacts','artifact_grants')`,
+	).Scan(&artIdxCount))
+	assert.Equal(t, 0, artIdxCount, "DuckDB must have zero indexes on artifacts / artifact_grants")
 }
 
 // TestEnsure_v002_NoVectorColumnWhenDisabled — when VectorSize == 0

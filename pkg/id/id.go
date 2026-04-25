@@ -29,6 +29,7 @@ const (
 	PrefixNote       = "note"
 	PrefixReview     = "rev"
 	PrefixEvent      = "evt"
+	PrefixArtifact   = "art"
 )
 
 // ErrInvalid indicates a malformed ID string.

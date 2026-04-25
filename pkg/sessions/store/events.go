@@ -22,7 +22,48 @@ const (
 	EventTypeAgentResult        = "agent_result"
 	EventTypeAgentAbstained     = "agent_abstained"
 	EventTypeUserFollowupRouted = "user_followup_routed"
+
+	// Artifact lifecycle events (spec 008). Emitted on the publisher's
+	// (or grant-issuer's) session. Excluded from the reviewer pipeline
+	// by default — they're audit metadata, not learning material.
+	EventTypeArtifactPublished = "artifact_published"
+	EventTypeArtifactGranted   = "artifact_granted"
+	EventTypeArtifactRemoved   = "artifact_removed"
 )
+
+// ArtifactPublishedMeta is the payload of an artifact_published event
+// emitted on the creator session by Manager.Publish (spec 008).
+type ArtifactPublishedMeta struct {
+	ArtifactID string   `json:"artifact_id"`
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`
+	Visibility string   `json:"visibility"`
+	SizeBytes  int64    `json:"size_bytes,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+}
+
+// ArtifactGrantedMeta is the payload of an artifact_granted event
+// emitted by Manager.WidenVisibility / AddGrant. Either the
+// {Old,New}Visibility pair OR the Target* pair (or both) is set
+// depending on whether the call widened scope, added an explicit
+// grant, or did both at once.
+type ArtifactGrantedMeta struct {
+	ArtifactID      string `json:"artifact_id"`
+	OldVisibility   string `json:"old_visibility,omitempty"`
+	NewVisibility   string `json:"new_visibility,omitempty"`
+	TargetAgentID   string `json:"target_agent_id,omitempty"`
+	TargetSessionID string `json:"target_session_id,omitempty"`
+}
+
+// ArtifactRemovedMeta is the payload of an artifact_removed event
+// emitted by Manager.Remove and Manager.Cleanup. Reason values:
+//   - "manual"            — explicit Remove call
+//   - "ttl_expired"       — daily cleanup pass
+//   - "session_completed" — creator session finalised (future use)
+type ArtifactRemovedMeta struct {
+	ArtifactID string `json:"artifact_id"`
+	Reason     string `json:"reason"`
+}
 
 // AgentSpawnMeta is the payload of an agent_spawn event emitted on the
 // coordinator session when a mission starts.

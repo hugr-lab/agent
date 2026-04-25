@@ -46,6 +46,7 @@ type Config struct {
 	ChatContext chatcontext.Config
 	MCP         tools.MCPConfig
 	Missions    MissionsConfig
+	Artifacts   ArtifactsConfig
 
 	Auth      []AuthConfig
 	Providers []tools.ProviderConfig
@@ -136,6 +137,7 @@ func LoadLocal(yamlPath string, boot *BootstrapConfig) (*Config, error) {
 	if yamlPath == "" {
 		cfg.MCP.TTL = 60 * time.Second
 		cfg.MCP.FetchTimeout = 30 * time.Second
+		applyArtifactsDefaults(&cfg.Artifacts)
 	}
 	return cfg, nil
 }
@@ -312,6 +314,10 @@ func unmarshalSections(v *viper.Viper, cfg *Config) error {
 	if err := v.UnmarshalKey("missions", &cfg.Missions); err != nil {
 		return fmt.Errorf("unmarshal missions: %w", err)
 	}
+	if err := v.UnmarshalKey("artifacts", &cfg.Artifacts); err != nil {
+		return fmt.Errorf("unmarshal artifacts: %w", err)
+	}
+	applyArtifactsDefaults(&cfg.Artifacts)
 	if a := v.GetString("hugr.auth"); a != "" {
 		cfg.Hugr.Auth = a
 	}
