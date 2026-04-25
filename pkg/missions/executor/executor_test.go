@@ -169,14 +169,23 @@ func newFixture(t *testing.T, parallelism int) *fixture {
 	driver := newFakeDriver(sess)
 	reported := make(chan string, 64)
 
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	exec := executor.New(executor.Config{
 		Store:       store,
 		Events:      sess,
 		Driver:      driver,
 		Logger:      logger,
 		Parallelism: parallelism,
+		BaseContext: bgCtx,
 	})
 	exec.OnMissionReported = func(id string) { reported <- id }
+	t.Cleanup(func() {
+		// bgCancel first so any fakeDriver parked on <-ctx.Done()
+		// exits and frees its wg slot — Stop's Wait then drains
+		// promptly instead of burning the full budget.
+		bgCancel()
+		_ = exec.Stop(5 * time.Second)
+	})
 
 	return &fixture{
 		store:    store,

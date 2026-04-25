@@ -83,11 +83,6 @@ type Runtime struct {
 	extraClose []func()
 	logger     *slog.Logger
 
-	// runOnceWG tracks pending mission-completion RunOnce goroutines
-	// (spec 007 US4). Close waits on it (with budget) so an in-flight
-	// auto-fired coord turn isn't killed mid-stream.
-	runOnceWG sync.WaitGroup
-
 	closeOnce sync.Once
 }
 
@@ -435,8 +430,15 @@ func Build(
 	// closes — FR-011. Hook receives no ctx, so the cascade runs on a
 	// fresh background ctx; never blocks the close goroutine for long
 	// since Cancel only walks the in-memory DAG + writes terminal rows.
+	// AbandonCoordinator walks the in-memory DAG and acquires the
+	// executor's tickMu — under contention with an in-flight Tick the
+	// call can block briefly. Run it off the close-hook caller's
+	// goroutine so SessionManager doesn't stall on us. Background
+	// ctx is fine: Cancel only writes terminal rows + emits events,
+	// and we want it to complete even if the originating request
+	// was cancelled.
 	sessionMgr.OnSessionClose(func(coordID string) {
-		missionsExec.AbandonCoordinator(context.Background(), coordID)
+		go missionsExec.AbandonCoordinator(context.Background(), coordID)
 	})
 
 	// Drive the scheduler every 2s — the Executor reconciles its
@@ -546,10 +548,11 @@ func Build(
 	missionsExec.RunOnce = func(
 		ctx context.Context,
 		coordSessionID string,
-		payload graph.CompletionPayload,
+		_ graph.CompletionPayload,
 	) error {
-		rt.runOnceWG.Add(1)
-		defer rt.runOnceWG.Done()
+		// Lifecycle of this goroutine is owned by the executor —
+		// e.wg.Add was called before it spawned us. Don't double-
+		// count by adding here.
 		appName, userID := coordIdentity(sessionMgr, coordSessionID)
 		r, rerr := runner.New(runner.Config{
 			AppName:        appName,
@@ -559,24 +562,6 @@ func Build(
 		if rerr != nil {
 			return fmt.Errorf("runtime: runonce build runner: %w", rerr)
 		}
-		// Trim summaries / reasons from the payload we hand to the
-		// LLM. The full text already lives on each mission's
-		// agent_result event — the coord can fetch it via
-		// mission_status / mission_sub_runs when it actually needs to
-		// quote a specific outcome. Sending the full payload bloats
-		// the prompt and has empirically caused some models to
-		// return empty responses on local endpoints.
-		slim := graph.CompletionPayload{AllSucceeded: payload.AllSucceeded}
-		for _, o := range payload.Outcomes {
-			slim.Outcomes = append(slim.Outcomes, graph.MissionOutcome{
-				MissionID: o.MissionID,
-				Skill:     o.Skill,
-				Role:      o.Role,
-				Status:    o.Status,
-				TurnsUsed: o.TurnsUsed,
-			})
-		}
-		_ = slim
 		// Minimal natural-language nudge — agent_result events
 		// already in the transcript carry every mission's outcome,
 		// so the LLM has full context already. Some local models
@@ -599,6 +584,14 @@ func Build(
 	bgCtx, bgCancel := context.WithCancel(ctx)
 	rt.bgCtx = bgCtx
 	rt.bgCancel = bgCancel
+
+	// Hand bgCtx to the executor — its dispatcher goroutines + the
+	// completion-summary RunOnce derive runCtx from it, so a Close()
+	// that bgCancels actually propagates into in-flight LLM streams
+	// (after Stop()'s budget elapses).
+	if rt.Missions != nil {
+		rt.Missions.SetBaseContext(bgCtx)
+	}
 
 	go cls.Run(bgCtx)
 	sched.Start(bgCtx)
@@ -626,23 +619,17 @@ func (r *Runtime) Close() {
 		return
 	}
 	r.closeOnce.Do(func() {
-		// Wait for any in-flight mission-completion RunOnce
-		// goroutines to finish their LLM stream + flush queued
-		// events before we cancel bgCtx. Cancelling first kills the
-		// stream mid-flight ("empty response" warnings) and the
-		// classifier's consumer loop loses live ctx for its hub
-		// appends, so the coordinator's summary turn never lands on
-		// disk. Generous budget — LLM responses can take 30s+.
-		runOnceDone := make(chan struct{})
-		go func() {
-			r.runOnceWG.Wait()
-			close(runOnceDone)
-		}()
-		select {
-		case <-runOnceDone:
-		case <-time.After(90 * time.Second):
-			if r.logger != nil {
-				r.logger.Warn("runtime: RunOnce goroutines did not finish within budget — proceeding with shutdown")
+		// Polite shutdown — gate new mission launches + new RunOnce
+		// fan-outs at the executor first, then wait for in-flight
+		// goroutines (per-mission dispatchers + completion RunOnce)
+		// to finish on the still-live bgCtx. Cancelling bgCtx
+		// before this would kill the LLM stream mid-flight; the
+		// classifier's consumer loop would also lose its live ctx
+		// for hub appends, dropping the freshly-produced events.
+		// Budget is generous — LLM responses can take 30s+.
+		if r.Missions != nil {
+			if err := r.Missions.Stop(90 * time.Second); err != nil && r.logger != nil {
+				r.logger.Warn("runtime: missions stop", "err", err)
 			}
 		}
 		// Flush the classifier's queue with a live ctx so events

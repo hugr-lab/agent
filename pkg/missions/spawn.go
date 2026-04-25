@@ -167,12 +167,12 @@ func (s *SpawnService) Spawn(ctx context.Context, callerSessionID string, args a
 	if err != nil {
 		return errorEnvelope(err.Error())
 	}
-	cap := callerSpec.MaxDepth
-	if cap <= 0 {
-		cap = s.maxDepth
+	limit := callerSpec.MaxDepth
+	if limit <= 0 {
+		limit = s.maxDepth
 	}
-	if depth+1 > cap {
-		return errorEnvelope(fmt.Sprintf("spawn depth limit reached (max %d)", cap))
+	if depth+1 > limit {
+		return errorEnvelope(fmt.Sprintf("spawn depth limit reached (max %d)", limit))
 	}
 
 	missionID, err := s.executor.RegisterSingle(coordID, skill, role, task, dependsOn)

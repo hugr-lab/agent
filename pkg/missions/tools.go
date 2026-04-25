@@ -233,6 +233,11 @@ func (t *missionCancelTool) Run(ctx tool.Context, args any) (map[string]any, err
 	}, nil
 }
 
+// coordOwnsMission is a best-effort visibility check — it reads
+// Snapshot under dag.mu, then the caller invokes Cancel which
+// re-acquires the lock. Between those two critical sections the
+// mission may finish; Cancel surfaces ErrMissionTerminal and the
+// tool layer maps it to a clean error envelope.
 func (t *missionCancelTool) coordOwnsMission(ctx context.Context, coordID, missionID string) bool {
 	for _, n := range t.svc.executor.Snapshot(ctx, coordID) {
 		if n.ID == missionID {

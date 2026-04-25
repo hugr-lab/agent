@@ -33,11 +33,29 @@ type Executor struct {
 	nowFn       func() time.Time
 	logger      *slog.Logger
 
+	// baseCtx is the parent context every dispatcher goroutine + the
+	// completion-summary RunOnce derive from. Wired from the runtime's
+	// background ctx so a Close() that cancels it actually cancels
+	// in-flight LLM calls. Stop() is the polite shutdown — it waits
+	// for `wg` with a budget BEFORE the runtime cancels baseCtx.
+	baseCtx context.Context
+
+	// stopMu serialises the (stopped flag + wg.Add) pair so Stop's
+	// "set flag → wg.Wait" can never race a goroutine still trying to
+	// Add(1). Acquire it briefly around every wg.Add — see addWorker.
+	stopMu  sync.Mutex
+	stopped bool
+	wg      sync.WaitGroup
+
 	// RunOnce, when set, drives exactly one coordinator turn after a
 	// graph terminates. Receives the structured CompletionPayload so
 	// the implementation can encode it into the synthetic user
 	// message it posts to runner.Run. Nil → fan-out skipped, the
 	// executor falls back to a direct AppendEvent of the marker.
+	//
+	// The executor owns the goroutine that calls this — RunOnce
+	// implementations should NOT do their own WaitGroup.Add; the
+	// executor already counts them in `wg` before invoking RunOnce.
 	RunOnce func(ctx context.Context, coordSessionID string, payload graph.CompletionPayload) error
 
 	// OnMissionReported, when set, is called by the dispatcher
@@ -59,16 +77,27 @@ type Config struct {
 	Driver      MissionDriver
 	Logger      *slog.Logger
 	Parallelism int
+
+	// BaseContext is the parent context for every dispatcher /
+	// RunOnce goroutine the executor spawns. Cancelling it cancels
+	// in-flight LLM calls. Required: callers should pass the
+	// runtime's background ctx (not a request-scoped one). Nil
+	// falls back to context.Background — useful in narrow tests
+	// that don't care about cancellation propagation.
+	BaseContext context.Context
 }
 
 // New builds an Executor. Parallelism < 1 is clamped to 4. Logger is
-// nil-safe. All other fields are required.
+// nil-safe. BaseContext nil falls back to context.Background.
 func New(cfg Config) *Executor {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.Parallelism < 1 {
 		cfg.Parallelism = 4
+	}
+	if cfg.BaseContext == nil {
+		cfg.BaseContext = context.Background()
 	}
 	return &Executor{
 		store:       cfg.Store,
@@ -77,6 +106,72 @@ func New(cfg Config) *Executor {
 		parallelism: cfg.Parallelism,
 		nowFn:       time.Now,
 		logger:      cfg.Logger,
+		baseCtx:     cfg.BaseContext,
+	}
+}
+
+// SetBaseContext rewires the parent context dispatchers/RunOnce
+// derive from. Useful when the runtime constructs the executor
+// before its bgCtx exists; safe to call once before the first Tick.
+// Nil ctx falls back to context.Background.
+func (e *Executor) SetBaseContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	e.baseCtx = ctx
+}
+
+// addWorker reserves a slot in the executor's WaitGroup for a
+// goroutine the caller is about to spawn. Returns false when Stop
+// has already been called, in which case the caller MUST skip its
+// `go` (the slot wasn't reserved). Acquires stopMu briefly so the
+// (stopped check + Add) is atomic w.r.t. Stop's (set flag + Wait).
+func (e *Executor) addWorker() bool {
+	e.stopMu.Lock()
+	defer e.stopMu.Unlock()
+	if e.stopped {
+		return false
+	}
+	e.wg.Add(1)
+	return true
+}
+
+// isStopped is the lock-free read of the shutdown flag. Cheap
+// happy-path gate at the top of promoteRunning — addWorker still
+// re-checks under stopMu so a concurrent Stop can't sneak through.
+func (e *Executor) isStopped() bool {
+	e.stopMu.Lock()
+	defer e.stopMu.Unlock()
+	return e.stopped
+}
+
+// Stop is the polite shutdown: flips `stopped` so promoteRunning
+// stops launching new dispatchers and maybeCompletionSummary stops
+// firing RunOnce, then waits for every goroutine the executor owns
+// (in-flight dispatchers + RunOnce calls) up to `budget`. Returns
+// nil on clean drain, an error when the budget elapses (caller
+// should still proceed with bgCancel — this is best-effort).
+//
+// Safe to call multiple times; only the first call gates new spawns,
+// subsequent ones just re-Wait.
+func (e *Executor) Stop(budget time.Duration) error {
+	e.stopMu.Lock()
+	e.stopped = true
+	e.stopMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+	if budget <= 0 {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(budget):
+		return fmt.Errorf("missions: stop budget %s exceeded — proceeding with shutdown", budget)
 	}
 }
 
@@ -762,7 +857,19 @@ func (e *Executor) promoteReady(d *dag) {
 // promoteRunning launches dispatcher goroutines for ready missions,
 // bounded by Parallelism. Goroutines write their DispatchResult into
 // per-node channels drained by the next Tick's drainTerminals.
+//
+// Goroutine lifecycle:
+//   - runCtx is derived from e.baseCtx so a runtime shutdown
+//     cancellation propagates into the LLM stream.
+//   - The dispatcher is registered on e.wg BEFORE `go` so Stop()
+//     never races a freshly-spawned Add with its own Wait.
+//   - When e.stopped is set, no new dispatchers are launched —
+//     ready missions wait for the next process boot's RestoreState
+//     to abandon them cleanly.
 func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
+	if e.isStopped() {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -783,13 +890,19 @@ func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
 		if inFlight >= e.parallelism {
 			break
 		}
+		// Reserve a wg slot BEFORE we mutate node state — if Stop has
+		// already been called, we leave the mission in StatusReady and
+		// the next process boot's RestoreState will abandon it cleanly.
+		if !e.addWorker() {
+			return
+		}
 		node.status = graph.StatusRunning
 		node.startedAt = time.Now()
 		node.resultCh = make(chan missionResult, 1)
 		evtID := e.emitSpawn(ctx, coordID, node)
 		node.spawnEventID = evtID
 
-		runCtx, cancel := context.WithCancel(context.Background())
+		runCtx, cancel := context.WithCancel(e.baseCtx)
 		node.cancel = cancel
 		args := graph.DispatchArgs{
 			ParentSessionID: coordID,
@@ -805,6 +918,7 @@ func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
 		hook := e.OnMissionReported
 		missionID := node.id
 		go func() {
+			defer e.wg.Done()
 			defer cancel()
 			res := driver.RunMission(runCtx, args)
 			ch <- missionResult{
@@ -889,15 +1003,18 @@ func (e *Executor) maybeCompletionSummary(
 
 	if e.RunOnce != nil {
 		// Auto-fire one coordinator turn so a walked-away user gets
-		// the summary without typing. Detached from Tick's ctx —
-		// scheduler's bgCtx gets cancelled at runtime shutdown,
-		// which would kill the in-flight LLM call mid-stream.
-		// runner.Run inside RunOnce appends the marker as a
-		// user_message before calling the LLM, so even when the LLM
-		// errors the marker stays in the transcript and the user
-		// picks it up on their next turn.
+		// the summary without typing. The ctx derives from baseCtx so
+		// runtime shutdown CAN cancel a hung LLM call after Stop()'s
+		// budget expires; until then, Stop() waits on e.wg so we
+		// don't kill the stream prematurely. addWorker reserves the
+		// wg slot atomically with the stopped check so Stop's Wait
+		// can never race a fresh Add.
+		if !e.addWorker() {
+			return
+		}
 		go func() {
-			runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer e.wg.Done()
+			runCtx, cancel := context.WithTimeout(e.baseCtx, 2*time.Minute)
 			defer cancel()
 			if err := e.RunOnce(runCtx, coordID, payload); err != nil {
 				e.logger.WarnContext(runCtx, "missions: completion summary",

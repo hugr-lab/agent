@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,8 +92,20 @@ func newFixture(t *testing.T) *fixture {
 
 	driver := &fakeDriver{sess: sess, started: make(chan graph.DispatchArgs, 16)}
 	store := missionsstore.New(sess, service, logger)
+	// BaseContext bound to the test's lifetime — t.Cleanup cancels
+	// it so any fakeDriver goroutine still parked on <-ctx.Done()
+	// exits cleanly before the package timeout.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	exec := executor.New(executor.Config{
-		Store: store, Events: sess, Driver: driver, Logger: logger, Parallelism: 4,
+		Store: store, Events: sess, Driver: driver, Logger: logger,
+		Parallelism: 4, BaseContext: bgCtx,
+	})
+	t.Cleanup(func() {
+		// bgCancel first so any fakeDriver parked on <-ctx.Done()
+		// exits and frees its wg slot — Stop's Wait then drains
+		// promptly instead of burning the full budget.
+		bgCancel()
+		_ = exec.Stop(5 * time.Second)
 	})
 	return &fixture{sess: sess, exec: exec, driver: driver, coord: "coord-fu"}
 }
