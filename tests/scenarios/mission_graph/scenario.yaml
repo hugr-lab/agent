@@ -1,0 +1,188 @@
+name: mission_graph
+session_id: scenario-mission-graph-1
+# Spec 007 RunOnce auto-fires a coord turn after the DAG terminates;
+# poll for the coord events to settle before the final hub.db dump
+# so the auto-generated llm_response is captured in the snapshot.
+final_wait: 90s
+
+steps:
+  # Step 0 — diagnostic. Ask the LLM to enumerate every tool it
+  # actually sees. If mission_plan / mission_status are not in the
+  # list we have a wiring bug; if they are, subsequent steps isolate
+  # prompt/model behaviour.
+  - say: |
+      List every tool you have access to on this session. Return a
+      bullet list with just the tool names — no descriptions. Be
+      exhaustive; include internal / system tools.
+    queries: []
+
+  # Step 1 — hand the coordinator a multi-step goal so mission_plan
+  # naturally fires. The `domain` fixture skill ships two specialist
+  # roles (`summariser` and `formatter`); the _coordinator decision
+  # tree (branch 7) maps this kind of goal onto mission_plan rather
+  # than a single subagent_ call.
+  - say: |
+      I need a two-step piece of work:
+        1) summariser: summarise what "context engineering" means in
+           1–2 sentences and promote that summary to your parent so
+           the next specialist can see it;
+        2) formatter: turn that summary into one tight headline
+           sentence (≤ 25 words).
+      Plan both missions as a graph (formatter depends on summariser)
+      via mission_plan, return control to me with a one-sentence
+      ACK — I'll check status with "how's it going?" in a moment.
+    queries:
+      # Every mission row lands as a sub-agent session under the
+      # coordinator, carrying skill + role + coord_session_id in
+      # metadata (spec 007 in-memory-DAG contract: no mission_deps
+      # table — depends_on is a JSON array on each row).
+      - name: missions_persisted
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and (.metadata.coord_session_id == $coord or .parent_session_id == $coord))) | map({id, status, skill: .metadata.skill, role: .metadata.role, mission, depends_on: .metadata.depends_on})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-graph-1
+
+      # mission_spawn event appears on the coordinator session for
+      # every mission that actually started. One per top-level
+      # mission in the plan.
+      - name: coord_spawn_events
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_spawn"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type tool_name metadata }
+            }}}
+          }
+        vars:
+          sid: scenario-mission-graph-1
+
+  # Step 2 — user asks for status; coordinator should call
+  # mission_status() (branch 5 of the decision tree) and paste the
+  # rendered tree. Observational — we assert on DB state, not LLM text.
+  #
+  # wait_for_missions polls the Executor's DAG until every mission in
+  # the graph reaches terminal status (done / failed / abandoned) or
+  # the budget expires. Gives the scheduler room to promote formatter
+  # after summariser completes, and lets both child sessions drain
+  # before the final hub.db snapshot.
+  - say: "how's it going?"
+    wait_for_missions: 90s
+    queries:
+      # After the summariser completes, the coordinator sees an
+      # agent_result row with the summary embedded (Hugr server-side
+      # via `summary:`).
+      - name: coord_result_events
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq metadata content }
+            }}}
+          }
+        vars:
+          sid: scenario-mission-graph-1
+
+      # State of all sessions (root + spawned subagents) after step 2.
+      # At this point LLM has fired phase-1 subagent_domain_* tools, so
+      # we should see 3 subagent rows under the coordinator.
+      - name: all_sessions_after_step2
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map({id, type: .session_type, status, parent: .parent_session_id, coord: .metadata.coord_session_id, skill: .metadata.skill, role: .metadata.role, mission})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-graph-1
+
+      # Check that cross-mission promoted notes arrived at the
+      # coordinator (summariser's memory_note(scope:"parent") +
+      # whatever formatter wrote). The session_notes_chain view
+      # surfaces them with "[from <skill>/<role>]" prefixes.
+      - name: coord_notes_chain
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_notes_chain(args: {session_id: $sid}) {
+                id session_id author_session_id content chain_depth
+              }
+            }}}
+          }
+        vars:
+          sid: scenario-mission-graph-1
+
+      # After wait_for_missions drained the DAG, every planned mission
+      # now has a terminal status and the cascade path has fired for
+      # any that were abandoned by an upstream failure.
+      - name: final_missions_state
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({id, status, role: .metadata.role, deps: .metadata.depends_on})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-graph-1
+
+      # Spec 007 US4: when the DAG is fully terminal, the executor
+      # auto-fires one coordinator turn via runner.Run. The marker
+      # `<system: missions complete>` (with the JSON payload appended
+      # in the message body) lands as a user_message on the
+      # coordinator + ADK records it; the LLM then produces an
+      # llm_response per SKILL.md branch 8. Filter via `like` so
+      # the JSON suffix doesn't break the match.
+      - name: completion_marker_event
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, content: {like: "<system: missions complete>%"}, event_type: {eq: "user_message"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type content }
+            }}}
+          }
+        vars:
+          sid: scenario-mission-graph-1
+
+      # Full lifecycle-event trace on the coordinator: one spawn per
+      # mission that actually started, one result per terminal
+      # transition (including cascade-abandoned children).
+      - name: coord_lifecycle_events
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"agent_spawn\" or .event_type == \"agent_result\" or .event_type == \"agent_abstained\")) | map({seq, type: .event_type, status: .metadata.status, role: .metadata.role, reason: .metadata.reason})"
+            ) {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-mission-graph-1

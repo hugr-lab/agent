@@ -23,6 +23,12 @@ review:
     - compaction_summary
     - reasoning
     - error
+    # Spec 007 lifecycle events — coordinator-side audit, not learning
+    # material. Missions' own transcripts are reviewed independently.
+    - agent_spawn
+    - agent_result
+    - agent_abstained
+    - user_followup_routed
   prompt: |
     Extract durable facts about the USER (preferences, working style,
     recurring asks) and a short session_summary capturing the

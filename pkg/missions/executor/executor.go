@@ -1,0 +1,1051 @@
+// Package executor drives the in-memory mission DAG. One Executor
+// per runtime; registered as a periodic task on pkg/scheduler, ticks
+// every 2s. Each Tick reconciles terminal goroutines, cascades
+// abandonment, promotes ready missions to running, and fires the
+// completion-summary fan-out when a graph is fully terminal.
+package executor
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/hugr-lab/hugen/pkg/missions/graph"
+	"github.com/hugr-lab/hugen/pkg/missions/store"
+	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
+)
+
+// Executor drives the mission graph state machine. Holds an
+// in-memory DAG per coordinator session; gates overlapping Tick
+// calls via TryLock.
+type Executor struct {
+	store       *store.Store
+	events      EventWriter
+	driver      MissionDriver
+	parallelism int
+	nowFn       func() time.Time
+	logger      *slog.Logger
+
+	// baseCtx is the parent context every dispatcher goroutine + the
+	// completion-summary RunOnce derive from. Wired from the runtime's
+	// background ctx so a Close() that cancels it actually cancels
+	// in-flight LLM calls. Stop() is the polite shutdown — it waits
+	// for `wg` with a budget BEFORE the runtime cancels baseCtx.
+	baseCtx context.Context
+
+	// stopMu serialises the (stopped flag + wg.Add) pair so Stop's
+	// "set flag → wg.Wait" can never race a goroutine still trying to
+	// Add(1). Acquire it briefly around every wg.Add — see addWorker.
+	stopMu  sync.Mutex
+	stopped bool
+	wg      sync.WaitGroup
+
+	// RunOnce, when set, drives exactly one coordinator turn after a
+	// graph terminates. Receives the structured CompletionPayload so
+	// the implementation can encode it into the synthetic user
+	// message it posts to runner.Run. Nil → fan-out skipped, the
+	// executor falls back to a direct AppendEvent of the marker.
+	//
+	// The executor owns the goroutine that calls this — RunOnce
+	// implementations should NOT do their own WaitGroup.Add; the
+	// executor already counts them in `wg` before invoking RunOnce.
+	RunOnce func(ctx context.Context, coordSessionID string, payload graph.CompletionPayload) error
+
+	// OnMissionReported, when set, is called by the dispatcher
+	// goroutine AFTER it has written the DispatchResult to the
+	// mission's internal terminal channel. Tests wire this for
+	// deterministic synchronisation — once the hook fires, the next
+	// Tick is guaranteed to drain this mission's terminal state. Nil
+	// in production.
+	OnMissionReported func(missionID string)
+
+	tickMu sync.Mutex
+	dags   sync.Map // coordSessionID → *dag
+}
+
+// Config bundles the Executor's construction dependencies.
+type Config struct {
+	Store       *store.Store
+	Events      EventWriter
+	Driver      MissionDriver
+	Logger      *slog.Logger
+	Parallelism int
+
+	// BaseContext is the parent context for every dispatcher /
+	// RunOnce goroutine the executor spawns. Cancelling it cancels
+	// in-flight LLM calls. Required: callers should pass the
+	// runtime's background ctx (not a request-scoped one). Nil
+	// falls back to context.Background — useful in narrow tests
+	// that don't care about cancellation propagation.
+	BaseContext context.Context
+}
+
+// New builds an Executor. Parallelism < 1 is clamped to 4. Logger is
+// nil-safe. BaseContext nil falls back to context.Background.
+func New(cfg Config) *Executor {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Parallelism < 1 {
+		cfg.Parallelism = 4
+	}
+	if cfg.BaseContext == nil {
+		cfg.BaseContext = context.Background()
+	}
+	return &Executor{
+		store:       cfg.Store,
+		events:      cfg.Events,
+		driver:      cfg.Driver,
+		parallelism: cfg.Parallelism,
+		nowFn:       time.Now,
+		logger:      cfg.Logger,
+		baseCtx:     cfg.BaseContext,
+	}
+}
+
+// SetBaseContext rewires the parent context dispatchers/RunOnce
+// derive from. Useful when the runtime constructs the executor
+// before its bgCtx exists; safe to call once before the first Tick.
+// Nil ctx falls back to context.Background.
+func (e *Executor) SetBaseContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	e.baseCtx = ctx
+}
+
+// addWorker reserves a slot in the executor's WaitGroup for a
+// goroutine the caller is about to spawn. Returns false when Stop
+// has already been called, in which case the caller MUST skip its
+// `go` (the slot wasn't reserved). Acquires stopMu briefly so the
+// (stopped check + Add) is atomic w.r.t. Stop's (set flag + Wait).
+func (e *Executor) addWorker() bool {
+	e.stopMu.Lock()
+	defer e.stopMu.Unlock()
+	if e.stopped {
+		return false
+	}
+	e.wg.Add(1)
+	return true
+}
+
+// isStopped reads the shutdown flag under stopMu. Used as a cheap
+// early-exit at the top of promoteRunning so we don't iterate the
+// DAG unnecessarily; addWorker still re-checks under stopMu before
+// any Add(1) so a concurrent Stop between this check and addWorker
+// can't sneak a goroutine through.
+func (e *Executor) isStopped() bool {
+	e.stopMu.Lock()
+	defer e.stopMu.Unlock()
+	return e.stopped
+}
+
+// Stop is the polite shutdown: flips `stopped` so promoteRunning
+// stops launching new dispatchers and maybeCompletionSummary stops
+// firing RunOnce, then waits for every goroutine the executor owns
+// (in-flight dispatchers + RunOnce calls) up to `budget`. Returns
+// nil on clean drain, an error when the budget elapses (caller
+// should still proceed with bgCancel — this is best-effort).
+//
+// Safe to call multiple times; only the first call gates new spawns,
+// subsequent ones just re-Wait.
+func (e *Executor) Stop(budget time.Duration) error {
+	e.stopMu.Lock()
+	e.stopped = true
+	e.stopMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+	if budget <= 0 {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(budget):
+		return fmt.Errorf("missions: stop budget %s exceeded — proceeding with shutdown", budget)
+	}
+}
+
+// ------------------------------------------------------------------
+// Public API
+// ------------------------------------------------------------------
+
+// Register seeds the in-memory DAG from a freshly-planned PlanResult.
+// Call right after Planner.Plan succeeds — BEFORE any session row
+// exists. Session IDs are generated here locally; they land in the
+// hub only when the Executor promotes a mission to running and the
+// Driver creates the session row.
+//
+// Mutates the passed PlanResult: fills in ChildIDs (planner-int →
+// generated session id) so callers can surface the ids in their tool
+// envelope response to the coordinator LLM.
+func (e *Executor) Register(coordSessionID string, plan *graph.PlanResult) {
+	if plan == nil || len(plan.Missions) == 0 {
+		return
+	}
+	d := e.ensureDag(coordSessionID)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if plan.ChildIDs == nil {
+		plan.ChildIDs = make(map[int]string, len(plan.Missions))
+	}
+	for _, m := range plan.Missions {
+		sid := plan.ChildIDs[m.ID]
+		if sid == "" {
+			sid = "sub_" + uuid.NewString()
+			plan.ChildIDs[m.ID] = sid
+		}
+		d.missions[sid] = &missionNode{
+			id:      sid,
+			coordID: coordSessionID,
+			skill:   m.Skill,
+			role:    m.Role,
+			task:    m.Task,
+			status:  graph.StatusPending,
+		}
+	}
+	for _, edge := range plan.Edges {
+		fromSID := plan.ChildIDs[edge.From]
+		toSID := plan.ChildIDs[edge.To]
+		if fromSID == "" || toSID == "" {
+			continue
+		}
+		if to := d.missions[toSID]; to != nil {
+			to.upstream = append(to.upstream, fromSID)
+		}
+		if from := d.missions[fromSID]; from != nil {
+			from.downstream = append(from.downstream, toSID)
+		}
+	}
+}
+
+// RegisterSingle adds one mission node to an existing coordinator's
+// DAG. Used by spawn_sub_mission — the spawning sub-agent calls this
+// at tool-run time to enqueue a single child mission. Returns the
+// generated session id for the new mission.
+//
+// Caller is responsible for the depth + role-permission checks; this
+// method enforces only the local invariants (mission id uniqueness,
+// dependency targets exist within the same coordinator's DAG, no
+// cycle).
+func (e *Executor) RegisterSingle(
+	coordSessionID, skill, role, task string,
+	dependsOn []string,
+) (string, error) {
+	d := e.ensureDag(coordSessionID)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, dep := range dependsOn {
+		if _, ok := d.missions[dep]; !ok {
+			return "", fmt.Errorf("missions: spawn dependency %q not found in coordinator %q",
+				dep, coordSessionID)
+		}
+	}
+
+	missionID := "sub_" + uuid.NewString()
+	node := &missionNode{
+		id:       missionID,
+		coordID:  coordSessionID,
+		skill:    skill,
+		role:     role,
+		task:     task,
+		status:   graph.StatusPending,
+		upstream: append([]string(nil), dependsOn...),
+	}
+	for _, dep := range dependsOn {
+		if upN, ok := d.missions[dep]; ok {
+			upN.downstream = append(upN.downstream, missionID)
+		}
+	}
+	d.missions[missionID] = node
+	// Reset completionFired so a graph that previously wrapped up but
+	// got a fresh spawn re-arms its completion summary on the next
+	// terminal transition.
+	d.completionFired = false
+	return missionID, nil
+}
+
+// Snapshot returns a stable read-only view of the coordinator's DAG,
+// merging in-memory runtime status with persisted mission rows. Safe
+// to call concurrently with Tick. When the in-memory DAG is empty
+// (executor just booted, RestoreState hasn't run yet), falls back to
+// a Store read — still returns missions, just without runtime
+// granularity.
+func (e *Executor) Snapshot(ctx context.Context, coordSessionID string) []graph.MissionRecord {
+	if entry, ok := e.dags.Load(coordSessionID); ok {
+		d := entry.(*dag)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		out := make([]graph.MissionRecord, 0, len(d.missions))
+		for _, n := range d.missions {
+			out = append(out, graph.MissionRecord{
+				ID:             n.id,
+				CoordSessionID: coordSessionID,
+				Skill:          n.skill,
+				Role:           n.role,
+				Task:           n.task,
+				Status:         n.status,
+				DependsOn:      append([]string(nil), n.upstream...),
+				TurnsUsed:      n.turnsUsed,
+				Summary:        n.summary,
+				Reason:         n.reason,
+				StartedAt:      n.startedAt,
+				TerminatedAt:   n.terminated,
+			})
+		}
+		return out
+	}
+	ms, err := e.store.ListMissions(ctx, coordSessionID, "")
+	if err != nil {
+		e.logger.WarnContext(ctx, "missions: snapshot fallback", "coord", coordSessionID, "err", err)
+		return nil
+	}
+	return ms
+}
+
+// RunningMissions returns the subset of this coordinator's DAG in
+// StatusRunning. Empty slice when the coordinator has no in-memory
+// DAG. Used by the follow-up router to decide whether a user message
+// could plausibly be refining an in-flight mission.
+func (e *Executor) RunningMissions(coordSessionID string) []graph.MissionRecord {
+	entry, ok := e.dags.Load(coordSessionID)
+	if !ok {
+		return nil
+	}
+	d := entry.(*dag)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []graph.MissionRecord
+	for _, n := range d.missions {
+		if n.status != graph.StatusRunning {
+			continue
+		}
+		out = append(out, graph.MissionRecord{
+			ID:             n.id,
+			CoordSessionID: coordSessionID,
+			Skill:          n.skill,
+			Role:           n.role,
+			Task:           n.task,
+			Status:         n.status,
+			DependsOn:      append([]string(nil), n.upstream...),
+			TurnsUsed:      n.turnsUsed,
+			StartedAt:      n.startedAt,
+		})
+	}
+	return out
+}
+
+// OnFollowUp appends a user message as a new turn in the target
+// mission's session AND writes the audit trail on the coordinator.
+// FR-013: the refinement joins the child transcript naturally (next
+// dispatcher turn sees it as a user_message) and the coordinator
+// keeps a queryable record of where the route landed.
+func (e *Executor) OnFollowUp(
+	ctx context.Context,
+	coordSessionID, userMsg, targetMissionID string,
+	confidence float64,
+) error {
+	if targetMissionID == "" {
+		return fmt.Errorf("missions: follow-up target mission id is empty")
+	}
+	if strings.TrimSpace(userMsg) == "" {
+		return fmt.Errorf("missions: follow-up user message is empty")
+	}
+	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: targetMissionID,
+		EventType: sessstore.EventTypeUserMessage,
+		Author:    "user",
+		Content:   userMsg,
+	}); err != nil {
+		return fmt.Errorf("missions: append follow-up to mission %s: %w", targetMissionID, err)
+	}
+	meta := map[string]any{
+		"target_mission_id":     targetMissionID,
+		"classifier_confidence": confidence,
+	}
+	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: coordSessionID,
+		EventType: sessstore.EventTypeUserFollowupRouted,
+		Author:    "user",
+		Content:   truncate(userMsg, 2048),
+		Metadata:  meta,
+	}); err != nil {
+		// Best effort — routing already succeeded on the child side.
+		e.logger.WarnContext(ctx, "missions: emit user_followup_routed",
+			"coord", coordSessionID, "err", err)
+	}
+	return nil
+}
+
+// RestoreReport is the summary RestoreState returns so the runtime
+// can log a single line on boot describing what survived the
+// restart. `Resumed` stays for backwards compatibility with the
+// per-coord reporting tests but is always zero under the current
+// "abandon all in-flight on restart" policy.
+type RestoreReport struct {
+	Coordinators   int // distinct coords whose DAG was rebuilt
+	Resumed        int // always 0 — restart abandons in-flight missions
+	Pending        int // missions still pending (deps unsatisfied)
+	Ready          int // missions promoted to ready (all deps done)
+	StaleAbandoned int // non-terminal active rows reaped on restart
+}
+
+// RestoreState rebuilds every coordinator's DAG from hub.db on boot.
+// Loads ALL sub-agent rows (including terminal) so pending missions
+// can correctly evaluate their upstream done-ness, then marks every
+// non-terminal active row abandoned with reason="restart: process
+// died" (FR-019).
+//
+// Design choice — why we don't auto-resume: ADK's runner.Run needs a
+// `newMessage` to drive a turn, so "continue an in-progress turn
+// after process restart" can't avoid re-issuing the original task.
+// That means re-running work the LLM may have already finished,
+// burning tokens and risking double side-effects. The shipping
+// policy chooses safety + honesty: in-flight missions die cleanly
+// on restart, the user gets a `mission_result{status:abandoned}`
+// row on the coordinator, and they can replan if they want.
+// Operators wanting "best-effort resume" can mission_plan again on
+// the coordinator's next turn.
+//
+// Caller must invoke once before the scheduler kicks off the first
+// Tick. Concurrent Restore + Tick is undefined behaviour.
+func (e *Executor) RestoreState(ctx context.Context) (RestoreReport, error) {
+	rows, err := e.store.ListAllAgentMissions(ctx)
+	if err != nil {
+		return RestoreReport{}, fmt.Errorf("missions: restore — list: %w", err)
+	}
+
+	byCoord := map[string][]graph.MissionRecord{}
+	for _, r := range rows {
+		if r.CoordSessionID == "" {
+			continue
+		}
+		byCoord[r.CoordSessionID] = append(byCoord[r.CoordSessionID], r)
+	}
+
+	var rep RestoreReport
+	now := e.nowFn()
+	for coord, missions := range byCoord {
+		rep.Coordinators++
+		d := e.ensureDag(coord)
+		d.mu.Lock()
+
+		for _, m := range missions {
+			node := &missionNode{
+				id:         m.ID,
+				coordID:    coord,
+				skill:      m.Skill,
+				role:       m.Role,
+				task:       m.Task,
+				status:     m.Status,
+				upstream:   append([]string(nil), m.DependsOn...),
+				summary:    m.Summary,
+				reason:     m.Reason,
+				startedAt:  m.StartedAt,
+				terminated: m.TerminatedAt,
+			}
+
+			// Active in hub means in-flight before the crash; the LLM
+			// turn doesn't survive process death, so abandon cleanly.
+			if m.Status == graph.StatusRunning {
+				node.status = graph.StatusAbandoned
+				node.terminated = now
+				node.reason = "restart: process died"
+				if err := e.store.MarkStatus(ctx, m.ID, graph.StatusAbandoned); err != nil {
+					e.logger.WarnContext(ctx, "missions: restore mark abandoned",
+						"id", m.ID, "err", err)
+				}
+				e.emitResult(ctx, node, missionResult{
+					status:   graph.StatusAbandoned,
+					errorMsg: "restart: process died",
+				})
+				rep.StaleAbandoned++
+			}
+			d.missions[m.ID] = node
+		}
+
+		// Wire downstream slots from upstream so the cascade walk +
+		// promoteReady have full graph visibility.
+		for _, n := range d.missions {
+			for _, up := range n.upstream {
+				if upN, ok := d.missions[up]; ok {
+					upN.downstream = append(upN.downstream, n.id)
+				}
+			}
+		}
+
+		// Recompute pending → ready / abandoned based on persisted
+		// upstream statuses. Run AFTER edge wiring so the dep lookup
+		// sees terminal upstreams.
+		for _, n := range d.missions {
+			if n.status != graph.StatusPending {
+				continue
+			}
+			var (
+				allDone     = true
+				anyTerminal bool
+			)
+			for _, up := range n.upstream {
+				upN, ok := d.missions[up]
+				if !ok {
+					// Upstream missing → treat as terminal-failed
+					// (edge of the DAG we don't see). Conservative.
+					anyTerminal = true
+					allDone = false
+					break
+				}
+				switch upN.status {
+				case graph.StatusFailed, graph.StatusAbandoned:
+					anyTerminal = true
+					allDone = false
+				case graph.StatusDone:
+					// keep allDone
+				default:
+					allDone = false
+				}
+			}
+			switch {
+			case anyTerminal:
+				n.status = graph.StatusAbandoned
+				n.reason = "restart: upstream terminal"
+				rep.StaleAbandoned++
+				if err := e.store.MarkStatus(ctx, n.id, graph.StatusAbandoned); err != nil {
+					e.logger.WarnContext(ctx, "missions: restore cascade",
+						"id", n.id, "err", err)
+				}
+				e.emitResult(ctx, n, missionResult{
+					status:   graph.StatusAbandoned,
+					errorMsg: n.reason,
+				})
+			case allDone:
+				n.status = graph.StatusReady
+				rep.Ready++
+			default:
+				rep.Pending++
+			}
+		}
+		d.mu.Unlock()
+	}
+
+	e.logger.Info("missions: restore complete",
+		"coordinators", rep.Coordinators,
+		"resumed", rep.Resumed,
+		"ready", rep.Ready,
+		"pending", rep.Pending,
+		"stale_abandoned", rep.StaleAbandoned)
+	return rep, nil
+}
+
+// Cancel marks `missionID` abandoned and walks downstream to abandon
+// every dependent. Holds tickMu (full lock — waits) so a concurrent
+// Tick can't promote a dependent into running while the cascade is
+// being written.
+//
+// On the cancelled mission: if it was already running, its per-mission
+// ctx is cancelled (driver goroutine exits at next turn boundary) and
+// resultCh is dropped so drainTerminals won't double-emit a
+// mission_result. If the mission never started, the row is created
+// directly in terminal abandoned state.
+//
+// Returns ErrMissionNotFound when no DAG holds this id, and
+// ErrMissionTerminal when the mission is already in a terminal state
+// (with a wrapped status for the LLM envelope).
+func (e *Executor) Cancel(ctx context.Context, missionID string) (graph.CancelResult, error) {
+	e.tickMu.Lock()
+	defer e.tickMu.Unlock()
+
+	d, node := e.findNode(missionID)
+	if node == nil {
+		return graph.CancelResult{}, graph.ErrMissionNotFound
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	switch node.status {
+	case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+		return graph.CancelResult{}, fmt.Errorf("%w: %s is %s",
+			graph.ErrMissionTerminal, missionID, node.status)
+	}
+
+	reason := "cancelled by user"
+	e.abandonNode(ctx, node, reason)
+
+	var alsoAbandoned []string
+	queue := append([]string(nil), node.downstream...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		dep := d.missions[next]
+		if dep == nil {
+			continue
+		}
+		switch dep.status {
+		case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+			continue
+		}
+		e.abandonNode(ctx, dep, "upstream cancelled: "+missionID)
+		alsoAbandoned = append(alsoAbandoned, next)
+		queue = append(queue, dep.downstream...)
+	}
+
+	return graph.CancelResult{
+		Cancelled:     missionID,
+		AlsoAbandoned: alsoAbandoned,
+		Reason:        reason,
+	}, nil
+}
+
+// AbandonCoordinator fans out Cancel over every non-terminal mission
+// belonging to coordSessionID. Wired to SessionManager.OnSessionClose
+// so closing a coordinator drains any in-flight missions.
+//
+// Errors from a per-mission Cancel are logged but never propagated:
+// the cascade pass marks dependents terminal, so subsequent Cancels
+// silently no-op via ErrMissionTerminal.
+func (e *Executor) AbandonCoordinator(ctx context.Context, coordSessionID string) {
+	entry, ok := e.dags.Load(coordSessionID)
+	if !ok {
+		return
+	}
+	d := entry.(*dag)
+	d.mu.Lock()
+	var ids []string
+	for id, n := range d.missions {
+		switch n.status {
+		case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+			continue
+		default:
+			ids = append(ids, id)
+		}
+	}
+	d.mu.Unlock()
+	for _, id := range ids {
+		if _, err := e.Cancel(ctx, id); err != nil {
+			if errors.Is(err, graph.ErrMissionTerminal) {
+				continue
+			}
+			e.logger.WarnContext(ctx, "missions: abandon coordinator cancel",
+				"coord", coordSessionID, "id", id, "err", err)
+		}
+	}
+}
+
+// abandonNode is the per-node terminal write shared by Cancel and the
+// cascade walk. Caller MUST hold d.mu and tickMu. Idempotency
+// (already-terminal short-circuit) is the caller's responsibility.
+func (e *Executor) abandonNode(ctx context.Context, node *missionNode, reason string) {
+	node.status = graph.StatusAbandoned
+	node.terminated = time.Now()
+	node.reason = reason
+	if node.cancel != nil {
+		node.cancel()
+		node.cancel = nil
+	}
+	// Drop the result channel so drainTerminals won't double-emit when
+	// the dispatcher goroutine eventually publishes its own terminal
+	// result — the channel is buffered, the orphan write just drops.
+	node.resultCh = nil
+
+	if node.startedAt.IsZero() {
+		if err := e.store.RecordAbandoned(ctx,
+			node.id, node.coordID, node.coordID,
+			node.skill, node.role, node.task,
+			append([]string(nil), node.upstream...),
+			reason,
+		); err != nil {
+			e.logger.WarnContext(ctx, "missions: record abandoned on cancel",
+				"id", node.id, "err", err)
+		}
+	} else {
+		if err := e.store.MarkStatus(ctx, node.id, graph.StatusAbandoned); err != nil {
+			e.logger.WarnContext(ctx, "missions: mark abandoned on cancel",
+				"id", node.id, "err", err)
+		}
+	}
+	e.emitResult(ctx, node, missionResult{
+		status:    graph.StatusAbandoned,
+		errorMsg:  reason,
+		turnsUsed: node.turnsUsed,
+	})
+}
+
+// findNode locates a mission by id across every coordinator's DAG.
+// Returns (nil, nil) when no DAG holds this id. The returned dag's
+// mutex is NOT held — callers re-acquire it before mutating state.
+func (e *Executor) findNode(missionID string) (*dag, *missionNode) {
+	var (
+		foundD *dag
+		foundN *missionNode
+	)
+	e.dags.Range(func(_, v any) bool {
+		d := v.(*dag)
+		d.mu.Lock()
+		if n, ok := d.missions[missionID]; ok {
+			foundD = d
+			foundN = n
+			d.mu.Unlock()
+			return false
+		}
+		d.mu.Unlock()
+		return true
+	})
+	return foundD, foundN
+}
+
+// Tick reconciles every coordinator's DAG: drain terminal goroutines
+// → cascade abandonment → pending→ready → ready→running → completion
+// summary. Guarded by TryLock — a concurrent tick short-circuits with
+// a DEBUG log.
+func (e *Executor) Tick(ctx context.Context) {
+	if !e.tickMu.TryLock() {
+		e.logger.DebugContext(ctx, "missions: tick skipped (prior tick still running)")
+		return
+	}
+	defer e.tickMu.Unlock()
+
+	e.dags.Range(func(k, v any) bool {
+		coordID := k.(string)
+		d := v.(*dag)
+		e.tickDag(ctx, coordID, d)
+		return true
+	})
+}
+
+// ------------------------------------------------------------------
+// Tick body
+// ------------------------------------------------------------------
+
+func (e *Executor) tickDag(ctx context.Context, coordID string, d *dag) {
+	terminals := e.drainTerminals(ctx, d)
+	if len(terminals) > 0 {
+		e.cascadeAbandon(ctx, d, terminals)
+	}
+	e.promoteReady(d)
+	e.promoteRunning(ctx, coordID, d)
+	e.maybeCompletionSummary(ctx, coordID, d, terminals)
+}
+
+// drainTerminals collects any mission whose Dispatcher goroutine has
+// finished and applies the terminal status + emits agent_result.
+func (e *Executor) drainTerminals(ctx context.Context, d *dag) []string {
+	var terminals []string
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, node := range d.missions {
+		if node.status != graph.StatusRunning || node.resultCh == nil {
+			continue
+		}
+		select {
+		case res := <-node.resultCh:
+			node.resultCh = nil
+			node.cancel = nil
+			node.terminated = time.Now()
+			node.turnsUsed = res.turnsUsed
+			node.summary = res.summary
+			node.reason = res.errorMsg
+			switch res.status {
+			case graph.StatusDone, graph.StatusFailed, graph.StatusAbandoned:
+				node.status = res.status
+			default:
+				node.status = graph.StatusDone
+			}
+			if err := e.store.MarkStatus(ctx, id, node.status); err != nil {
+				e.logger.WarnContext(ctx, "missions: mark status", "id", id, "err", err)
+			}
+			e.emitResult(ctx, node, res)
+			if res.abstained {
+				e.emitAbstained(ctx, node, res.abstainedWhy)
+			}
+			terminals = append(terminals, id)
+		default:
+			// still running
+		}
+	}
+	return terminals
+}
+
+// cascadeAbandon walks downstream from each failed/abandoned terminal
+// and marks dependents abandoned. Creates rows for missions that
+// never got the chance to run (upstream failed before promotion).
+func (e *Executor) cascadeAbandon(ctx context.Context, d *dag, terminals []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, id := range terminals {
+		src := d.missions[id]
+		if src == nil {
+			continue
+		}
+		if src.status != graph.StatusFailed && src.status != graph.StatusAbandoned {
+			continue
+		}
+		queue := append([]string(nil), src.downstream...)
+		for len(queue) > 0 {
+			next := queue[0]
+			queue = queue[1:]
+			node := d.missions[next]
+			if node == nil {
+				continue
+			}
+			if node.status == graph.StatusDone ||
+				node.status == graph.StatusFailed ||
+				node.status == graph.StatusAbandoned {
+				continue
+			}
+			node.status = graph.StatusAbandoned
+			node.terminated = time.Now()
+			node.reason = fmt.Sprintf("upstream %s: %s", src.status, id)
+			if node.startedAt.IsZero() {
+				// Never started — create the row directly in terminal.
+				if err := e.store.RecordAbandoned(ctx,
+					next, node.coordID, node.coordID,
+					node.skill, node.role, node.task,
+					append([]string(nil), node.upstream...),
+					node.reason,
+				); err != nil {
+					e.logger.WarnContext(ctx, "missions: record abandoned", "id", next, "err", err)
+				}
+			} else {
+				if err := e.store.MarkStatus(ctx, next, graph.StatusAbandoned); err != nil {
+					e.logger.WarnContext(ctx, "missions: mark abandoned", "id", next, "err", err)
+				}
+			}
+			e.emitResult(ctx, node, missionResult{
+				status:    graph.StatusAbandoned,
+				errorMsg:  node.reason,
+				turnsUsed: 0,
+			})
+			queue = append(queue, node.downstream...)
+		}
+	}
+}
+
+// promoteReady flips pending missions to ready when every upstream
+// mission has reached StatusDone.
+func (e *Executor) promoteReady(d *dag) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, node := range d.missions {
+		if node.status != graph.StatusPending {
+			continue
+		}
+		allDone := true
+		for _, up := range node.upstream {
+			upstream := d.missions[up]
+			if upstream == nil || upstream.status != graph.StatusDone {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			node.status = graph.StatusReady
+		}
+	}
+}
+
+// promoteRunning launches dispatcher goroutines for ready missions,
+// bounded by Parallelism. Goroutines write their DispatchResult into
+// per-node channels drained by the next Tick's drainTerminals.
+//
+// Goroutine lifecycle:
+//   - runCtx is derived from e.baseCtx so a runtime shutdown
+//     cancellation propagates into the LLM stream.
+//   - The dispatcher is registered on e.wg BEFORE `go` so Stop()
+//     never races a freshly-spawned Add with its own Wait.
+//   - When e.stopped is set, no new dispatchers are launched —
+//     ready missions wait for the next process boot's RestoreState
+//     to abandon them cleanly.
+func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
+	if e.isStopped() {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	inFlight := 0
+	for _, n := range d.missions {
+		if n.status == graph.StatusRunning {
+			inFlight++
+		}
+	}
+	if inFlight >= e.parallelism {
+		return
+	}
+
+	for _, node := range d.missions {
+		if node.status != graph.StatusReady {
+			continue
+		}
+		if inFlight >= e.parallelism {
+			break
+		}
+		// Reserve a wg slot BEFORE we mutate node state — if Stop has
+		// already been called, we leave the mission in StatusReady and
+		// the next process boot's RestoreState will abandon it cleanly.
+		if !e.addWorker() {
+			return
+		}
+		node.status = graph.StatusRunning
+		node.startedAt = time.Now()
+		node.resultCh = make(chan missionResult, 1)
+		evtID := e.emitSpawn(ctx, coordID, node)
+		node.spawnEventID = evtID
+
+		runCtx, cancel := context.WithCancel(e.baseCtx)
+		node.cancel = cancel
+		args := graph.DispatchArgs{
+			ParentSessionID: coordID,
+			ChildSessionID:  node.id,
+			CoordSessionID:  coordID,
+			Skill:           node.skill,
+			Role:            node.role,
+			Task:            node.task,
+			DependsOn:       append([]string(nil), node.upstream...),
+		}
+		ch := node.resultCh
+		driver := e.driver
+		hook := e.OnMissionReported
+		missionID := node.id
+		go func() {
+			defer e.wg.Done()
+			defer cancel()
+			res := driver.RunMission(runCtx, args)
+			ch <- missionResult{
+				status:       res.Status,
+				summary:      res.Summary,
+				turnsUsed:    res.TurnsUsed,
+				durationMs:   res.DurationMs,
+				abstained:    res.Abstained,
+				abstainedWhy: res.AbstainedWhy,
+				errorMsg:     res.Error,
+			}
+			if hook != nil {
+				hook(missionID)
+			}
+		}()
+		inFlight++
+	}
+}
+
+// maybeCompletionSummary fires exactly once per graph when every
+// mission reaches a terminal status AND the latest tick caused the
+// final transition.
+//
+// Two paths, mutually exclusive:
+//   - RunOnce wired (production): the marker + JSON payload are
+//     handed to runner.Run as the synthetic user message; ADK
+//     records the user_message event itself and drives one
+//     coordinator turn so SKILL.md branch 8 fires the summary.
+//   - RunOnce nil (tests + filesystem-free callers): the marker is
+//     persisted directly via AppendEvent, with the structured
+//     payload on metadata.completion_payload, so consumers
+//     querying hub still see the marker even without a turn.
+//
+// Idempotent across re-Ticks via dag.completionFired.
+func (e *Executor) maybeCompletionSummary(
+	ctx context.Context,
+	coordID string,
+	d *dag,
+	terminals []string,
+) {
+	if len(terminals) == 0 {
+		return
+	}
+	d.mu.Lock()
+	pending := false
+	for _, n := range d.missions {
+		if n.status == graph.StatusPending ||
+			n.status == graph.StatusReady ||
+			n.status == graph.StatusRunning {
+			pending = true
+			break
+		}
+	}
+	alreadyFired := d.completionFired
+	if !pending && !alreadyFired {
+		d.completionFired = true
+	}
+	payload := graph.CompletionPayload{}
+	if !pending && !alreadyFired {
+		payload.AllSucceeded = true
+		for _, n := range d.missions {
+			outcome := graph.MissionOutcome{
+				MissionID: n.id,
+				Skill:     n.skill,
+				Role:      n.role,
+				Status:    n.status,
+				Summary:   n.summary,
+				Reason:    n.reason,
+				TurnsUsed: n.turnsUsed,
+			}
+			if n.status != graph.StatusDone {
+				payload.AllSucceeded = false
+			}
+			payload.Outcomes = append(payload.Outcomes, outcome)
+		}
+	}
+	d.mu.Unlock()
+
+	if pending || alreadyFired {
+		return
+	}
+
+	if e.RunOnce != nil {
+		// Auto-fire one coordinator turn so a walked-away user gets
+		// the summary without typing. The ctx derives from baseCtx so
+		// runtime shutdown CAN cancel a hung LLM call after Stop()'s
+		// budget expires; until then, Stop() waits on e.wg so we
+		// don't kill the stream prematurely. addWorker reserves the
+		// wg slot atomically with the stopped check so Stop's Wait
+		// can never race a fresh Add.
+		if !e.addWorker() {
+			return
+		}
+		go func() {
+			defer e.wg.Done()
+			runCtx, cancel := context.WithTimeout(e.baseCtx, 2*time.Minute)
+			defer cancel()
+			if err := e.RunOnce(runCtx, coordID, payload); err != nil {
+				e.logger.WarnContext(runCtx, "missions: completion summary",
+					"coord", coordID, "err", err)
+			}
+		}()
+		return
+	}
+
+	// No RunOnce wired (test / filesystem-free callers): persist the
+	// marker directly so consumers querying hub still see it.
+	payloadJSON, _ := json.Marshal(payload)
+	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: coordID,
+		EventType: sessstore.EventTypeUserMessage,
+		Author:    "user",
+		Content:   graph.CompletionMarker + "\n" + string(payloadJSON),
+		Metadata:  map[string]any{"completion_payload": payload},
+	}); err != nil {
+		e.logger.WarnContext(ctx, "missions: completion marker",
+			"coord", coordID, "err", err)
+	}
+}
+
+func (e *Executor) ensureDag(coordID string) *dag {
+	if existing, ok := e.dags.Load(coordID); ok {
+		return existing.(*dag)
+	}
+	fresh := &dag{coordID: coordID, missions: map[string]*missionNode{}}
+	actual, _ := e.dags.LoadOrStore(coordID, fresh)
+	return actual.(*dag)
+}

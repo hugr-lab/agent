@@ -37,6 +37,39 @@ func (a *Agent) Inspect() *Inspector {
 	return &Inspector{hub: hub, agent: a}
 }
 
+// EventCount returns the number of session_events rows for the
+// given session, or -1 on error. Used by the scenario runner to
+// poll for "no new events in N seconds" without dumping the full
+// event list every iteration.
+func (in *Inspector) EventCount(ctx context.Context, sessionID string) int {
+	if in == nil || in.hub == nil {
+		return -1
+	}
+	evs, err := in.hub.GetEvents(ctx, sessionID)
+	if err != nil {
+		return -1
+	}
+	return len(evs)
+}
+
+// LatestEvents returns up to `max` most recent events on the session
+// (ordered seq ASC). Empty slice on error. Used by the scenario
+// runner to poll for "did a specific event type land yet?" without
+// pulling the whole transcript on every tick.
+func (in *Inspector) LatestEvents(ctx context.Context, sessionID string, max int) []sessstore.Event {
+	if in == nil || in.hub == nil {
+		return nil
+	}
+	evs, err := in.hub.GetEvents(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	if max <= 0 || max >= len(evs) {
+		return evs
+	}
+	return evs[len(evs)-max:]
+}
+
 // Sessions returns the root + all subagent sessions keyed by id.
 // Order: root first, then children sorted by created_at ASC.
 func (in *Inspector) Sessions(ctx context.Context, rootID string) []sessstore.Record {

@@ -169,6 +169,33 @@ func TestBuildSummary_Eligibility(t *testing.T) {
 			"",
 		},
 		{
+			"agent_spawn lifecycle — unembedded",
+			sessstore.Event{
+				EventType: sessstore.EventTypeAgentSpawn,
+				Content:   "Spawning hugr-data/schema_explorer: ...",
+				Metadata:  map[string]any{"mission_id": "ses-1", "skill": "hugr-data", "role": "x", "task": "t"},
+			},
+			"",
+		},
+		{
+			"agent_abstained lifecycle — unembedded",
+			sessstore.Event{
+				EventType: sessstore.EventTypeAgentAbstained,
+				Content:   "hugr-data/x abstained",
+				Metadata:  map[string]any{"mission_id": "ses-1", "reason": "out of scope"},
+			},
+			"",
+		},
+		{
+			"user_followup_routed audit — unembedded",
+			sessstore.Event{
+				EventType: sessstore.EventTypeUserFollowupRouted,
+				Content:   "only high severity",
+				Metadata:  map[string]any{"target_mission_id": "ses-1", "classifier_confidence": 0.78},
+			},
+			"",
+		},
+		{
 			"ineligible event_type",
 			sessstore.Event{EventType: sessstore.EventTypeSessionForked, Content: "forked"},
 			"",

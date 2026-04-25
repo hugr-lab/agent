@@ -1,0 +1,103 @@
+name: follow_up_routing
+session_id: scenario-followup-1
+
+# Exercises the spec-007 FollowUpRouter end-to-end:
+#   1. Kick off a multi-mission plan (summariser + formatter with
+#      formatter depending on summariser).
+#   2. Wait until at least one mission is actually StatusRunning — the
+#      follow-up router classifies against running missions, so a
+#      refinement sent before that has no target.
+#   3. Send a refinement message ("focus on LLM context engineering
+#      specifically, not general prompt design") that semantically
+#      aligns with the summariser's task.
+#   4. Verify the refinement landed on the running mission's session
+#      (not as a new mission), and the coordinator has a
+#      `user_followup_routed` audit row.
+
+steps:
+  - say: |
+      Plan a two-step graph via mission_plan:
+        1) summariser: summarise what "context engineering" means in
+           1–2 sentences.
+        2) formatter: (depends on 1) turn that summary into one tight
+           headline sentence ≤ 25 words.
+      Return control once the plan is persisted — I will send a
+      refinement shortly while the summariser is working.
+    queries:
+      - name: plan_persisted
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({id, status, role: .metadata.role, task: .mission})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-followup-1
+
+  # Wait for the summariser to actually reach running BEFORE sending
+  # the refinement — otherwise the follow-up router has no target.
+  - wait_for_missions_running: 30s
+    say: |
+      Focus specifically on LLM context window engineering — treat
+      "context engineering" in the narrow sense of designing model
+      prompts + retrieved documents, not generic prompt engineering.
+    queries:
+      # The refinement must land on the RUNNING summariser's session
+      # as a user_message event — FollowUpRouter.Decide returns a
+      # short-circuit ack, so the coordinator never spawned a new
+      # mission. A second user_message inside the summariser child
+      # session proves the route happened.
+      - name: mission_followup_events
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({id, role: .metadata.role, user_messages: (.events | map(select(.event_type == \"user_message\")) | length)})"
+            ) {
+              hub { db { agent {
+                sessions {
+                  id session_type metadata
+                  events { event_type content }
+                }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-followup-1
+
+      # Coordinator-side audit: one user_followup_routed row with
+      # target_mission_id referencing the running mission.
+      - name: coord_followup_audit
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "user_followup_routed"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq content metadata }
+            }}}
+          }
+        vars:
+          sid: scenario-followup-1
+
+  # Drain the DAG so the final snapshot captures both missions
+  # reaching a terminal status.
+  - wait_for_missions: 90s
+    queries:
+      - name: final_state
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({status, role: .metadata.role})"
+            ) {
+              hub { db { agent {
+                sessions { session_type metadata status }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-followup-1

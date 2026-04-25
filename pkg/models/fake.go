@@ -2,11 +2,48 @@ package models
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"iter"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
+
+// ScriptedPlannerMission is a single planner-output node used by
+// ScriptedPlannerResponse to build a JSON envelope matching the
+// pkg/missions planner contract (see contracts/planner.md §2).
+type ScriptedPlannerMission struct {
+	ID    int    `json:"id"`
+	Skill string `json:"skill"`
+	Role  string `json:"role"`
+	Task  string `json:"task"`
+}
+
+// ScriptedPlannerEdge is a single planner-output dependency edge.
+type ScriptedPlannerEdge struct {
+	From int `json:"from"`
+	To   int `json:"to"`
+}
+
+// ScriptedPlannerResponse renders a strict-JSON planner response as a
+// single string; tests wire it as the Content of a ScriptedResponse so
+// the planner's parser exercises the real contract on every run.
+func ScriptedPlannerResponse(missions []ScriptedPlannerMission, edges []ScriptedPlannerEdge) string {
+	payload := struct {
+		Missions []ScriptedPlannerMission `json:"missions"`
+		Edges    []ScriptedPlannerEdge    `json:"edges"`
+	}{Missions: missions, Edges: edges}
+	if payload.Edges == nil {
+		payload.Edges = []ScriptedPlannerEdge{}
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		// impossible for the shapes above — panic keeps the helper pure
+		panic(fmt.Errorf("ScriptedPlannerResponse: marshal: %w", err))
+	}
+	return string(b)
+}
 
 // ScriptedResponse defines one turn of a scripted LLM conversation.
 type ScriptedResponse struct {

@@ -1,0 +1,124 @@
+name: mission_cancel
+session_id: scenario-mission-cancel-1
+
+# Exercises the spec-007 mission_cancel tool end-to-end:
+#   1. Plan a 2-step linear graph (summariser → formatter) so we have
+#      a clear upstream / downstream pair.
+#   2. Wait until the summariser is actually StatusRunning — cancel
+#      acts on live missions and there's no point firing it before
+#      the executor has promoted anything.
+#   3. Ask the coordinator to cancel the summariser. The formatter
+#      depends on it, so the cascade should mark BOTH abandoned and
+#      neither should ever reach a `done` status.
+#   4. Verify hub.db state: both missions are `abandoned`, two
+#      `agent_result` rows on the coordinator (one per mission), and
+#      no `agent_spawn` for the formatter — it never started.
+
+steps:
+  - say: |
+      Plan a two-mission graph via mission_plan:
+        1) summariser: write a 1–2 sentence summary of what
+           "context engineering" means and promote it to your parent.
+        2) formatter: (depends on 1) turn that summary into a single
+           tight headline sentence ≤ 25 words.
+      Return control once the plan is persisted — I will tell you to
+      cancel the summariser shortly while it is still working.
+    queries:
+      - name: plan_persisted
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({id, status, role: .metadata.role, task: .mission, deps: .metadata.depends_on})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-cancel-1
+
+  # Wait until the summariser is actually running before issuing the
+  # cancel — otherwise mission_cancel rejects with "mission not found"
+  # because the executor hasn't promoted anything yet.
+  - wait_for_missions_running: 30s
+    say: |
+      Cancel the summariser mission via mission_cancel — call
+      mission_status first if you need the id. After the cancel, do
+      NOT plan anything new; just acknowledge the cancellation in a
+      single sentence so I can inspect the audit trail.
+    queries:
+      # The cancelled mission is `abandoned`, the dependent formatter
+      # is `abandoned` too via the cascade walk. No mission ends up
+      # `done` because the upstream never delivered.
+      - name: missions_after_cancel
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({status, role: .metadata.role, reason: .metadata.abandon_reason})",
+              include_origin: true
+            ) {
+              hub { db { agent {
+                sessions { id session_type status metadata }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-cancel-1
+
+      # Lifecycle trace on the coordinator: every mission gets a
+      # terminal `agent_result` (status=abandoned), the cancelled one
+      # got an `agent_spawn` since it was promoted, but the formatter
+      # — which never started — has NO `agent_spawn` row.
+      - name: coord_lifecycle_after_cancel
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"agent_spawn\" or .event_type == \"agent_result\")) | map({seq, type: .event_type, status: .metadata.status, role: .metadata.role, reason: .metadata.reason})"
+            ) {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-mission-cancel-1
+
+      # The mission_cancel tool call itself appears in the
+      # coordinator's transcript with the `cancelled` + `also_abandoned`
+      # envelope. Useful to confirm the LLM actually called the tool
+      # rather than acknowledging without doing the work.
+      - name: coord_cancel_tool_call
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, tool_name: {eq: "mission_cancel"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type tool_name tool_args tool_result }
+            }}}
+          }
+        vars:
+          sid: scenario-mission-cancel-1
+
+  # Final drain — should be a no-op since the cascade already fired,
+  # but useful for the post-scenario hub.db dump.
+  - wait_for_missions: 30s
+    queries:
+      - name: final_state
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\" and .metadata.coord_session_id == $coord)) | map({status, role: .metadata.role})"
+            ) {
+              hub { db { agent {
+                sessions { session_type metadata status }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-cancel-1

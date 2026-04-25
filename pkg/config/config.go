@@ -45,6 +45,7 @@ type Config struct {
 	Memory      memory.Config
 	ChatContext chatcontext.Config
 	MCP         tools.MCPConfig
+	Missions    MissionsConfig
 
 	Auth      []AuthConfig
 	Providers []tools.ProviderConfig
@@ -307,6 +308,9 @@ func unmarshalSections(v *viper.Viper, cfg *Config) error {
 	}
 	if err := v.UnmarshalKey("mcp", &cfg.MCP); err != nil {
 		return fmt.Errorf("unmarshal mcp: %w", err)
+	}
+	if err := v.UnmarshalKey("missions", &cfg.Missions); err != nil {
+		return fmt.Errorf("unmarshal missions: %w", err)
 	}
 	if a := v.GetString("hugr.auth"); a != "" {
 		cfg.Hugr.Auth = a

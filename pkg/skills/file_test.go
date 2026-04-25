@@ -283,3 +283,125 @@ autoload_for: ["root", "", "subagent", "root"]
 	require.NoError(t, err)
 	assert.Equal(t, []string{SessionTypeRoot, SessionTypeSubAgent}, sk.AutoloadFor)
 }
+
+// ----- spec 007 sub_agents phase-2 fields -----
+
+func TestLoad_SubAgents_PhaseTwoFields_Defaults(t *testing.T) {
+	dir := writeSkill(t, "hugr-data", `---
+name: hugr-data
+version: "0.1.0"
+description: x
+providers:
+  - name: hugr
+    provider: hugr-main
+sub_agents:
+  data_analyst:
+    description: Analyses data.
+    instructions: do analysis
+---
+
+# body
+`)
+	mgr, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := mgr.Load(context.Background(), "hugr-data")
+	require.NoError(t, err)
+
+	role := sk.SubAgents["data_analyst"]
+	assert.Equal(t, SubAgentAsyncHintAuto, role.AsyncHint)
+	assert.False(t, role.CanSpawn)
+	assert.Equal(t, 0, role.MaxDepth)
+}
+
+func TestLoad_SubAgents_PhaseTwoFields_Explicit(t *testing.T) {
+	dir := writeSkill(t, "hugr-data", `---
+name: hugr-data
+version: "0.1.0"
+description: x
+providers:
+  - name: hugr
+    provider: hugr-main
+sub_agents:
+  planner:
+    description: Plans work.
+    instructions: plan
+    async_hint: async
+    can_spawn: true
+    max_depth: 2
+---
+
+# body
+`)
+	mgr, err := NewFileManager(dir)
+	require.NoError(t, err)
+	sk, err := mgr.Load(context.Background(), "hugr-data")
+	require.NoError(t, err)
+
+	role := sk.SubAgents["planner"]
+	assert.Equal(t, SubAgentAsyncHintAsync, role.AsyncHint)
+	assert.True(t, role.CanSpawn)
+	assert.Equal(t, 2, role.MaxDepth)
+}
+
+// TestLoad_CoordinatorSkill_Frontmatter covers the shipping
+// skills/_coordinator/SKILL.md — guards the frontmatter contract
+// that spec 007 locks down (version, autoload, autoload_for, and the
+// canonical `_mission_tools` provider binding).
+func TestLoad_CoordinatorSkill_Frontmatter(t *testing.T) {
+	mgr, err := NewFileManager("../../skills")
+	require.NoError(t, err)
+	sk, err := mgr.Load(context.Background(), "_coordinator")
+	require.NoError(t, err)
+
+	assert.Equal(t, "_coordinator", sk.Name)
+	assert.Equal(t, "0.2.0", sk.Version)
+	assert.True(t, sk.Autoload)
+	assert.Equal(t, []string{SessionTypeRoot}, sk.AutoloadFor)
+	require.Len(t, sk.Providers, 1,
+		"_coordinator declares the _mission_tools provider — no special-case wiring")
+	assert.Equal(t, "_mission_tools", sk.Providers[0].Provider)
+}
+
+func TestLoad_SubAgents_PhaseTwoFields_Validation(t *testing.T) {
+	cases := []struct {
+		name    string
+		frag    string
+		errFrag string
+	}{
+		{
+			"invalid async_hint",
+			"    async_hint: weekdays\n",
+			"async_hint must be one of sync|async|auto",
+		},
+		{
+			"negative max_depth",
+			"    max_depth: -1\n",
+			"max_depth must be >= 0",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := `---
+name: hugr-data
+version: "0.1.0"
+description: x
+providers:
+  - name: hugr
+    provider: hugr-main
+sub_agents:
+  x:
+    description: y
+    instructions: z
+` + c.frag + `---
+
+# body
+`
+			dir := writeSkill(t, "hugr-data", body)
+			mgr, err := NewFileManager(dir)
+			require.NoError(t, err)
+			_, err = mgr.Load(context.Background(), "hugr-data")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.errFrag)
+		})
+	}
+}

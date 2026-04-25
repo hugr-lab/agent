@@ -19,12 +19,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -33,6 +36,12 @@ import (
 	"github.com/hugr-lab/hugen/pkg/memory"
 	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
+	"github.com/hugr-lab/hugen/pkg/missions"
+	missionsexec "github.com/hugr-lab/hugen/pkg/missions/executor"
+	missionsfollowup "github.com/hugr-lab/hugen/pkg/missions/followup"
+	"github.com/hugr-lab/hugen/pkg/missions/graph"
+	missionsplan "github.com/hugr-lab/hugen/pkg/missions/planner"
+	missionsstore "github.com/hugr-lab/hugen/pkg/missions/store"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/scheduler"
 	"github.com/hugr-lab/hugen/pkg/sessions"
@@ -58,6 +67,10 @@ type Runtime struct {
 	Tools      *tools.Manager
 	Classifier *sessions.Classifier
 	Scheduler  *scheduler.Scheduler
+
+	// Missions is the phase-2 mission graph executor. Nil when no
+	// missions-config was provided at runtime.Build.
+	Missions *missionsexec.Executor
 
 	// Engine is the embedded query-engine (nil in hub-only mode).
 	Engine *qe.Service
@@ -351,10 +364,98 @@ func Build(
 	}
 	toolsMgr.AddProvider(subagentSvc)
 
+	// Spec 007 — mission graph runtime. Planner + Store + Executor
+	// share the same sessstore client; the driver adapts Dispatcher
+	// to the Executor's MissionDriver surface. The tools.Provider
+	// (missions.Service) is registered in toolsMgr under the
+	// ServiceName key, and skills that want mission_plan /
+	// mission_status declare `provider: _mission_tools` in their
+	// frontmatter — same pattern as _memory / _context / _system.
+	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
+	plannerHeader, err := loadCoordinatorPrompt(skillsPath, "planner-prompt.md", logger)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: load planner prompt: %w", err)
+	}
+	missionsPlanner := missionsplan.New(router, logger, missionsplan.Options{
+		PromptHeader: plannerHeader,
+	})
+	missionsDriver := &dispatcherMissionDriver{
+		dispatcher: dispatcher,
+		skills:     skillsMgr,
+		logger:     logger,
+	}
+	missionsExec := missionsexec.New(missionsexec.Config{
+		Store:       missionsStore,
+		Events:      sessHub,
+		Driver:      missionsDriver,
+		Logger:      logger,
+		Parallelism: 4,
+	})
+	// Spec 007 US5: rebuild every coordinator's DAG from hub.db
+	// before the scheduler kicks in. Stale-active rows get marked
+	// abandoned with reason="restart: stale"; fresh rows are
+	// reattached without re-emitting mission_spawn (FR-020).
+	if _, err := missionsExec.RestoreState(ctx); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: missions restore: %w", err)
+	}
+	missionsSvc := missions.NewService(missions.Config{
+		Planner:  missionsPlanner,
+		Executor: missionsExec,
+		Sessions: sessionMgr,
+		Skills:   skillsMgr,
+		Events:   sessHub,
+	})
+	toolsMgr.AddProvider(missionsSvc)
+	// Spec 007 US6 — sub-agent spawn surface. Lives in its own
+	// provider (`_mission_spawn`) so the coordinator's _coordinator
+	// skill can opt in to mission_tools without inadvertently
+	// exposing spawn_sub_mission. The skills/_subagent autoload
+	// skill (autoload_for: [subagent]) wires the provider onto every
+	// sub-agent session; the tool itself enforces can_spawn +
+	// max_depth at run time.
+	spawnSvc := missions.NewSpawnService(missions.SpawnConfig{
+		Executor:      missionsExec,
+		Sessions:      sessionMgr,
+		Skills:        skillsMgr,
+		MaxSpawnDepth: cfg.Missions.MaxSpawnDepthAgent,
+	})
+	toolsMgr.AddProvider(spawnSvc)
+	rt.Missions = missionsExec
+	// Drop cached plans when the coordinator session closes so a
+	// restarted conversation never serves stale DAG ids.
+	sessionMgr.OnSessionClose(missionsPlanner.OnCoordinatorClose)
+	// Cancel + abandon every still-running mission when its coordinator
+	// closes — FR-011. Hook receives no ctx, so the cascade runs on a
+	// fresh background ctx; never blocks the close goroutine for long
+	// since Cancel only walks the in-memory DAG + writes terminal rows.
+	// AbandonCoordinator walks the in-memory DAG and acquires the
+	// executor's tickMu — under contention with an in-flight Tick the
+	// call can block briefly. Run it off the close-hook caller's
+	// goroutine so SessionManager doesn't stall on us. Background
+	// ctx is fine: Cancel only writes terminal rows + emits events,
+	// and we want it to complete even if the originating request
+	// was cancelled.
+	sessionMgr.OnSessionClose(func(coordID string) {
+		go missionsExec.AbandonCoordinator(context.Background(), coordID)
+	})
+
+	// Drive the scheduler every 2s — the Executor reconciles its
+	// in-memory DAGs + promotes ready missions to running + drains
+	// terminal goroutines on each tick. TryLock guards overlap.
+	if err := sched.Every("missions-tick", 2*time.Second, func(ctx context.Context) error {
+		missionsExec.Tick(ctx)
+		return nil
+	}); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: register missions-tick: %w", err)
+	}
+
 	logger.Info("runtime: internal services registered",
 		"providers", []string{
 			skills.ServiceName, memory.ServiceName, chatcontext.ServiceName,
-			hugen.SubAgentProviderName,
+			hugen.SubAgentProviderName, missions.ServiceName,
 		})
 
 	for _, pc := range cfg.Providers {
@@ -391,13 +492,38 @@ func Build(
 
 	instruction := mem.InstructionProvider(hugen.BaseInstructionProvider(sessionMgr))
 
+	// Spec 007 follow-up router — slots before the compactor so a
+	// short-circuited turn skips both the model call AND the
+	// compactor's work. Enabled by default; operators flip off via
+	// cfg.Missions.FollowUpEnabled when the behaviour needs tuning.
+	// Classification rules live in skills/_coordinator/followup-
+	// classifier.md so operators edit prompt prose without rebuilding.
+	followupHeader, err := loadCoordinatorPrompt(skillsPath, "followup-classifier.md", logger)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: load followup classifier prompt: %w", err)
+	}
+	followupRouter := missionsfollowup.New(missionsfollowup.Config{
+		Executor:     missionsExec,
+		Router:       router,
+		Logger:       logger,
+		Threshold:    cfg.Missions.FollowUpSimilarityThreshold,
+		TieBand:      cfg.Missions.FollowUpTieBand,
+		Timeout:      cfg.Missions.ClassifierTimeout,
+		Enabled:      cfg.Missions.FollowUpEnabled,
+		PromptHeader: followupHeader,
+	})
+
 	a, err := hugen.NewAgent(hugen.Runtime{
-		Router:               router,
-		Sessions:             sessionMgr,
-		Tokens:               tokens,
-		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{chat.Callback()},
-		InstructionProvider:  instruction,
-		Logger:               logger,
+		Router:   router,
+		Sessions: sessionMgr,
+		Tokens:   tokens,
+		ExtraBeforeCallbacks: []llmagent.BeforeModelCallback{
+			followupRouter.Callback(),
+			chat.Callback(),
+		},
+		InstructionProvider: instruction,
+		Logger:              logger,
 	})
 	if err != nil {
 		closeOnErr()
@@ -409,9 +535,63 @@ func Build(
 		logger.Warn("runtime: restore open sessions", "err", err)
 	}
 
+	// Spec 007 US4 — auto-fire one coordinator turn after every
+	// graph completion. The marker text + JSON payload are passed
+	// to runner.Run as the synthetic user message; ADK records the
+	// user_message itself and drives one coordinator turn so
+	// SKILL.md branch 8 fires the summary without waiting on the
+	// user. AppName/UserID come from the coord session's own
+	// metadata so the auto-fired turn uses the same identity ADK
+	// saw on the last user-driven turn. Errors are logged and the
+	// caller (executor) falls back to leaving the marker for the
+	// user's next turn.
+	missionsExec.RunOnce = func(
+		ctx context.Context,
+		coordSessionID string,
+		_ graph.CompletionPayload,
+	) error {
+		// Lifecycle of this goroutine is owned by the executor —
+		// e.wg.Add was called before it spawned us. Don't double-
+		// count by adding here.
+		appName, userID := coordIdentity(sessionMgr, coordSessionID)
+		r, rerr := runner.New(runner.Config{
+			AppName:        appName,
+			Agent:          a,
+			SessionService: sessionMgr,
+		})
+		if rerr != nil {
+			return fmt.Errorf("runtime: runonce build runner: %w", rerr)
+		}
+		// Minimal natural-language nudge — agent_result events
+		// already in the transcript carry every mission's outcome,
+		// so the LLM has full context already. Some local models
+		// return empty when the prompt is verbose; keep RunOnce's
+		// trigger short.
+		msg := &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{{
+				Text: "All missions are complete. Summarise the result for me in one short paragraph.",
+			}},
+		}
+		for _, runErr := range r.Run(ctx, userID, coordSessionID, msg, agent.RunConfig{}) {
+			if runErr != nil {
+				return fmt.Errorf("runtime: runonce: %w", runErr)
+			}
+		}
+		return nil
+	}
+
 	bgCtx, bgCancel := context.WithCancel(ctx)
 	rt.bgCtx = bgCtx
 	rt.bgCancel = bgCancel
+
+	// Hand bgCtx to the executor — its dispatcher goroutines + the
+	// completion-summary RunOnce derive runCtx from it, so a Close()
+	// that bgCancels actually propagates into in-flight LLM streams
+	// (after Stop()'s budget elapses).
+	if rt.Missions != nil {
+		rt.Missions.SetBaseContext(bgCtx)
+	}
 
 	go cls.Run(bgCtx)
 	sched.Start(bgCtx)
@@ -439,6 +619,29 @@ func (r *Runtime) Close() {
 		return
 	}
 	r.closeOnce.Do(func() {
+		// Polite shutdown — gate new mission launches + new RunOnce
+		// fan-outs at the executor first, then wait for in-flight
+		// goroutines (per-mission dispatchers + completion RunOnce)
+		// to finish on the still-live bgCtx. Cancelling bgCtx
+		// before this would kill the LLM stream mid-flight; the
+		// classifier's consumer loop would also lose its live ctx
+		// for hub appends, dropping the freshly-produced events.
+		// Budget is generous — LLM responses can take 30s+.
+		if r.Missions != nil {
+			if err := r.Missions.Stop(90 * time.Second); err != nil && r.logger != nil {
+				r.logger.Warn("runtime: missions stop", "err", err)
+			}
+		}
+		// Flush the classifier's queue with a live ctx so events
+		// produced just-now by the LLM responses we waited for above
+		// actually persist. After bgCancel any queued append uses a
+		// dead ctx and the row is lost.
+		if r.Classifier != nil {
+			if err := r.Classifier.Flush(context.Background(), 30*time.Second); err != nil && r.logger != nil {
+				r.logger.Warn("runtime: classifier flush before shutdown", "err", err)
+			}
+		}
+
 		if r.bgCancel != nil {
 			r.bgCancel()
 		}
@@ -492,6 +695,52 @@ func readConstitution(cfg *config.Config) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("runtime: read constitution %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// coordIdentity returns the (app_name, user_id) pair carried by the
+// coordinator session — used by RunOnce so the auto-fired turn
+// matches the identity ADK saw on the last user-driven turn. Falls
+// back to safe defaults when the session is unknown so the call
+// still succeeds.
+func coordIdentity(sm *sessions.Manager, coordSessionID string) (appName, userID string) {
+	appName = "hugr-agent"
+	userID = "user"
+	if sm == nil || coordSessionID == "" {
+		return
+	}
+	sess, err := sm.Session(coordSessionID)
+	if err != nil || sess == nil {
+		return
+	}
+	if v := sess.AppName(); v != "" {
+		appName = v
+	}
+	if v := sess.UserID(); v != "" {
+		userID = v
+	}
+	return
+}
+
+// loadCoordinatorPrompt reads an operator-editable prompt prose file
+// from skills/_coordinator/<name>. Missing file is fine — callers
+// fall back to their embedded defaults. Read errors other than
+// not-found are surfaced so a corrupted file is noticed at boot
+// rather than masked.
+func loadCoordinatorPrompt(skillsPath, name string, logger *slog.Logger) (string, error) {
+	if skillsPath == "" {
+		return "", nil
+	}
+	path := filepath.Join(skillsPath, "_coordinator", name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			logger.Info("runtime: coordinator prompt not found, using embedded default",
+				"path", path)
+			return "", nil
+		}
+		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
 }

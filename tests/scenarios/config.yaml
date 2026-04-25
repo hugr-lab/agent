@@ -57,9 +57,12 @@ local_db:
     - name: gemma4-26b
       type: llm-openai
       path: '${LLM_LOCAL_URL}?model="google/gemma-4-26b-a4b"&max_tokens=8096&thinking_budget=2048&timeout=10m'
+    - name: qwen3-27b
+      type: llm-openai
+      path: '${LLM_LOCAL_URL}?model="qwen/qwen3.6-27b"&max_tokens=8096&timeout=2m'
     - name: gemma-small
       type: llm-openai
-      path: '${LLM_LOCAL_URL}?model="google/gemma-4-e2b-it"&timeout=120s'
+      path: '${LLM_LOCAL_URL}?model="gemma-4-e4b-it"&timeout=120s'
     - name: gemma-embedding
       type: embedding
       path: '${EMBED_LOCAL_URL}?model="text-embedding-embeddinggemma-300m-qat"&timeout=30s'
@@ -88,9 +91,15 @@ llm:
   routes:
     default: gemma4-26b
     tool_calling: gemma4-26b
+    # Spec 007 follow-up routing. Short pairwise "is this a
+    # refinement?" decision — routed to the cheap 4B gemma so the
+    # classifier call doesn't block on gemma4-26b while it's
+    # driving a sub-agent.
+    classification: gemma-small
   context_windows:
     gemma4-26b: 50000
-    gemma-small: 32000
+    qwen3-27b: 100000
+    gemma-small: 4000
   default_budget: 64000
 
 embedding:
@@ -108,3 +117,13 @@ a2a:
 devui:
   port: 0
   base_url: ""
+
+missions:
+  # FollowUpRouter is opt-in at runtime; scenarios exercising it need
+  # this flipped on. Threshold / tie-band stay at defaults (0.55 / 0.05).
+  follow_up_enabled: true
+  # Local LLM endpoints can block for 5-10s when the main model is
+  # busy running a sub-agent in parallel; scenarios bump the default
+  # 3s to 30s to give the classifier room before the router gives up
+  # and proceeds.
+  classifier_timeout: 30s

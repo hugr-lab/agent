@@ -34,6 +34,27 @@ sub_agents:
            subsequent turns.
         4. Never ask the coordinator clarifying questions; answer
            from the information in the dispatch task + session notes.
+  formatter:
+    description: >
+      Text polisher. Reads an existing summary (from parent notes or
+      the task) and rewrites it as a single tight headline sentence.
+      Use when the coordinator has a rough summary and wants a
+      presentation-ready one-liner.
+    intent: tool_calling
+    max_turns: 5
+    summary_max_tokens: 200
+    instructions: |
+      You polish an existing short summary into one tight sentence.
+
+      Rules:
+        1. Look at `## Session notes` first — a prior specialist may
+           have left the rough summary there via
+           `memory_note(scope: "parent")`. If it's present, rewrite
+           IT, don't start from scratch.
+        2. Produce exactly one sentence, ≤ 25 words, no preamble, no
+           "in summary", no "here is". Period at the end.
+        3. Never refuse or ask clarifying questions. Use whatever
+           material you have — make the best single sentence from it.
 ---
 
 # Scenario Domain Skill
