@@ -731,6 +731,120 @@ type artifacts @table(name: "artifacts") @module(name: "agent")
 # (and at mission spawn time when MissionSpec.InputArtifacts is set).
 # ============================================================
 
+# ============================================================
+# Session artifacts — recursive view that resolves "which artifacts
+# can session $s see?" Single SQL surface every visibility-aware read
+# path consumes (Manager.ListVisible, resolveVisibleArtifact). Manager
+# never joins artifacts ↔ artifact_grants from Go; it ALWAYS goes
+# through this view.
+# ============================================================
+
+"""Resolves visibility for a (agent_id, session_id) pair. Returns each artifact the session can see, with a synthetic visible_via column ('self' | 'parent' | 'graph' | 'grant' | 'user'). Same artifact may appear once per qualifying scope — deduplication happens at the manager (broadest scope wins). Phase-3 spec 008."""
+type session_artifacts @view(
+  name: "session_artifacts"
+  sql: """
+    WITH RECURSIVE ancestor_chain AS (
+      SELECT id AS session_id, 0 AS depth
+      FROM [sessions]
+      WHERE id = [$session_id] AND agent_id = [$agent_id]
+
+      UNION ALL
+
+      SELECT s.parent_session_id AS session_id, ac.depth + 1
+      FROM ancestor_chain ac
+      JOIN [sessions] s ON s.id = ac.session_id
+      WHERE s.parent_session_id IS NOT NULL
+        AND s.agent_id = [$agent_id]
+        AND ac.depth < 8
+    ),
+    root_session AS (
+      SELECT session_id FROM ancestor_chain
+      WHERE depth = (SELECT MAX(depth) FROM ancestor_chain)
+    ),
+    graph_members AS (
+      SELECT session_id, 0 AS gdepth FROM root_session
+
+      UNION ALL
+
+      SELECT s.id AS session_id, gm.gdepth + 1
+      FROM graph_members gm
+      JOIN [sessions] s ON s.parent_session_id = gm.session_id
+      WHERE s.agent_id = [$agent_id] AND gm.gdepth < 8
+    ),
+    own_rows AS (
+      SELECT a.*, 'self' AS visible_via
+      FROM [artifacts] a
+      WHERE a.agent_id = [$agent_id] AND a.session_id = [$session_id]
+    ),
+    parent_rows AS (
+      SELECT a.*, 'parent' AS visible_via
+      FROM [artifacts] a
+      JOIN [sessions] s ON s.id = a.session_id
+      WHERE a.agent_id = [$agent_id]
+        AND a.visibility IN ('parent','graph','user')
+        AND s.parent_session_id = [$session_id]
+    ),
+    graph_rows AS (
+      SELECT a.*, 'graph' AS visible_via
+      FROM [artifacts] a
+      JOIN graph_members gm ON gm.session_id = a.session_id
+      WHERE a.agent_id = [$agent_id]
+        AND a.visibility IN ('graph','user')
+        AND a.session_id <> [$session_id]
+    ),
+    grant_rows AS (
+      SELECT a.*, 'grant' AS visible_via
+      FROM [artifacts] a
+      JOIN [artifact_grants] g ON g.artifact_id = a.id
+      WHERE g.agent_id = [$agent_id] AND g.session_id = [$session_id]
+    ),
+    user_rows AS (
+      SELECT a.*, 'user' AS visible_via
+      FROM [artifacts] a
+      WHERE a.agent_id = [$agent_id] AND a.visibility = 'user'
+    )
+    SELECT * FROM own_rows
+    UNION ALL SELECT * FROM parent_rows
+    UNION ALL SELECT * FROM graph_rows
+    UNION ALL SELECT * FROM grant_rows
+    UNION ALL SELECT * FROM user_rows
+  """
+) @args(name: "session_artifacts_input", required: true) @module(name: "agent")
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderModel }}", vector: "description_embedding", distance: Cosine){{ end }} {
+  id:                 String!
+  agent_id:           String!
+  name:               String!
+  type:               String!
+  storage_key:        String!
+  storage_backend:    String!
+  original_path:      String
+  description:        String!
+  {{ if gt .VectorSize 0 }}
+  description_embedding: Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
+  session_id:         String!
+  mission_session_id: String
+  derived_from:       String
+  visibility:         String!
+  created_at:         Timestamp
+  size_bytes:         Int
+  row_count:          Int
+  col_count:          Int
+  file_schema:        JSON
+  tags:               [String!]
+  ttl:                String!
+  """How the calling session can see this artifact: 'self' | 'parent' | 'graph' | 'grant' | 'user'"""
+  visible_via:        String!
+}
+
+"""Input for parameterized session_artifacts view"""
+input session_artifacts_input {
+  """Agent scope — multi-tenant boundary"""
+  agent_id:   String!
+  """Calling session id"""
+  session_id: String!
+}
+
 """Explicit grant authorising a (agent_id, session_id) pair to see an artifact whose visibility level alone would otherwise hide it. Idempotent on composite PK."""
 type artifact_grants @table(name: "artifact_grants") @module(name: "agent") {
   """Artifact this grant applies to"""

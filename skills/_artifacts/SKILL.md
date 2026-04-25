@@ -1,6 +1,6 @@
 ---
 name: _artifacts
-version: "0.3.1"
+version: "0.4.0"
 description: >
   Persistent artifact registry. Publish bulky outputs (Parquet, CSV,
   HTML, charts, generated reports) as references that the
@@ -130,9 +130,43 @@ visibility is `user`** (or that the coordinator has explicitly
 widened). Self / parent / graph scoped artifacts are private to
 the mission graph and must NOT appear in the user-facing reply.
 
-## What about the rest of the surface?
+## Listing visible artifacts
 
-The remaining tools (`artifact_remove`, `artifact_visibility`,
-`artifact_list`, `artifact_query`, `artifact_chain`) land in
-follow-up stories. For phase-3 US1+US2 you can publish, look up
-metadata, and download via the admin endpoint.
+`artifact_list(type?, tags?, limit?)` returns every artifact your
+session can see (own, parent-scope from your sub-agents,
+graph-scope from siblings, explicit grants, and `user`-scope
+artifacts published by anyone). Default limit 50, max 200.
+Each entry carries `id`, `name`, `type`, `visibility`, `size_bytes`,
+`tags`. Use this before `artifact_info` to discover what's
+available; cite the ids in your reasoning.
+
+## Visibility (coordinator only)
+
+`artifact_visibility(id, visibility?, target_session_id?,
+target_agent_id?)` is **coordinator-only**. Two operations, either
+or both at once:
+
+- **Widen scope**: `visibility: "user"` lifts an artifact to
+  user-visible so it shows up on the download surface. Strict
+  widening — you cannot narrow (`{error, code: visibility_narrowing}`).
+- **Grant access**: `target_session_id: "sess-X"` adds an explicit
+  row in `artifact_grants` so that single session can see the
+  artifact regardless of its scope. Used by mission-input handoff.
+
+Sub-agents calling this get `{error, code: not_coordinator}` —
+escalate to the coordinator if you need a wider scope or a grant.
+
+## Removing artifacts
+
+`artifact_remove(id)` deletes an artifact (bytes + metadata + all
+grants). You may remove your own artifacts; coordinators may also
+remove `user`-visibility artifacts. Anything else returns
+`{error, code: not_authorised}`. Idempotent on re-call (subsequent
+calls return `unknown_artifact`).
+
+## Surface still pending
+
+`artifact_query` (analytical SQL across artifacts) and
+`artifact_chain` (lineage walk) land in follow-up stories. Phase-3
+ships publish, info, list, visibility, and remove — the lifecycle
+loop is closed.

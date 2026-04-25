@@ -64,64 +64,17 @@ func (m *Manager) Info(ctx context.Context, callerSession, id string) (ArtifactD
 
 // resolveVisibleArtifact loads an artifact row by id and reports
 // whether callerSession can see it. Empty callerSession = user-only
-// mode (admin endpoint). Otherwise returns (rec, true, nil) when
-// visible by self / user / grant scopes.
+// mode (admin endpoint). Otherwise the view enforces self / parent /
+// graph / grant / user scopes uniformly.
 //
-// Phase-3 US2 implements the four scopes the admin endpoint and ADK
-// shims need; parent / graph traversal lands in US4 with the
-// `session_artifacts` recursive view (T018). The function is the
-// single chokepoint read paths funnel through, so US4 swaps it out
-// without touching OpenReader / Info / artifactInfoTool.
+// All read paths (OpenReader, Info, WidenVisibility, Remove) funnel
+// through this single chokepoint so visibility policy lives in
+// exactly one Go function — and one SQL view.
 func (m *Manager) resolveVisibleArtifact(ctx context.Context, callerSession, id string) (artstore.Record, bool, error) {
 	if id == "" {
 		return artstore.Record{}, false, fmt.Errorf("artifacts: resolveVisibleArtifact: empty id")
 	}
-	rec, found, err := m.store().Get(ctx, id)
-	if err != nil {
-		return artstore.Record{}, false, err
-	}
-	if !found {
-		return artstore.Record{}, false, nil
-	}
-
-	if callerSession == "" {
-		// Admin endpoint: user-only.
-		if rec.Visibility == string(VisibilityUser) {
-			rec.VisibleVia = "user"
-			return rec, true, nil
-		}
-		return artstore.Record{}, false, nil
-	}
-
-	if rec.Visibility == string(VisibilityUser) {
-		rec.VisibleVia = "user"
-		return rec, true, nil
-	}
-	if rec.SessionID == callerSession {
-		rec.VisibleVia = "self"
-		return rec, true, nil
-	}
-
-	// Grant overlay: any explicit row in artifact_grants for the
-	// caller's session unlocks the artifact regardless of its scope.
-	grants, err := m.store().ListGrantsForSession(ctx, m.deps.AgentID, callerSession)
-	if err != nil {
-		return artstore.Record{}, false, err
-	}
-	for _, g := range grants {
-		if g.ArtifactID == id {
-			rec.VisibleVia = "grant"
-			return rec, true, nil
-		}
-	}
-
-	// parent / graph scopes: require session ancestor traversal that
-	// US4's session_artifacts view will provide. Phase-3 US2 returns
-	// "invisible" here, which is safe (no false positives) but does
-	// hide parent-scope artifacts from coordinator's ADK Load path.
-	// The user-facing render path (ListVisible, US4) is the right
-	// surface for those reads, so this gap is intentional.
-	return artstore.Record{}, false, nil
+	return m.store().SessionArtifactByID(ctx, callerSession, id)
 }
 
 // recordToDetail converts a store.Record into the public

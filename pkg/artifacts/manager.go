@@ -24,9 +24,11 @@ const ServiceName = "_artifacts"
 
 // errSessionEvents is the local-package shorthand for the session
 // event writer. Defined as an interface so tests can substitute a
-// fake without standing up a full *sessstore.Client.
+// fake without standing up a full *sessstore.Client. *sessstore.Client
+// is the production implementation and satisfies both methods.
 type sessionEventWriter interface {
 	AppendEventWithSummary(ctx context.Context, ev sessstore.Event, summary string) (string, error)
+	GetSession(ctx context.Context, id string) (*sessstore.Record, error)
 }
 
 // Deps bundles the manager's external dependencies. Constructed once
@@ -152,6 +154,9 @@ func (m *Manager) buildTools() []tool.Tool {
 	return []tool.Tool{
 		&artifactPublishTool{m: m},
 		&artifactInfoTool{m: m},
+		&artifactListTool{m: m},
+		&artifactVisibilityTool{m: m},
+		&artifactRemoveTool{m: m},
 	}
 }
 
@@ -167,24 +172,6 @@ func (m *Manager) AgentID() string { return m.deps.AgentID }
 // already has the cfg + deps it needs to flesh them out without
 // further plumbing.
 // ─────────────────────────────────────────────────────────────────
-
-// Remove stub; full body lands in T053 (US4).
-func (m *Manager) Remove(ctx context.Context, _ string, _ string) error {
-	_ = ctx
-	return errNotImplementedYet("Remove", "T053 / US4")
-}
-
-// WidenVisibility stub; full body lands in T048 (US4).
-func (m *Manager) WidenVisibility(ctx context.Context, _ string, _ string, _ Visibility, _ *GrantTarget) error {
-	_ = ctx
-	return errNotImplementedYet("WidenVisibility", "T048 / US4")
-}
-
-// ListVisible stub; full body lands in T051 (US4).
-func (m *Manager) ListVisible(ctx context.Context, _ string, _ ListFilter) ([]ArtifactRef, error) {
-	_ = ctx
-	return nil, errNotImplementedYet("ListVisible", "T051 / US4")
-}
 
 // Chain stub; full body lands in T075 (US9).
 func (m *Manager) Chain(ctx context.Context, _ string, _ string) ([]ArtifactRef, error) {
@@ -362,9 +349,7 @@ func (m *Manager) Load(ctx context.Context, req *adkartifact.LoadRequest) (*adka
 }
 
 // Delete implements adkartifact.Service. Resolves id by name and
-// routes to the domain Remove method (which lands fully in T053 /
-// US4). Foundation phase still returns the not-implemented envelope
-// from Remove.
+// routes to the domain Remove method.
 func (m *Manager) Delete(ctx context.Context, req *adkartifact.DeleteRequest) error {
 	if req == nil {
 		return errors.New("artifacts: Delete: nil request")
@@ -383,8 +368,7 @@ func (m *Manager) Delete(ctx context.Context, req *adkartifact.DeleteRequest) er
 }
 
 // List implements adkartifact.Service. Returns the names visible to
-// (sessionID). Routes through ListVisible (T051 / US4); foundation
-// phase still returns the not-implemented envelope from ListVisible.
+// (sessionID). Routes through ListVisible.
 func (m *Manager) List(ctx context.Context, req *adkartifact.ListRequest) (*adkartifact.ListResponse, error) {
 	if req == nil {
 		return nil, errors.New("artifacts: List: nil request")

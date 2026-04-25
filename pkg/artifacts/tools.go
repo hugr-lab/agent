@@ -237,6 +237,208 @@ func (t *artifactInfoTool) Run(ctx tool.Context, args any) (map[string]any, erro
 }
 
 // ─────────────────────────────────────────────────────────────────
+// artifact_list
+// ─────────────────────────────────────────────────────────────────
+
+type artifactListTool struct {
+	m *Manager
+}
+
+func (t *artifactListTool) Name() string { return "artifact_list" }
+
+func (t *artifactListTool) Description() string {
+	return "Lists artifacts your session can see (own + parent-scope + graph-scope + explicit grants + world). Optional filters by `type`, `tags` (AND), and `limit` (default 50, max 200). Returns {artifacts: [...], count: N}."
+}
+
+func (t *artifactListTool) IsLongRunning() bool { return false }
+
+func (t *artifactListTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"type":  {Type: "STRING", Description: "Filter by type (csv | parquet | …)."},
+				"tags":  {Type: "ARRAY", Items: &genai.Schema{Type: "STRING"}, Description: "Tags ALL artifacts must carry."},
+				"limit": {Type: "INTEGER", Description: "Result cap (default 50, max 200)."},
+			},
+		},
+	}
+}
+
+func (t *artifactListTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *artifactListTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("artifact_list", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	filter := ListFilter{
+		Type:  stringArg(m, "type"),
+		Tags:  stringSliceArg(m, "tags"),
+		Limit: intArg(m, "limit"),
+	}
+	refs, err := t.m.ListVisible(ctx, ctx.SessionID(), filter)
+	if err != nil {
+		return errEnvelope("artifact_list", err, classifyError(err))
+	}
+	out := make([]map[string]any, 0, len(refs))
+	for _, r := range refs {
+		entry := map[string]any{
+			"id":         r.ID,
+			"name":       r.Name,
+			"type":       r.Type,
+			"visibility": string(r.Visibility),
+			"size_bytes": r.SizeBytes,
+		}
+		if len(r.Tags) > 0 {
+			entry["tags"] = r.Tags
+		}
+		if r.DistanceToQuery != nil {
+			entry["distance_to_query"] = *r.DistanceToQuery
+		}
+		out = append(out, entry)
+	}
+	return map[string]any{"artifacts": out, "count": len(out)}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
+// artifact_visibility
+// ─────────────────────────────────────────────────────────────────
+
+type artifactVisibilityTool struct {
+	m *Manager
+}
+
+func (t *artifactVisibilityTool) Name() string { return "artifact_visibility" }
+
+func (t *artifactVisibilityTool) Description() string {
+	return "Coordinator-only. Widens an artifact's visibility scope (self → parent → graph → user) and/or grants explicit access to (target_agent_id, target_session_id). Cannot narrow. Sub-agents calling this get {error, code: 'not_coordinator'}."
+}
+
+func (t *artifactVisibilityTool) IsLongRunning() bool { return false }
+
+func (t *artifactVisibilityTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"id":                {Type: "STRING", Description: "Artifact id."},
+				"visibility":        {Type: "STRING", Description: "New visibility level (must be wider than current).", Enum: []string{"self", "parent", "graph", "user"}},
+				"target_agent_id":   {Type: "STRING", Description: "Optional: grant target's agent id (defaults to current agent)."},
+				"target_session_id": {Type: "STRING", Description: "Optional: grant target's session id."},
+			},
+			Required: []string{"id"},
+		},
+	}
+}
+
+func (t *artifactVisibilityTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *artifactVisibilityTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("artifact_visibility", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	id := stringArg(m, "id")
+	if id == "" {
+		return errEnvelope("artifact_visibility", fmt.Errorf("id required"), "invalid_args")
+	}
+	var vis Visibility
+	if v := stringArg(m, "visibility"); v != "" {
+		vis = Visibility(v)
+	}
+	var target *GrantTarget
+	if tsid := stringArg(m, "target_session_id"); tsid != "" {
+		target = &GrantTarget{
+			AgentID:   stringArg(m, "target_agent_id"),
+			SessionID: tsid,
+		}
+	}
+	if vis == "" && target == nil {
+		return errEnvelope("artifact_visibility",
+			fmt.Errorf("at least one of `visibility` or `target_session_id` required"), "invalid_args")
+	}
+	if err := t.m.WidenVisibility(ctx, ctx.SessionID(), id, vis, target); err != nil {
+		return errEnvelope("artifact_visibility", err, classifyError(err))
+	}
+	return map[string]any{"id": id, "ok": true}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
+// artifact_remove
+// ─────────────────────────────────────────────────────────────────
+
+type artifactRemoveTool struct {
+	m *Manager
+}
+
+func (t *artifactRemoveTool) Name() string { return "artifact_remove" }
+
+func (t *artifactRemoveTool) Description() string {
+	return "Removes an artifact (bytes + metadata + grants) from the registry. You may remove your own artifacts; coordinators may also remove user-visibility artifacts. Returns {error, code: 'not_authorised'} otherwise."
+}
+
+func (t *artifactRemoveTool) IsLongRunning() bool { return false }
+
+func (t *artifactRemoveTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"id": {Type: "STRING", Description: "Artifact id."},
+			},
+			Required: []string{"id"},
+		},
+	}
+}
+
+func (t *artifactRemoveTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *artifactRemoveTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("artifact_remove", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	id := stringArg(m, "id")
+	if id == "" {
+		return errEnvelope("artifact_remove", fmt.Errorf("id required"), "invalid_args")
+	}
+	if err := t.m.Remove(ctx, ctx.SessionID(), id); err != nil {
+		return errEnvelope("artifact_remove", err, classifyError(err))
+	}
+	return map[string]any{"id": id, "removed": true}, nil
+}
+
+// intArg pulls an int arg out of the LLM's `map[string]any` args,
+// defaulting to 0 when missing. JSON numbers come through as float64.
+func intArg(m map[string]any, key string) int {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+
+// ─────────────────────────────────────────────────────────────────
 // shared envelope helpers
 // ─────────────────────────────────────────────────────────────────
 
