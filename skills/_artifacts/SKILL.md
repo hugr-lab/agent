@@ -1,6 +1,6 @@
 ---
 name: _artifacts
-version: "0.4.0"
+version: "0.5.0"
 description: >
   Persistent artifact registry. Publish bulky outputs (Parquet, CSV,
   HTML, charts, generated reports) as references that the
@@ -132,13 +132,20 @@ the mission graph and must NOT appear in the user-facing reply.
 
 ## Listing visible artifacts
 
-`artifact_list(type?, tags?, limit?)` returns every artifact your
-session can see (own, parent-scope from your sub-agents,
+`artifact_list(type?, tags?, search?, limit?)` returns every artifact
+your session can see (own, parent-scope from your sub-agents,
 graph-scope from siblings, explicit grants, and `user`-scope
 artifacts published by anyone). Default limit 50, max 200.
 Each entry carries `id`, `name`, `type`, `visibility`, `size_bytes`,
 `tags`. Use this before `artifact_info` to discover what's
 available; cite the ids in your reasoning.
+
+When `search` is set (≥ 3 chars and the embedder is online), the
+results are ranked by description similarity — each entry carries
+`distance_to_query` (lower = more similar). Combine `search` with
+`type` / `tags` to scope the candidate set; type/tag filters apply
+*after* semantic ranking so the top hits are always the most
+relevant within the constraint.
 
 ## Visibility (coordinator only)
 

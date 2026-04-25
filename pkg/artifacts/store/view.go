@@ -94,6 +94,60 @@ func (c *Client) SessionArtifacts(ctx context.Context, sessionID string, filter 
 	return out, nil
 }
 
+// SessionArtifactsSemantic ranks visible artifacts by description
+// similarity to query. Caller passes the natural-language query
+// verbatim — Hugr embeds it server-side via the `semantic:` argument.
+// Results carry `_distance_to_query` (lower = more similar). Falls
+// back to nil + nil error when the engine returns no rows for the
+// agent / session.
+//
+// Limit is mandatory (no implicit cap). Caller should pass
+// 4× the user-facing limit so dedup-by-id leaves enough headroom.
+func (c *Client) SessionArtifactsSemantic(ctx context.Context, sessionID, query string, limit int) ([]Record, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("artifacts/store: SessionArtifactsSemantic requires sessionID")
+	}
+	if query == "" {
+		return nil, fmt.Errorf("artifacts/store: SessionArtifactsSemantic requires query")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := queries.RunQuery[[]artifactRowVV](ctx, c.querier,
+		`query ($input: hub_db_session_artifacts_input!, $query: String!, $limit: Int!) {
+			hub { db { agent {
+				session_artifacts(args: $input, semantic: { query: $query, limit: $limit }) {
+					`+artifactColumns+` visible_via
+					distance: _distance_to_query(query: $query)
+				}
+			}}}
+		}`,
+		map[string]any{
+			"input": map[string]any{
+				"agent_id":   c.agentID,
+				"session_id": sessionID,
+			},
+			"query": query,
+			"limit": limit,
+		},
+		"hub.db.agent.session_artifacts",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrNoData) || errors.Is(err, types.ErrWrongDataPath) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("artifacts/store: session artifacts semantic: %w", err)
+	}
+
+	out := make([]Record, 0, len(rows))
+	for _, r := range rows {
+		rec := r.toRecord()
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
 // SessionArtifactByID looks up a single artifact through the
 // session_artifacts view, scoped to the calling session's
 // visibility. Returns (rec, false, nil) when invisible / missing —
@@ -170,6 +224,7 @@ func (c *Client) SessionArtifactByID(ctx context.Context, sessionID, id string) 
 // the GraphQL JSON decoder used by RunQuery handles flat field maps
 // reliably; embedded-struct field promotion has bitten us before.
 type artifactRowVV struct {
+	Distance         *float64       `json:"distance"`
 	ID               string         `json:"id"`
 	AgentID          string         `json:"agent_id"`
 	Name             string         `json:"name"`
@@ -214,6 +269,7 @@ func (r artifactRowVV) toRecord() Record {
 		Tags:             r.Tags,
 		TTL:              r.TTL,
 		VisibleVia:       r.VisibleVia,
+		DistanceToQuery:  r.Distance,
 	}
 }
 

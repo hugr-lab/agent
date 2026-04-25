@@ -247,7 +247,7 @@ type artifactListTool struct {
 func (t *artifactListTool) Name() string { return "artifact_list" }
 
 func (t *artifactListTool) Description() string {
-	return "Lists artifacts your session can see (own + parent-scope + graph-scope + explicit grants + world). Optional filters by `type`, `tags` (AND), and `limit` (default 50, max 200). Returns {artifacts: [...], count: N}."
+	return "Lists artifacts your session can see (own + parent-scope + graph-scope + explicit grants + world). Optional filters by `type`, `tags` (AND), `search` (semantic ranking against descriptions), and `limit` (default 50, max 200). When `search` is set each result carries `distance_to_query` (lower = more similar). Returns {artifacts: [...], count: N}."
 }
 
 func (t *artifactListTool) IsLongRunning() bool { return false }
@@ -259,9 +259,10 @@ func (t *artifactListTool) Declaration() *genai.FunctionDeclaration {
 		Parameters: &genai.Schema{
 			Type: "OBJECT",
 			Properties: map[string]*genai.Schema{
-				"type":  {Type: "STRING", Description: "Filter by type (csv | parquet | …)."},
-				"tags":  {Type: "ARRAY", Items: &genai.Schema{Type: "STRING"}, Description: "Tags ALL artifacts must carry."},
-				"limit": {Type: "INTEGER", Description: "Result cap (default 50, max 200)."},
+				"type":   {Type: "STRING", Description: "Filter by type (csv | parquet | …)."},
+				"tags":   {Type: "ARRAY", Items: &genai.Schema{Type: "STRING"}, Description: "Tags ALL artifacts must carry."},
+				"search": {Type: "STRING", Description: "Natural-language query — ranks by description similarity."},
+				"limit":  {Type: "INTEGER", Description: "Result cap (default 50, max 200)."},
 			},
 		},
 	}
@@ -278,9 +279,10 @@ func (t *artifactListTool) Run(ctx tool.Context, args any) (map[string]any, erro
 		return errEnvelope("artifact_list", fmt.Errorf("unexpected args type %T", args), "invalid_args")
 	}
 	filter := ListFilter{
-		Type:  stringArg(m, "type"),
-		Tags:  stringSliceArg(m, "tags"),
-		Limit: intArg(m, "limit"),
+		Type:   stringArg(m, "type"),
+		Tags:   stringSliceArg(m, "tags"),
+		Search: stringArg(m, "search"),
+		Limit:  intArg(m, "limit"),
 	}
 	refs, err := t.m.ListVisible(ctx, ctx.SessionID(), filter)
 	if err != nil {

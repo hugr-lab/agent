@@ -67,3 +67,8 @@ func (c *Client) AgentID() string { return c.agentID }
 
 // AgentShort returns the agent's short identifier (used by id.New).
 func (c *Client) AgentShort() string { return c.agentShort }
+
+// EmbedderEnabled reports whether the Client was wired with the
+// server-side embedder. ListVisible's semantic-search route gates
+// on this — when false the manager falls back to plain ranking.
+func (c *Client) EmbedderEnabled() bool { return c.embedderEnabled }

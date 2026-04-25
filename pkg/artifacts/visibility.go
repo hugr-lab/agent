@@ -100,13 +100,37 @@ func (m *Manager) ListVisible(ctx context.Context, callerSession string, filter 
 		limit = 200
 	}
 
-	rows, err := m.store().SessionArtifacts(ctx, callerSession, artstore.SessionArtifactsFilter{
-		Type:  filter.Type,
-		Tags:  filter.Tags,
-		Limit: limit,
-	})
+	var rows []artstore.Record
+	var err error
+	semantic := filter.Search != "" && m.store().EmbedderEnabled() && len(filter.Search) >= 3
+	if semantic {
+		// Semantic ranking — bypass type/tag filters at the engine
+		// level (semantic+filter combinations are an open Hugr
+		// question; we apply tag filtering client-side below).
+		rows, err = m.store().SessionArtifactsSemantic(ctx, callerSession, filter.Search, limit*4)
+	} else {
+		rows, err = m.store().SessionArtifacts(ctx, callerSession, artstore.SessionArtifactsFilter{
+			Type:  filter.Type,
+			Tags:  filter.Tags,
+			Limit: limit,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: ListVisible: %w", err)
+	}
+	if semantic {
+		// Apply Type/Tags as post-filters on semantic results.
+		filtered := make([]artstore.Record, 0, len(rows))
+		for _, r := range rows {
+			if filter.Type != "" && r.Type != filter.Type {
+				continue
+			}
+			if !tagsContainAll(r.Tags, filter.Tags) {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		rows = filtered
 	}
 
 	// Dedup by id, picking the broadest scope (lowest priority order
@@ -138,13 +162,59 @@ func (m *Manager) ListVisible(ctx context.Context, callerSession string, filter 
 			StorageBackend:  b.rec.StorageBackend,
 		})
 	}
-	// Order by created_at DESC. The view returns sorted but dedup
-	// doesn't preserve order; re-sort here.
-	sortRefsByCreatedDesc(out)
+	// Order by distance ASC when semantic mode active, else
+	// created_at DESC. Semantic preserves the engine's ranking
+	// (lowest distance first); dedup may have shuffled order.
+	if semantic {
+		sortRefsByDistanceAsc(out)
+	} else {
+		sortRefsByCreatedDesc(out)
+	}
 	if len(out) > limit {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// tagsContainAll mirrors store.tagsContainAll for the post-filter
+// applied on semantic-search rows.
+func tagsContainAll(have, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	set := map[string]struct{}{}
+	for _, t := range have {
+		set[t] = struct{}{}
+	}
+	for _, w := range want {
+		if _, ok := set[w]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func sortRefsByDistanceAsc(refs []ArtifactRef) {
+	for i := 1; i < len(refs); i++ {
+		for j := i; j > 0 && distanceLess(refs[j].DistanceToQuery, refs[j-1].DistanceToQuery); j-- {
+			refs[j], refs[j-1] = refs[j-1], refs[j]
+		}
+	}
+}
+
+// distanceLess returns whether a is "smaller" (more similar) than b.
+// nil is treated as +Inf so unknown-distance rows sort last.
+func distanceLess(a, b *float64) bool {
+	switch {
+	case a == nil && b == nil:
+		return false
+	case a == nil:
+		return false
+	case b == nil:
+		return true
+	default:
+		return *a < *b
+	}
 }
 
 // Remove removes an artifact (bytes + grants + row) and emits the
