@@ -31,12 +31,19 @@ import (
 
 // scenario is the on-disk yaml shape.
 type scenario struct {
-	Name      string        `yaml:"name"`
-	SessionID string        `yaml:"session_id"`
+	Name      string         `yaml:"name"`
+	SessionID string         `yaml:"session_id"`
 	Steps     []scenarioStep `yaml:"steps"`
 	// ConfigOverride is a sibling file whose path is resolved relative
 	// to the scenario directory. Optional.
 	ConfigOverride string `yaml:"config_override"`
+	// FinalWait, when set, polls the coordinator's event count and
+	// only continues to the hub.db dump once it stabilises (no new
+	// events in 5 s) or the budget expires. Use for scenarios that
+	// expect spec-007 RunOnce auto-fire to land an llm_response on
+	// the coord after the test's last user-driven step. Accepts any
+	// time.ParseDuration value ("60s", "2m"). Default: skip.
+	FinalWait string `yaml:"final_wait"`
 }
 
 type scenarioStep struct {
@@ -155,10 +162,15 @@ func runScenario(t *testing.T, scenDir, scenPath string) {
 		}
 	}
 
-	// One more drain before the final snapshot — compactor /
-	// subagent-dispatch flows publish events after the coordinator's
-	// turn completes.
-	drainClassifier(t, a, 5*time.Second)
+	// One more drain before the final snapshot. Extended budget so
+	// async post-turn work has time to land — compactor + subagent
+	// dispatch + spec-007 RunOnce auto-fire (which kicks off a fresh
+	// runner.Run on a detached ctx after the DAG terminates).
+	drainClassifier(t, a, 30*time.Second)
+	if sc.FinalWait != "" {
+		waitForCoordIdle(ctx, t, a, sc.SessionID, sc.FinalWait)
+		drainClassifier(t, a, 5*time.Second)
+	}
 	t.Logf("════ final hub.db snapshot ════")
 	a.Inspect().Dump(ctx, t, sc.SessionID)
 }
@@ -217,6 +229,58 @@ func waitMissionsTerminal(
 			lastLog = time.Now()
 			t.Logf("wait_for_missions: %d missions still running / pending",
 				countNonTerminal(nodes))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// waitForCoordIdle polls the coordinator's session_events for a
+// NEW llm_response after the count we observed at entry. Returns as
+// soon as such an event lands or the budget expires. Used as the
+// final settle gate for scenarios whose last meaningful event lands
+// asynchronously after the test's user-driven steps — spec-007's
+// RunOnce auto-fire being the canonical example.
+func waitForCoordIdle(
+	ctx context.Context,
+	t *testing.T,
+	a *harness.Agent,
+	coordSessionID string,
+	budget string,
+) {
+	t.Helper()
+	d, err := time.ParseDuration(budget)
+	if err != nil {
+		t.Logf("final_wait: parse %q: %v", budget, err)
+		return
+	}
+	in := a.Inspect()
+	startCount := in.EventCount(ctx, coordSessionID)
+	if startCount < 0 {
+		t.Logf("final_wait: event count failed at entry")
+		return
+	}
+	deadline := time.Now().Add(d)
+	for {
+		// Look at the latest events; bail as soon as a fresh
+		// llm_response lands past the entry watermark.
+		evs := in.LatestEvents(ctx, coordSessionID, startCount+8)
+		for _, ev := range evs {
+			if ev.Seq <= startCount {
+				continue
+			}
+			if ev.EventType == "llm_response" {
+				t.Logf("final_wait: coord auto-fire produced llm_response at seq %d after %s",
+					ev.Seq, time.Since(deadline.Add(-d)).Truncate(time.Millisecond))
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Logf("final_wait: timeout after %s — no auto-fire llm_response on coord", d)
+			return
 		}
 		select {
 		case <-ctx.Done():

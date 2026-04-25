@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -38,6 +39,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/missions"
 	missionsexec "github.com/hugr-lab/hugen/pkg/missions/executor"
 	missionsfollowup "github.com/hugr-lab/hugen/pkg/missions/followup"
+	"github.com/hugr-lab/hugen/pkg/missions/graph"
 	missionsplan "github.com/hugr-lab/hugen/pkg/missions/planner"
 	missionsstore "github.com/hugr-lab/hugen/pkg/missions/store"
 	"github.com/hugr-lab/hugen/pkg/models"
@@ -80,6 +82,11 @@ type Runtime struct {
 	bgCancel   context.CancelFunc
 	extraClose []func()
 	logger     *slog.Logger
+
+	// runOnceWG tracks pending mission-completion RunOnce goroutines
+	// (spec 007 US4). Close waits on it (with budget) so an in-flight
+	// auto-fired coord turn isn't killed mid-stream.
+	runOnceWG sync.WaitGroup
 
 	closeOnce sync.Once
 }
@@ -527,16 +534,22 @@ func Build(
 	}
 
 	// Spec 007 US4 — auto-fire one coordinator turn after every
-	// graph completion. The completion-marker user_message is already
-	// on disk via Executor.maybeCompletionSummary; runner.Run with
-	// msg=nil drives a turn against the existing event chain so the
-	// coordinator's branch-8 summary fires without waiting for the
-	// user to type. AppName/UserID come from the coord session's own
-	// metadata so the runner uses the same identity ADK saw on the
-	// last user-driven turn. Errors are warnings — if RunOnce fails
-	// (e.g. transient LLM error) the marker stays on disk and the
-	// coord picks it up on the user's next turn.
-	missionsExec.RunOnce = func(ctx context.Context, coordSessionID string) error {
+	// graph completion. The marker text + JSON payload are passed
+	// to runner.Run as the synthetic user message; ADK records the
+	// user_message itself and drives one coordinator turn so
+	// SKILL.md branch 8 fires the summary without waiting on the
+	// user. AppName/UserID come from the coord session's own
+	// metadata so the auto-fired turn uses the same identity ADK
+	// saw on the last user-driven turn. Errors are logged and the
+	// caller (executor) falls back to leaving the marker for the
+	// user's next turn.
+	missionsExec.RunOnce = func(
+		ctx context.Context,
+		coordSessionID string,
+		payload graph.CompletionPayload,
+	) error {
+		rt.runOnceWG.Add(1)
+		defer rt.runOnceWG.Done()
 		appName, userID := coordIdentity(sessionMgr, coordSessionID)
 		r, rerr := runner.New(runner.Config{
 			AppName:        appName,
@@ -546,7 +559,36 @@ func Build(
 		if rerr != nil {
 			return fmt.Errorf("runtime: runonce build runner: %w", rerr)
 		}
-		for _, runErr := range r.Run(ctx, userID, coordSessionID, nil, agent.RunConfig{}) {
+		// Trim summaries / reasons from the payload we hand to the
+		// LLM. The full text already lives on each mission's
+		// agent_result event — the coord can fetch it via
+		// mission_status / mission_sub_runs when it actually needs to
+		// quote a specific outcome. Sending the full payload bloats
+		// the prompt and has empirically caused some models to
+		// return empty responses on local endpoints.
+		slim := graph.CompletionPayload{AllSucceeded: payload.AllSucceeded}
+		for _, o := range payload.Outcomes {
+			slim.Outcomes = append(slim.Outcomes, graph.MissionOutcome{
+				MissionID: o.MissionID,
+				Skill:     o.Skill,
+				Role:      o.Role,
+				Status:    o.Status,
+				TurnsUsed: o.TurnsUsed,
+			})
+		}
+		_ = slim
+		// Minimal natural-language nudge — agent_result events
+		// already in the transcript carry every mission's outcome,
+		// so the LLM has full context already. Some local models
+		// return empty when the prompt is verbose; keep RunOnce's
+		// trigger short.
+		msg := &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{{
+				Text: "All missions are complete. Summarise the result for me in one short paragraph.",
+			}},
+		}
+		for _, runErr := range r.Run(ctx, userID, coordSessionID, msg, agent.RunConfig{}) {
 			if runErr != nil {
 				return fmt.Errorf("runtime: runonce: %w", runErr)
 			}
@@ -584,6 +626,35 @@ func (r *Runtime) Close() {
 		return
 	}
 	r.closeOnce.Do(func() {
+		// Wait for any in-flight mission-completion RunOnce
+		// goroutines to finish their LLM stream + flush queued
+		// events before we cancel bgCtx. Cancelling first kills the
+		// stream mid-flight ("empty response" warnings) and the
+		// classifier's consumer loop loses live ctx for its hub
+		// appends, so the coordinator's summary turn never lands on
+		// disk. Generous budget — LLM responses can take 30s+.
+		runOnceDone := make(chan struct{})
+		go func() {
+			r.runOnceWG.Wait()
+			close(runOnceDone)
+		}()
+		select {
+		case <-runOnceDone:
+		case <-time.After(90 * time.Second):
+			if r.logger != nil {
+				r.logger.Warn("runtime: RunOnce goroutines did not finish within budget — proceeding with shutdown")
+			}
+		}
+		// Flush the classifier's queue with a live ctx so events
+		// produced just-now by the LLM responses we waited for above
+		// actually persist. After bgCancel any queued append uses a
+		// dead ctx and the row is lost.
+		if r.Classifier != nil {
+			if err := r.Classifier.Flush(context.Background(), 30*time.Second); err != nil && r.logger != nil {
+				r.logger.Warn("runtime: classifier flush before shutdown", "err", err)
+			}
+		}
+
 		if r.bgCancel != nil {
 			r.bgCancel()
 		}

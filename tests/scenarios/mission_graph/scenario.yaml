@@ -1,5 +1,9 @@
 name: mission_graph
 session_id: scenario-mission-graph-1
+# Spec 007 RunOnce auto-fires a coord turn after the DAG terminates;
+# poll for the coord events to settle before the final hub.db dump
+# so the auto-generated llm_response is captured in the snapshot.
+final_wait: 90s
 
 steps:
   # Step 0 — diagnostic. Ask the LLM to enumerate every tool it
@@ -144,25 +148,21 @@ steps:
           coord: scenario-mission-graph-1
 
       # Spec 007 US4: when the DAG is fully terminal, the executor
-      # writes a synthetic user_message on the coordinator carrying
-      # `<system: missions complete>` + a completion_payload in
-      # metadata (outcomes[] + all_succeeded). The coordinator's
-      # SKILL.md branch 8 keys off this marker — the next coordinator
-      # turn produces a human summary instead of treating it as a
-      # normal user query. Exactly one row per coordinator graph.
+      # auto-fires one coordinator turn via runner.Run. The marker
+      # `<system: missions complete>` (with the JSON payload appended
+      # in the message body) lands as a user_message on the
+      # coordinator + ADK records it; the LLM then produces an
+      # llm_response per SKILL.md branch 8. Filter via `like` so
+      # the JSON suffix doesn't break the match.
       - name: completion_marker_event
         graphql: |
           query ($sid: String!) {
-            jq(
-              query: ".hub.db.agent.session_events | map({seq, content, all_succeeded: .metadata.completion_payload.all_succeeded, outcomes: (.metadata.completion_payload.outcomes // [] | length)})"
-            ) {
-              hub { db { agent {
-                session_events(
-                  filter: {session_id: {eq: $sid}, content: {eq: "<system: missions complete>"}, event_type: {eq: "user_message"}}
-                  order_by: [{field: "seq", direction: ASC}]
-                ) { seq event_type content metadata }
-              }}}
-            }
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, content: {like: "<system: missions complete>%"}, event_type: {eq: "user_message"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type content }
+            }}}
           }
         vars:
           sid: scenario-mission-graph-1

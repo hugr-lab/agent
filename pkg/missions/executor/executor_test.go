@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -600,7 +601,7 @@ func TestExecutor_CompletionSummary_SingleTurn(t *testing.T) {
 		if ev.EventType != sessstore.EventTypeUserMessage {
 			continue
 		}
-		if ev.Content != graph.CompletionMarker {
+		if !strings.HasPrefix(ev.Content, graph.CompletionMarker) {
 			continue
 		}
 		markers++
@@ -619,7 +620,7 @@ func TestExecutor_CompletionSummary_SingleTurn(t *testing.T) {
 	require.NoError(t, err)
 	dup := 0
 	for _, ev := range events {
-		if ev.EventType == sessstore.EventTypeUserMessage && ev.Content == graph.CompletionMarker {
+		if ev.EventType == sessstore.EventTypeUserMessage && strings.HasPrefix(ev.Content, graph.CompletionMarker) {
 			dup++
 		}
 	}
@@ -655,7 +656,7 @@ func TestExecutor_CompletionSummary_MixedOutcome(t *testing.T) {
 	require.NoError(t, err)
 	var payload map[string]any
 	for _, ev := range events {
-		if ev.EventType == sessstore.EventTypeUserMessage && ev.Content == graph.CompletionMarker {
+		if ev.EventType == sessstore.EventTypeUserMessage && strings.HasPrefix(ev.Content, graph.CompletionMarker) {
 			payload, _ = ev.Metadata["completion_payload"].(map[string]any)
 			break
 		}

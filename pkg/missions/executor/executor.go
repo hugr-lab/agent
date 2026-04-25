@@ -7,6 +7,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,10 +33,12 @@ type Executor struct {
 	nowFn       func() time.Time
 	logger      *slog.Logger
 
-	// RunOnce, when set, is invoked by the completion-summary fan-out
-	// (US4) to trigger exactly one coordinator turn after the graph
-	// fully terminates. Nil => fan-out is skipped (US1-only wiring).
-	RunOnce func(ctx context.Context, coordSessionID string) error
+	// RunOnce, when set, drives exactly one coordinator turn after a
+	// graph terminates. Receives the structured CompletionPayload so
+	// the implementation can encode it into the synthetic user
+	// message it posts to runner.Run. Nil → fan-out skipped, the
+	// executor falls back to a direct AppendEvent of the marker.
+	RunOnce func(ctx context.Context, coordSessionID string, payload graph.CompletionPayload) error
 
 	// OnMissionReported, when set, is called by the dispatcher
 	// goroutine AFTER it has written the DispatchResult to the
@@ -823,13 +826,19 @@ func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
 
 // maybeCompletionSummary fires exactly once per graph when every
 // mission reaches a terminal status AND the latest tick caused the
-// final transition. Emits a synthetic user_message on the coordinator
-// session carrying the structured completion payload in metadata, so
-// the next coordinator turn (whether user-driven or RunOnce-driven)
-// reads `<system: missions complete>` in its prompt and produces the
-// SKILL.md branch-8 summary reply. When RunOnce is set, the executor
-// also fires it asynchronously to drive that turn without waiting on
-// the user.
+// final transition.
+//
+// Two paths, mutually exclusive:
+//   - RunOnce wired (production): the marker + JSON payload are
+//     handed to runner.Run as the synthetic user message; ADK
+//     records the user_message event itself and drives one
+//     coordinator turn so SKILL.md branch 8 fires the summary.
+//   - RunOnce nil (tests + filesystem-free callers): the marker is
+//     persisted directly via AppendEvent, with the structured
+//     payload on metadata.completion_payload, so consumers
+//     querying hub still see the marker even without a turn.
+//
+// Idempotent across re-Ticks via dag.completionFired.
 func (e *Executor) maybeCompletionSummary(
 	ctx context.Context,
 	coordID string,
@@ -878,24 +887,39 @@ func (e *Executor) maybeCompletionSummary(
 		return
 	}
 
+	if e.RunOnce != nil {
+		// Auto-fire one coordinator turn so a walked-away user gets
+		// the summary without typing. Detached from Tick's ctx —
+		// scheduler's bgCtx gets cancelled at runtime shutdown,
+		// which would kill the in-flight LLM call mid-stream.
+		// runner.Run inside RunOnce appends the marker as a
+		// user_message before calling the LLM, so even when the LLM
+		// errors the marker stays in the transcript and the user
+		// picks it up on their next turn.
+		go func() {
+			runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := e.RunOnce(runCtx, coordID, payload); err != nil {
+				e.logger.WarnContext(runCtx, "missions: completion summary",
+					"coord", coordID, "err", err)
+			}
+		}()
+		return
+	}
+
+	// No RunOnce wired (test / filesystem-free callers): persist the
+	// marker directly so consumers querying hub still see it.
+	payloadJSON, _ := json.Marshal(payload)
 	if _, err := e.events.AppendEvent(ctx, sessstore.Event{
 		SessionID: coordID,
 		EventType: sessstore.EventTypeUserMessage,
 		Author:    "user",
-		Content:   graph.CompletionMarker,
+		Content:   graph.CompletionMarker + "\n" + string(payloadJSON),
 		Metadata:  map[string]any{"completion_payload": payload},
 	}); err != nil {
-		e.logger.WarnContext(ctx, "missions: completion marker", "coord", coordID, "err", err)
+		e.logger.WarnContext(ctx, "missions: completion marker",
+			"coord", coordID, "err", err)
 	}
-
-	if e.RunOnce == nil {
-		return
-	}
-	go func() {
-		if err := e.RunOnce(ctx, coordID); err != nil {
-			e.logger.WarnContext(ctx, "missions: completion summary", "coord", coordID, "err", err)
-		}
-	}()
 }
 
 func (e *Executor) ensureDag(coordID string) *dag {
