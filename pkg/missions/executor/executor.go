@@ -136,9 +136,11 @@ func (e *Executor) addWorker() bool {
 	return true
 }
 
-// isStopped is the lock-free read of the shutdown flag. Cheap
-// happy-path gate at the top of promoteRunning — addWorker still
-// re-checks under stopMu so a concurrent Stop can't sneak through.
+// isStopped reads the shutdown flag under stopMu. Used as a cheap
+// early-exit at the top of promoteRunning so we don't iterate the
+// DAG unnecessarily; addWorker still re-checks under stopMu before
+// any Add(1) so a concurrent Stop between this check and addWorker
+// can't sneak a goroutine through.
 func (e *Executor) isStopped() bool {
 	e.stopMu.Lock()
 	defer e.stopMu.Unlock()
