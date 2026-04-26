@@ -91,8 +91,25 @@ func (d Decision) Validate() error {
 	}
 }
 
-// HITLKind discriminates between tool-call gates and free-form
-// ask-coordinator questions in the envelope metadata.
+// HITLKind is the system-level classification of a HITL request.
+// Two ground-truth values cover every scenario phase 4 supports:
+//
+//   - approval — system-driven gate (Manager.Request was called by
+//     the gate's BeforeToolCallback because a sub-agent tool call
+//     resolved to manual_required)
+//   - ask      — skill-driven question (Manager.Request was called
+//     by a skill-defined tool with Source=RequestFromAsk, e.g.
+//     ask_coordinator)
+//
+// The SPECIFIC sub-kind of an ask (e.g. "choose between data
+// sources", "confirm destructive action", "disambiguate user
+// intent") is NOT a Go enum value — it's carried in the
+// approvals.tool_name column + args. Skills extend the surface by
+// adding new sub-agent tools that call Manager.Request with their
+// own tool_name and args shape; the runtime stays generic.
+//
+// The envelope renderer + LLM are responsible for handling
+// skill-specific args; the runtime only routes/persists.
 type HITLKind string
 
 const (

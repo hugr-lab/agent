@@ -33,6 +33,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/approvals"
 	approvalsstore "github.com/hugr-lab/hugen/pkg/approvals/store"
 	"github.com/hugr-lab/hugen/pkg/artifacts"
+	"github.com/hugr-lab/hugen/pkg/search"
 	artstorage "github.com/hugr-lab/hugen/pkg/artifacts/storage"
 	artfs "github.com/hugr-lab/hugen/pkg/artifacts/storage/fs"
 	arts3 "github.com/hugr-lab/hugen/pkg/artifacts/storage/s3"
@@ -397,6 +398,27 @@ func Build(
 	}
 	rt.Approvals = approvalsManager
 	toolsMgr.AddProvider(approvalsManager)
+
+	// Spec 009 phase 4 / US4 — multi-horizon session-context search.
+	// Tools land via autoload skill `_search`; service wraps the
+	// session_events Hugr table with semantic + recency reranker.
+	searchService, err := search.New(search.Deps{
+		Querier:             memoryQuerier,
+		SessionReader:       sessHub,
+		AgentID:             cfg.Identity.ID,
+		Logger:              logger,
+		EmbedderEnabled:     embedderEnabled,
+		HalfLifeMission:     cfg.Search.DefaultHalfLifeMission,
+		HalfLifeSession:     cfg.Search.DefaultHalfLifeSession,
+		HalfLifeUser:        cfg.Search.DefaultHalfLifeUser,
+		DefaultLimit:        cfg.Search.DefaultLimit,
+		UserBatchAliasLimit: cfg.Search.UserBatchAliasLimit,
+	})
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build search service: %w", err)
+	}
+	toolsMgr.AddProvider(searchService)
 
 	// Sweeper cron — every cfg.SweeperInterval (default 5m), expire
 	// any pending approvals older than cfg.DefaultTimeout. Errors
