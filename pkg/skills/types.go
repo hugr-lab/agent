@@ -140,6 +140,40 @@ type SubAgentSpec struct {
 	AsyncHint string `yaml:"async_hint" json:"async_hint,omitempty" mapstructure:"async_hint"`
 	CanSpawn  bool   `yaml:"can_spawn"  json:"can_spawn,omitempty"  mapstructure:"can_spawn"`
 	MaxDepth  int    `yaml:"max_depth"  json:"max_depth,omitempty"  mapstructure:"max_depth"`
+
+	// Phase-4 additions (spec 009). Optional declarative gate rules
+	// consulted by *approvals.Gate before each sub-agent tool call.
+	// Sits in the resolution chain between the persistent
+	// tool_policies overrides and the hardcoded default. nil ⇒ chain
+	// falls through to the default.
+	ApprovalRules *SubAgentApprovalRules `yaml:"approval_rules" json:"approval_rules,omitempty" mapstructure:"approval_rules"`
+}
+
+// SubAgentApprovalRules is the declarative HITL gate ruleset
+// declared in a role's frontmatter. Mirrors
+// approvals.FrontmatterApprovalRules; lives here so pkg/skills does
+// not have to import pkg/approvals (one-way dependency direction:
+// pkg/agent + pkg/runtime + pkg/approvals consume; pkg/skills declares).
+//
+// Each list accepts exact tool names (`data-execute_mutation`) or
+// prefix globs ending in `*` (`data-*`).
+type SubAgentApprovalRules struct {
+	// AutoApprove tools bypass the gate entirely (sets policy to
+	// always_allowed via the frontmatter step of the resolution chain).
+	AutoApprove []string `yaml:"auto_approve" json:"auto_approve,omitempty" mapstructure:"auto_approve"`
+
+	// RequireUser tools always pause the mission and surface an
+	// approval envelope.
+	RequireUser []string `yaml:"require_user" json:"require_user,omitempty" mapstructure:"require_user"`
+
+	// ParentCanApprove (declared but currently treated as RequireUser
+	// in phase 4 — parent grant inheritance lands in a follow-up).
+	ParentCanApprove []string `yaml:"parent_can_approve" json:"parent_can_approve,omitempty" mapstructure:"parent_can_approve"`
+
+	// Risk overrides per tool name. Default risk is `medium`; entries
+	// here let the role mark specific tools as `high` or `low` for
+	// envelope rendering.
+	Risk map[string]string `yaml:"risk" json:"risk,omitempty" mapstructure:"risk"`
 }
 
 // Valid values for SubAgentSpec.AsyncHint. The parser treats empty

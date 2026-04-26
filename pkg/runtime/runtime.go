@@ -30,6 +30,8 @@ import (
 	"google.golang.org/genai"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/approvals"
+	approvalsstore "github.com/hugr-lab/hugen/pkg/approvals/store"
 	"github.com/hugr-lab/hugen/pkg/artifacts"
 	artstorage "github.com/hugr-lab/hugen/pkg/artifacts/storage"
 	artfs "github.com/hugr-lab/hugen/pkg/artifacts/storage/fs"
@@ -81,6 +83,13 @@ type Runtime struct {
 	// google.golang.org/adk/artifact.Service (for the A2A / dev-UI
 	// path), so the same value flows through every consumer.
 	Artifacts *artifacts.Manager
+
+	// Approvals is the phase-4 HITL gate + tool policies manager.
+	// Implements tools.Provider; its Gate is wired into the
+	// Dispatcher's BeforeToolCallbacks so every sub-agent tool call
+	// is consulted against the resolution chain. nil when phase-4
+	// foundation is disabled (currently always built).
+	Approvals *approvals.Manager
 
 	// Engine is the embedded query-engine (nil in hub-only mode).
 	Engine *qe.Service
@@ -352,11 +361,64 @@ func Build(
 	toolsMgr.AddProvider(memService)
 	toolsMgr.AddProvider(chat.Provider())
 
+	// Spec 009 phase 4 — HITL approvals manager. Built before the
+	// Dispatcher so the Gate can hook every sub-agent tool dispatch
+	// via BeforeToolCallbacks. The manager exposes approval_respond
+	// (coord-only) immediately; policy_* and ask_coordinator land
+	// in US2 and US3 respectively.
+	approvalsStoreClient, err := approvalsstore.New(memoryQuerier, approvalsstore.Options{
+		AgentID: cfg.Identity.ID,
+		Logger:  logger,
+	})
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build approvals store: %w", err)
+	}
+	approvalsManager, err := approvals.New(
+		approvalsConfigFromOperatorConfig(cfg.Approvals),
+		approvals.Deps{
+			Store:         approvalsStoreClient,
+			SessionEvents: sessHub,
+			AgentID:       cfg.Identity.ID,
+			Logger:        logger,
+			// Missions intentionally nil for phase-4 foundation;
+			// the executor's mission tick is the resume trigger via
+			// approvals row state, not a direct flip from the
+			// manager. Wiring lands alongside T041 follow-up.
+		},
+	)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build approvals manager: %w", err)
+	}
+	rt.Approvals = approvalsManager
+	toolsMgr.AddProvider(approvalsManager)
+
+	// Sweeper cron — every cfg.SweeperInterval (default 5m), expire
+	// any pending approvals older than cfg.DefaultTimeout. Errors
+	// are logged + counted as removed=0; nothing aborts the agent.
+	if err := sched.Every("approvals-sweeper", cfg.Approvals.SweeperInterval,
+		func(ctx context.Context) error {
+			expired, err := approvalsManager.SweepExpired(ctx)
+			if err != nil {
+				logger.Warn("approvals: sweep pass", "err", err)
+				return err
+			}
+			if expired > 0 {
+				logger.Info("approvals: sweep pass", "expired", expired)
+			}
+			return nil
+		}); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: register approvals-sweeper: %w", err)
+	}
+
 	dispatcher, err := hugen.NewDispatcher(hugen.DispatcherConfig{
-		Sessions: sessionMgr,
-		Skills:   skillsMgr,
-		Router:   router,
-		Logger:   logger,
+		Sessions:  sessionMgr,
+		Skills:    skillsMgr,
+		Router:    router,
+		Logger:    logger,
+		Approvals: approvalsManager,
 	})
 	if err != nil {
 		closeOnErr()
@@ -860,6 +922,22 @@ func openArtifactStorage(cfg config.ArtifactsConfig, logger *slog.Logger) (artst
 	default:
 		return nil, fmt.Errorf("runtime: unknown artifacts.backend %q (want fs|s3)", cfg.Backend)
 	}
+}
+
+// approvalsConfigFromOperatorConfig translates the operator's
+// pkg/config.ApprovalsConfig into the approvals package's
+// internal Config — keeps pkg/approvals free of any pkg/config
+// import (one-way dependency: runtime translates).
+func approvalsConfigFromOperatorConfig(cfg config.ApprovalsConfig) approvals.Config {
+	out := approvals.Config{
+		DefaultTimeout:         cfg.DefaultTimeout,
+		SafePolicyChange:       cfg.SafePolicyChange,
+		EnableImpactEstimators: cfg.EnableImpactEstimators,
+	}
+	if len(cfg.DestructiveTools) > 0 {
+		out.DestructiveTools = append([]string(nil), cfg.DestructiveTools...)
+	}
+	return out
 }
 
 // artifactsConfigFromOperatorConfig translates the operator's

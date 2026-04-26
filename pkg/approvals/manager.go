@@ -12,9 +12,31 @@ import (
 	"google.golang.org/adk/tool"
 
 	apstore "github.com/hugr-lab/hugen/pkg/approvals/store"
-	"github.com/hugr-lab/hugen/pkg/config"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 )
+
+// Config is the package-internal subset of pkg/Config
+// the manager consumes. Backend-level config (DestructiveTools etc.)
+// is read directly from this struct. The runtime translates from
+// Config at startup so pkg/approvals stays free of
+// any pkg/config dependency.
+type Config struct {
+	// DefaultTimeout — pending approvals older than this become
+	// `expired` on the next sweeper tick. Zero falls back to 30m.
+	DefaultTimeout time.Duration
+
+	// SafePolicyChange controls the widening detector at Gate Step 2.
+	// nil ⇒ default true.
+	SafePolicyChange *bool
+
+	// EnableImpactEstimators turns on per-tool impact estimators
+	// for the envelope (currently unused — phase-4 ships none).
+	EnableImpactEstimators bool
+
+	// DestructiveTools is the operator-managed list that bumps the
+	// hardcoded default to `manual_required` for matching tool names.
+	DestructiveTools []string
+}
 
 // ServiceName is the provider name *Manager registers under in
 // tools.Manager. Coordinator-only by Bind authorization.
@@ -69,7 +91,7 @@ type Deps struct {
 // receiver methods on the same struct. Mirrors pkg/artifacts.Manager
 // (phase 3) and pkg/memory/service.go.
 type Manager struct {
-	cfg      config.ApprovalsConfig
+	cfg      Config
 	store    *apstore.Client
 	events   sessionEventWriter
 	missions missionStatusUpdater
@@ -85,7 +107,7 @@ type Manager struct {
 
 // New constructs the Manager. Returns an error when required deps
 // are missing or when the initial PolicyStore refresh fails.
-func New(cfg config.ApprovalsConfig, deps Deps) (*Manager, error) {
+func New(cfg Config, deps Deps) (*Manager, error) {
 	if deps.Store == nil {
 		return nil, fmt.Errorf("approvals: New requires Store")
 	}
@@ -126,7 +148,7 @@ func New(cfg config.ApprovalsConfig, deps Deps) (*Manager, error) {
 func (m *Manager) AgentID() string { return m.agentID }
 
 // Config returns a copy of the operator-tuned ApprovalsConfig.
-func (m *Manager) Config() config.ApprovalsConfig { return m.cfg }
+func (m *Manager) Config() Config { return m.cfg }
 
 // PolicyStore exposes the hot-cached tool_policies view consulted by
 // the Gate. Tools (`policy_list`, `policy_set`, `policy_remove`)
