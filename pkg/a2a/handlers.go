@@ -47,12 +47,12 @@ func BuildHandlers(
 		Name:        a.Name(),
 		Description: a.Description(),
 		// DefaultInputModes advertises the MIME types the agent
-		// accepts on incoming A2A FilePart{FileBytes}. The runner's
-		// ingest path (RunConfig.SaveInputBlobsAsArtifacts below)
-		// auto-publishes any FilePart the client sends regardless of
-		// MIME — this list is just the discovery surface for clients
-		// that ask "can I send a CSV / a PDF here". Common types
-		// listed; clients are free to send other media types.
+		// accepts on incoming A2A FilePart{FileBytes}. The
+		// user-upload plugin (configured below) auto-publishes any
+		// FilePart the client sends regardless of MIME — this list
+		// is just the discovery surface for clients that ask "can
+		// I send a CSV / a PDF here". Common types listed; clients
+		// are free to send other media types.
 		DefaultInputModes: []string{
 			"text/plain",
 			"text/csv",

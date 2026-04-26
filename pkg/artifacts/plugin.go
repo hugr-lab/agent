@@ -64,6 +64,7 @@ func (m *Manager) onUserMessage(ctx agent.InvocationContext, msg *genai.Content)
 		return nil, errors.New("artifacts: user-upload plugin: empty session id")
 	}
 
+	invID := ctx.InvocationID()
 	mutated := false
 	for i, part := range msg.Parts {
 		if part == nil || part.InlineData == nil || len(part.InlineData.Data) == 0 {
@@ -72,7 +73,12 @@ func (m *Manager) onUserMessage(ctx agent.InvocationContext, msg *genai.Content)
 		blob := part.InlineData
 		displayName := blob.DisplayName
 		if displayName == "" {
-			displayName = fmt.Sprintf("upload_%d", i)
+			// Synthesize a name unique to this turn (invocation id +
+			// part index) so two unnamed uploads in the same message
+			// never collide AND `Load(SessionID, name)` from a
+			// later turn can't accidentally retrieve a different
+			// upload that happened to land at the same part index.
+			displayName = fmt.Sprintf("upload_%s_%d", invID, i)
 		}
 		req := PublishRequest{
 			CallerSessionID: sessionID,
@@ -86,8 +92,18 @@ func (m *Manager) onUserMessage(ctx agent.InvocationContext, msg *genai.Content)
 		}
 		ref, err := m.Publish(ctx, req)
 		if err != nil {
+			// CRITICAL: do NOT leave the original blob in place on
+			// failure — the plugin's whole purpose is preventing
+			// raw bytes from reaching the LLM. Replace with an
+			// error placeholder so the model sees a clear failure
+			// signal instead of silently consuming megabytes of
+			// inline content. Common cause: blob exceeds
+			// cfg.InlineBytesMax (operator-tuned upload cap).
 			m.log.Warn("artifacts: user-upload plugin: publish failed",
-				"session_id", sessionID, "name", displayName, "err", err)
+				"session_id", sessionID, "name", displayName,
+				"size_bytes", len(blob.Data), "err", err)
+			msg.Parts[i] = &genai.Part{Text: formatUploadFailedPlaceholder(displayName, blob.MIMEType, len(blob.Data), err)}
+			mutated = true
 			continue
 		}
 		localPath, _, lpErr := m.ResolveLocalPath(ctx, ref.ID)
@@ -140,5 +156,27 @@ func formatUploadPlaceholder(ref ArtifactRef, mime, localPath string) string {
 		b.WriteString("# pass it directly to python/duckdb/curl tools when available.\n")
 	}
 	b.WriteString("# Use artifact_info(id) for richer metadata; the bytes are NOT inlined here.")
+	return b.String()
+}
+
+// formatUploadFailedPlaceholder is what the LLM sees when a user
+// upload could not be published (over-cap, storage error, …). The
+// raw blob NEVER falls through — the plugin would lose its whole
+// purpose if it did. We tell the model the upload exists, give it
+// an idea of the failure shape, and suggest it ask the user to
+// retry; the bytes themselves stay out of the prompt.
+func formatUploadFailedPlaceholder(name, mime string, sizeBytes int, err error) string {
+	var b strings.Builder
+	b.WriteString("[user-upload-failed]\n")
+	fmt.Fprintf(&b, "name: %s\n", name)
+	if mime != "" {
+		fmt.Fprintf(&b, "mime: %s\n", mime)
+	}
+	if sizeBytes > 0 {
+		fmt.Fprintf(&b, "size_bytes: %d\n", sizeBytes)
+	}
+	fmt.Fprintf(&b, "reason: %v\n", err)
+	b.WriteString("# The bytes were intentionally NOT delivered — the artifact registry rejected them.\n")
+	b.WriteString("# Tell the user about the failure and ask them to retry; do not act on the file content.")
 	return b.String()
 }

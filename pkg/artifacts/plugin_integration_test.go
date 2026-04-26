@@ -245,3 +245,43 @@ func TestUserUploadPlugin_EmitsUserUploadSourceMeta(t *testing.T) {
 	}
 	assert.True(t, found, "expected at least one artifact_published event")
 }
+
+// TestUserUploadPlugin_PublishFailure_SwapsErrorPlaceholder is the
+// regression test for the BLOCKER review item: when Publish fails
+// (here: blob exceeds InlineBytesMax), the plugin MUST replace the
+// part with an error placeholder rather than leaving the raw blob
+// for the LLM to consume. Otherwise an over-cap upload would defeat
+// the whole point of the registry.
+func TestUserUploadPlugin_PublishFailure_SwapsErrorPlaceholder(t *testing.T) {
+	f := newPluginFixture(t)
+
+	// Tighten the cap so a small blob trips it deterministically.
+	f.mgr.cfg.InlineBytesMax = 4
+
+	msg := &genai.Content{Parts: []*genai.Part{
+		{InlineData: &genai.Blob{
+			DisplayName: "too-big.bin",
+			MIMEType:    "application/octet-stream",
+			Data:        []byte("longer than 4 bytes — should be rejected"),
+		}},
+	}}
+	invCtx := &fakeInvCtx{
+		Context: f.ctx,
+		sess:    &fakeSession{id: f.rootID, user: "user-1", app: "agt_ag01"},
+	}
+
+	mutated, err := f.mgr.onUserMessage(invCtx, msg)
+	require.NoError(t, err)
+	require.NotNil(t, mutated, "callback must mutate even on failure (replace part with error placeholder)")
+
+	require.Nil(t, mutated.Parts[0].InlineData, "raw blob must NOT survive — bytes can't reach the LLM")
+	placeholder := mutated.Parts[0].Text
+	require.Contains(t, placeholder, "[user-upload-failed]")
+	require.Contains(t, placeholder, "name: too-big.bin")
+	require.Contains(t, placeholder, "reason:")
+
+	// Sanity: nothing landed in the registry.
+	rows, err := f.store.ListByAgent(f.ctx, artstore.ListFilter{})
+	require.NoError(t, err)
+	assert.Len(t, rows, 0, "failed upload must NOT create an artifact row")
+}
