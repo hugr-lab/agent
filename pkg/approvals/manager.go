@@ -42,10 +42,12 @@ const ServiceName = "_approvals"
 
 // sessionEventWriter is the minimal session-event surface the Manager
 // uses to emit approval_requested / approval_responded /
-// policy_changed / ask_coordinator events. Satisfied by
+// policy_changed / ask_coordinator events plus a session-record
+// reader for sub-agent / coord type checks. Satisfied by
 // *sessstore.Client in production.
 type sessionEventWriter interface {
 	AppendEvent(ctx context.Context, ev sessstore.Event) (string, error)
+	GetSession(ctx context.Context, id string) (*sessstore.Record, error)
 }
 
 // MissionStatusUpdater flips the mission row's status (e.g. to
@@ -567,7 +569,7 @@ func (m *Manager) Name() string { return ServiceName }
 //
 // US1 ships approval_respond + pending_approvals;
 // US2 adds policy_list / policy_set / policy_remove;
-// US3 will add ask_coordinator.
+// US3 adds ask_coordinator.
 func (m *Manager) Tools() []tool.Tool {
 	return []tool.Tool{
 		&approvalRespondTool{m: m},
@@ -575,7 +577,36 @@ func (m *Manager) Tools() []tool.Tool {
 		&policyListTool{m: m},
 		&policySetTool{m: m},
 		&policyRemoveTool{m: m},
+		&askCoordinatorTool{m: m},
 	}
+}
+
+// resolveCoordSession walks the parent_session_id chain from
+// sessionID up to the root and returns the root id (the
+// coordinator session). Used by ask_coordinator to find which
+// coord surfaces the question. Returns sessionID itself when the
+// session has no parent (already a root) or when the chain can't
+// be resolved.
+func (m *Manager) resolveCoordSession(ctx context.Context, sessionID string) string {
+	cur := sessionID
+	for i := 0; i < 16; i++ { // bounded walk; 16 hops is more than the deepest mission graph
+		rec, err := m.events.GetSession(ctx, cur)
+		if err != nil || rec == nil {
+			return cur
+		}
+		if rec.ParentSessionID == "" {
+			return cur
+		}
+		cur = rec.ParentSessionID
+	}
+	return cur
+}
+
+// sessionRecord is a thin reader exposed for tools that need to
+// gate by session_type. Returns nil when the session row is
+// missing.
+func (m *Manager) sessionRecord(ctx context.Context, sessionID string) (*sessstore.Record, error) {
+	return m.events.GetSession(ctx, sessionID)
 }
 
 // IsDestructiveTool reports whether the named tool sits in the

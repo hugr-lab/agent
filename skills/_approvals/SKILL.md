@@ -38,9 +38,9 @@ jobs:
   relay to the user; either way `approval_respond(decision=answer,
   answer=...)` resumes the sub-agent with the answer.
 
-## Tools (US1 — phase-4 foundation)
+## Tools (phase-4 foundation: US1+US2+US3)
 
-This skill currently exposes:
+This skill exposes:
 
 - **`pending_approvals(limit?)`** — coordinator-only. Returns the
   open approval rows on your session with their canonical `app-`
@@ -56,11 +56,25 @@ This skill currently exposes:
   `modify <id> {<json>}`, `answer <id> <text>`) into a structured
   decision. Returns `{ok, status}`. Errors when the id is missing,
   already resolved, or expired.
-
-Phase-4 follow-ups will add:
-
-- `policy_list / policy_set / policy_remove` (US2)
-- `ask_coordinator` (US3)
+- **`policy_list(scope?, tool_name?)`** — coordinator-only. Lists
+  the persistent tool policies in the hot cache. Use BEFORE
+  `policy_set` to avoid duplicates and to verify which scope you'd
+  shadow.
+- **`policy_set(tool_name, policy, scope, note?)`** —
+  coordinator-only. Persists an override. Scope: `global` |
+  `skill:<name>` | `role:<skill>:<role>`. Policy:
+  `always_allowed` | `manual_required` | `denied`. Idempotent on
+  identical rows.
+- **`policy_remove(tool_name, scope)`** — coordinator-only.
+  Removes by exact PK. Returns `existed`.
+- **`ask_coordinator(question, suggested?)`** — sub-agent-only. The
+  sub-agent escalates an ambiguous decision (e.g. multiple
+  candidate data sources, unclear user intent) to the coordinator.
+  Reuses the approvals plumbing with `tool_name=ask_coordinator`
+  and `hitl_kind=ask`. The coord answers via
+  `approval_respond(id, decision="answer", answer="<text>")`; the
+  answer flows back as the sub-agent's tool result on the next
+  dispatch.
 
 ## Recognising user replies
 

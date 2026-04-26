@@ -471,6 +471,134 @@ func nonEmptyOr(s, fallback string) string {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// ask_coordinator  (sub-agent only)
+// ─────────────────────────────────────────────────────────────────
+
+// askCoordinatorTool lets a sub-agent escalate an ambiguous decision
+// to the coordinator (and ultimately the user). Reuses the
+// approvals plumbing with tool_name="ask_coordinator" and
+// hitl_kind="ask"; the coordinator answers via approval_respond
+// with decision="answer", and the answer flows back as the
+// sub-agent's tool result on the next dispatch.
+//
+// Authorization: sub-agent only. Coordinator calls get
+// ErrForbiddenForCoordinator (the coord asks the user directly,
+// not itself).
+type askCoordinatorTool struct {
+	m *Manager
+}
+
+func (t *askCoordinatorTool) Name() string { return "ask_coordinator" }
+
+func (t *askCoordinatorTool) Description() string {
+	return "Escalate an ambiguous decision to the coordinator/user. Use this when you can't choose between options without input — e.g. multiple equally-likely data sources, an unclear user intent, or a destructive action whose target is ambiguous. The runtime pauses your mission and surfaces your question on the coordinator session with hitl_kind=ask. The coordinator (or user via the coordinator) answers; you receive the answer string as your tool result on the next dispatch and proceed."
+}
+
+func (t *askCoordinatorTool) IsLongRunning() bool { return false }
+
+func (t *askCoordinatorTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"question": {
+					Type:        "STRING",
+					Description: "Your question to the coordinator/user. One sentence is best; be specific about what input you need.",
+				},
+				"suggested": {
+					Type:        "ARRAY",
+					Items:       &genai.Schema{Type: "STRING"},
+					Description: "Optional suggested answers/choices. The coordinator's reply isn't constrained to these — they're hints to make answering easier.",
+				},
+			},
+			Required: []string{"question"},
+		},
+	}
+}
+
+func (t *askCoordinatorTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *askCoordinatorTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("ask_coordinator", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	question := stringArg(m, "question")
+	if question == "" {
+		return errEnvelope("ask_coordinator", fmt.Errorf("question required"), "invalid_args")
+	}
+	var suggested []string
+	if v, ok := m["suggested"].([]any); ok {
+		for _, s := range v {
+			if str, ok := s.(string); ok {
+				suggested = append(suggested, str)
+			}
+		}
+	} else if v, ok := m["suggested"].([]string); ok {
+		suggested = v
+	}
+
+	stdCtx := toolCtxAsContext(ctx)
+	missionSessionID := ctx.SessionID()
+	if missionSessionID == "" {
+		return errEnvelope("ask_coordinator", fmt.Errorf("no session id in context"), "internal_error")
+	}
+
+	// Sub-agent-only authorization: refuse coord calls. Coord asks
+	// the user directly via normal conversation, not via this tool.
+	rec, err := t.m.sessionRecord(stdCtx, missionSessionID)
+	if err == nil && rec != nil && rec.SessionType == "root" {
+		return errEnvelope("ask_coordinator", ErrForbiddenForCoordinator, "forbidden_for_coordinator")
+	}
+
+	// Resolve the coord session by walking parent chain to the root.
+	coordSessionID := t.m.resolveCoordSession(stdCtx, missionSessionID)
+	if coordSessionID == "" || coordSessionID == missionSessionID {
+		// Defensive — sub-agents should always have a parent
+		// pointing somewhere. Use mission as a last-resort.
+		coordSessionID = missionSessionID
+	}
+
+	askArgs := map[string]any{"question": question}
+	if len(suggested) > 0 {
+		askArgs["suggested"] = suggested
+	}
+
+	ref, err := t.m.Request(stdCtx, RequestPayload{
+		AgentID:          t.m.AgentID(),
+		MissionSessionID: missionSessionID,
+		CoordSessionID:   coordSessionID,
+		ToolName:         "ask_coordinator",
+		Args:             askArgs,
+		Risk:             RiskMedium,
+		Source:           RequestFromAsk,
+	})
+	if err != nil {
+		return errEnvelope("ask_coordinator", err, classifyError(err))
+	}
+
+	// Return synthetic waiting-for-answer result so the sub-agent
+	// runner ends its turn cleanly. The coord's answer flows back
+	// as a NEW tool result on the next dispatch (LLM-driven via
+	// constitution; runtime auto-resume is out of scope).
+	return map[string]any{
+		"ok":          false,
+		"status":      "waiting_for_answer",
+		"approval_id": ref.ID,
+		"hitl_kind":   string(HITLKindAsk),
+		"synthetic":   true,
+		"message":     fmt.Sprintf("waiting for coordinator answer (id=%s); coord will reply via approval_respond(id, decision=answer, answer=...)", ref.ID),
+		"tool":        "ask_coordinator",
+		"question":    question,
+	}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
 // helpers
 // ─────────────────────────────────────────────────────────────────
 
