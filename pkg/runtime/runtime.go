@@ -366,6 +366,13 @@ func Build(
 	// via BeforeToolCallbacks. The manager exposes approval_respond
 	// (coord-only) immediately; policy_* and ask_coordinator land
 	// in US2 and US3 respectively.
+	//
+	// missionsStore is built early too so approvals.Manager can flip
+	// the mission row to `waiting` in the same logical step as the
+	// approvals insert. The full missions.Service / Executor
+	// construction follows below at the usual phase-2 location and
+	// reuses the same store pointer.
+	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
 	approvalsStoreClient, err := approvalsstore.New(memoryQuerier, approvalsstore.Options{
 		AgentID: cfg.Identity.ID,
 		Logger:  logger,
@@ -379,12 +386,9 @@ func Build(
 		approvals.Deps{
 			Store:         approvalsStoreClient,
 			SessionEvents: sessHub,
+			Missions:      missionsStore,
 			AgentID:       cfg.Identity.ID,
 			Logger:        logger,
-			// Missions intentionally nil for phase-4 foundation;
-			// the executor's mission tick is the resume trigger via
-			// approvals row state, not a direct flip from the
-			// manager. Wiring lands alongside T041 follow-up.
 		},
 	)
 	if err != nil {
@@ -443,7 +447,6 @@ func Build(
 	// ServiceName key, and skills that want mission_plan /
 	// mission_status declare `provider: _mission_tools` in their
 	// frontmatter — same pattern as _memory / _context / _system.
-	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
 	plannerHeader, err := loadCoordinatorPrompt(skillsPath, "planner-prompt.md", logger)
 	if err != nil {
 		closeOnErr()

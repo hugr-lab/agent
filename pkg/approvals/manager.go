@@ -50,14 +50,15 @@ type sessionEventWriter interface {
 	AppendEvent(ctx context.Context, ev sessstore.Event) (string, error)
 }
 
-// missionStatusUpdater flips the mission row's status to `waiting` in
-// the same transaction-shape as the approvals insert. The Manager
-// does not own the missions store; this slim interface lets it call
-// out to *missions/store.Store without import cycles. nil-safe — when
-// not wired, the executor's tick is responsible for picking up the
-// status change via its own polling logic.
-type missionStatusUpdater interface {
-	UpdateStatus(ctx context.Context, missionID, status string) error
+// MissionStatusUpdater flips the mission row's status (e.g. to
+// "waiting" when the Gate decides Manual). The Manager does not own
+// the missions store; this slim interface lets it call out to
+// *missions/store.Store without import cycles. Method name matches
+// missionsstore.Store.MarkStatus so the store satisfies the
+// interface directly. nil-safe — when not wired, the manager logs
+// a warning and skips the flip.
+type MissionStatusUpdater interface {
+	MarkStatus(ctx context.Context, missionID, status string) error
 }
 
 // Deps bundles the manager's external dependencies. Constructed once
@@ -73,7 +74,7 @@ type Deps struct {
 	// Missions transitions the gated mission to `waiting`. Optional —
 	// when nil, the Manager logs a warning and skips the status flip.
 	// Production runtime should always wire this.
-	Missions missionStatusUpdater
+	Missions MissionStatusUpdater
 
 	// AgentID scopes everything to a single agent. Required.
 	AgentID string
@@ -94,7 +95,7 @@ type Manager struct {
 	cfg      Config
 	store    *apstore.Client
 	events   sessionEventWriter
-	missions missionStatusUpdater
+	missions MissionStatusUpdater
 	agentID  string
 	logger   *slog.Logger
 	nowFn    func() time.Time
@@ -284,7 +285,7 @@ func (m *Manager) Request(ctx context.Context, payload RequestPayload) (Approval
 
 	// Transition mission to waiting.
 	if m.missions != nil {
-		if err := m.missions.UpdateStatus(ctx, payload.MissionSessionID, "waiting"); err != nil {
+		if err := m.missions.MarkStatus(ctx, payload.MissionSessionID, "waiting"); err != nil {
 			m.logger.WarnContext(ctx, "approvals: flip mission to waiting", "id", id, "err", err)
 		}
 	}
@@ -370,6 +371,17 @@ func (m *Manager) Respond(ctx context.Context, payload RespondPayload) (Approval
 			return ApprovalRef{}, ErrAlreadyResolved
 		default:
 			return ApprovalRef{}, fmt.Errorf("approvals: update: %w", err)
+		}
+	}
+
+	// On rejection, transition the gated mission to `cancelled` so
+	// observers see a clear terminal state. Approve / modify keep the
+	// mission in `waiting` — coord LLM is responsible for re-dispatch
+	// per constitution rules.
+	if target == StatusRejected && m.missions != nil {
+		if err := m.missions.MarkStatus(ctx, existing.MissionSessionID, "cancelled"); err != nil {
+			m.logger.WarnContext(ctx, "approvals: cancel mission on reject",
+				"approval", payload.ApprovalID, "mission", existing.MissionSessionID, "err", err)
 		}
 	}
 

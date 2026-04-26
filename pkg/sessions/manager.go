@@ -517,6 +517,26 @@ func (m *Manager) UpdateSessionStatus(ctx context.Context, sessionID, status str
 	return m.hub.UpdateSessionStatus(ctx, sessionID, status)
 }
 
+// SessionStatus reads the persisted `sessions.status` for sessionID,
+// bypassing the in-memory ADK state. Returns "" + nil when the
+// session is missing (caller should treat that as "not yet
+// persisted"). Used by approvals-aware dispatchers (spec 009) to
+// detect a "waiting" mission row and avoid overwriting it on
+// RunMission completion. No-op when the manager runs without a hub.
+func (m *Manager) SessionStatus(ctx context.Context, sessionID string) (string, error) {
+	if m.hub == nil {
+		return "", nil
+	}
+	rec, err := m.hub.GetSession(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if rec == nil {
+		return "", nil
+	}
+	return rec.Status, nil
+}
+
 func (m *Manager) AppendEvent(ctx context.Context, cur adksession.Session, ev *adksession.Event) error {
 	if cur == nil {
 		return errors.New("session: AppendEvent: nil session")

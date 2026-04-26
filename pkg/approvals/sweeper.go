@@ -40,6 +40,15 @@ func (m *Manager) SweepExpired(ctx context.Context) (int, error) {
 			m.logger.WarnContext(ctx, "approvals: emit expired event",
 				"id", r.ID, "err", err)
 		}
+
+		// Cancel the gated mission so observers see the terminal
+		// state — the user never responded in time.
+		if m.missions != nil {
+			if err := m.missions.MarkStatus(ctx, r.MissionSessionID, "cancelled"); err != nil {
+				m.logger.WarnContext(ctx, "approvals: cancel mission on expire",
+					"approval", r.ID, "mission", r.MissionSessionID, "err", err)
+			}
+		}
 	}
 
 	return len(rows), nil

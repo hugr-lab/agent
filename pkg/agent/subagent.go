@@ -520,7 +520,25 @@ func (t *subagentRoleTool) Run(ctx tool.Context, args any) (map[string]any, erro
 // write failure here doesn't bubble up to the coordinator; the row's
 // status drift is rare and self-correcting at the next reviewer pass.
 // No-op when the SessionManager runs without a hub (test mode).
+//
+// Spec 009 phase 4: when the Gate fires during the dispatch (sub-agent
+// called a tool that resolved to manual_required), the approvals
+// manager flips the child session's status to "waiting" inline. The
+// runner.Run loop then continues until the LLM produces a turn
+// without further tool calls and exits naturally — at which point
+// markChild would otherwise overwrite "waiting" with "completed" or
+// "abandoned". We protect against that by reading the current status
+// first and refusing to overwrite "waiting" with a terminal value.
+// User-driven resume happens later via approval_respond → coord LLM
+// re-dispatches per constitution.
 func (d *Dispatcher) markChild(ctx context.Context, childID, status string) {
+	if d.approvals != nil {
+		if cur, err := d.sessions.SessionStatus(ctx, childID); err == nil && cur == "waiting" {
+			d.logger.DebugContext(ctx, "subagent: skip markChild overwrite of waiting",
+				"child", childID, "requested", status)
+			return
+		}
+	}
 	if err := d.sessions.UpdateSessionStatus(ctx, childID, status); err != nil {
 		d.logger.Warn("subagent: update child status",
 			"child", childID, "status", status, "err", err)
