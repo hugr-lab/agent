@@ -284,7 +284,7 @@ func buildSkillsDir(t *testing.T, fixtureDir string) string {
 	require.NoError(t, os.MkdirAll(dst, 0o755))
 
 	root := repoRoot()
-	for _, name := range []string{"_system", "_memory", "_context", "_coordinator"} {
+	for _, name := range []string{"_system", "_memory", "_context", "_coordinator", "_approvals", "_artifacts"} {
 		src := filepath.Join(root, "skills", name)
 		require.NoError(t, copyDir(src, filepath.Join(dst, name)),
 			"harness: copy system skill %s", name)
