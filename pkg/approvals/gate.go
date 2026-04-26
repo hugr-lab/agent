@@ -101,6 +101,19 @@ func (g *Gate) Check(ctx context.Context, call ToolCall) GateDecision {
 
 	// Step 3 — policy resolution chain.
 	resolved := g.m.policy.Resolve(ctx, call)
+
+	// Step 4 — destructive-tools fallback. When the chain returned
+	// the hardcoded default (no policy, no frontmatter rule matched)
+	// AND the tool is in cfg.DestructiveTools, override to manual.
+	if resolved.Source == OriginDefault && g.m.IsDestructiveTool(call.ToolName) {
+		resolved = ResolvedPolicy{
+			Policy: PolicyManualRequired,
+			Origin: "config DestructiveTools",
+			Source: OriginDefault,
+			Risk:   RiskHigh,
+		}
+	}
+
 	switch resolved.Policy {
 	case PolicyAlwaysAllowed:
 		return GateDecision{Action: DecisionAllow, Reason: resolved.Origin}
@@ -111,9 +124,14 @@ func (g *Gate) Check(ctx context.Context, call ToolCall) GateDecision {
 			Risk:   RiskHigh,
 		}
 	case PolicyManualRequired:
-		risk := RiskMedium
+		risk := resolved.Risk
+		if risk == "" {
+			risk = RiskMedium
+		}
+		// Frontmatter risk_overrides win over the cached default
+		// when the chain matched on a non-frontmatter source.
 		if call.Frontmatter != nil {
-			if r, ok := call.Frontmatter.RiskOverrides[call.ToolName]; ok {
+			if r, ok := call.Frontmatter.RiskOverrides[call.ToolName]; ok && r != "" {
 				risk = r
 			}
 		}

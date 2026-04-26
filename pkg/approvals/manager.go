@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"google.golang.org/adk/tool"
@@ -567,139 +565,66 @@ func (m *Manager) Name() string { return ServiceName }
 //   - ask_coordinator  (sub-agent-only)  — US3
 //   - policy_list / policy_set / policy_remove (coordinator-only) — US2
 //
-// US1 only registers approval_respond + pending_approvals; later
-// stories add the rest.
+// US1 ships approval_respond + pending_approvals;
+// US2 adds policy_list / policy_set / policy_remove;
+// US3 will add ask_coordinator.
 func (m *Manager) Tools() []tool.Tool {
 	return []tool.Tool{
 		&approvalRespondTool{m: m},
 		&pendingApprovalsTool{m: m},
+		&policyListTool{m: m},
+		&policySetTool{m: m},
+		&policyRemoveTool{m: m},
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Stub PolicyStore — minimal surface for US1 (frontmatter resolution
-// + recursion guard). US2 replaces with the full atomic-snapshot
-// implementation.
-// ─────────────────────────────────────────────────────────────────
-
-// PolicyStore caches tool_policies in memory. Phase-4 US1 ships a
-// stub that always returns "no policy match" — the Gate falls
-// through to frontmatter rules. US2 lands the real cache + chain.
-type PolicyStore struct {
-	store    *apstore.Client
-	agentID  string
-	logger   *slog.Logger
-	mu       sync.Mutex
-	snapshot atomic.Pointer[policySnapshot]
-}
-
-type policySnapshot struct {
-	// US2 will populate this with sorted entries; US1 keeps it empty.
-	policies []apstore.PolicyRecord
-}
-
-func newPolicyStore(client *apstore.Client, agentID string, logger *slog.Logger) (*PolicyStore, error) {
-	if client == nil {
-		return nil, fmt.Errorf("approvals/policy: nil store client")
-	}
-	ps := &PolicyStore{
-		store:   client,
-		agentID: agentID,
-		logger:  logger,
-	}
-	ps.snapshot.Store(&policySnapshot{})
-	return ps, nil
-}
-
-// Refresh reloads the snapshot from the DB. Called once at New and
-// (in US2) after every Set/Remove.
-func (p *PolicyStore) Refresh(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rows, err := p.store.LoadAllPolicies(ctx)
-	if err != nil {
-		return err
-	}
-	p.snapshot.Store(&policySnapshot{policies: rows})
-	return nil
-}
-
-// ResolvedPolicy is the result of Resolve. US1 always returns
-// OriginDefault with PolicyAlwaysAllowed (no DB rows ⇒ default fall-
-// through); US2 implements the full chain.
-type ResolvedPolicy struct {
-	Policy PolicyDecision
-	Origin string
-	Source PolicyOrigin
-}
-
-// PolicyDecision mirrors the policy column enum.
-type PolicyDecision int
-
-const (
-	PolicyAlwaysAllowed PolicyDecision = iota
-	PolicyManualRequired
-	PolicyDenied
-)
-
-// PolicyOrigin records where the resolution chain matched.
-type PolicyOrigin int
-
-const (
-	OriginCache       PolicyOrigin = iota // matched a tool_policies row
-	OriginFrontmatter                     // matched approval_rules
-	OriginDefault                         // hardcoded fallback
-)
-
-// Resolve walks the resolution chain and returns the first match.
-// US1 stub: only frontmatter + hardcoded default. US2 prepends the
-// full role/skill/global chain over the cached snapshot.
-func (p *PolicyStore) Resolve(ctx context.Context, call ToolCall) ResolvedPolicy {
-	// US2 chain entry point — currently empty.
-	// Frontmatter check.
-	if call.Frontmatter != nil {
-		fm := call.Frontmatter
-		if matchAny(call.ToolName, fm.RequireUser) || matchAny(call.ToolName, fm.ParentCanApprove) {
-			return ResolvedPolicy{
-				Policy: PolicyManualRequired,
-				Origin: "frontmatter require_user",
-				Source: OriginFrontmatter,
-			}
-		}
-		if matchAny(call.ToolName, fm.AutoApprove) {
-			return ResolvedPolicy{
-				Policy: PolicyAlwaysAllowed,
-				Origin: "frontmatter auto_approve",
-				Source: OriginFrontmatter,
-			}
-		}
-	}
-	// Hardcoded fallback.
-	return ResolvedPolicy{
-		Policy: PolicyAlwaysAllowed,
-		Origin: "default",
-		Source: OriginDefault,
-	}
-}
-
-// matchAny reports whether tool matches any pattern in patterns
-// (exact name OR prefix glob ending in `*`).
-func matchAny(tool string, patterns []string) bool {
-	for _, p := range patterns {
-		if p == tool {
+// IsDestructiveTool reports whether the named tool sits in the
+// operator-tuned destructive-tools list. Used by the Gate as the
+// final fallback when neither policy nor frontmatter matched —
+// destructive tools default to manual_required, others to
+// always_allowed.
+func (m *Manager) IsDestructiveTool(toolName string) bool {
+	for _, t := range m.cfg.DestructiveTools {
+		if t == toolName {
 			return true
-		}
-		if len(p) > 0 && p[len(p)-1] == '*' {
-			prefix := p[:len(p)-1]
-			if len(tool) >= len(prefix) && tool[:len(prefix)] == prefix {
-				return true
-			}
 		}
 	}
 	return false
 }
 
-// ToolCall is the input to Gate.Check + PolicyStore.Resolve.
+// EmitPolicyChanged writes a policy_changed event on the given
+// coord session. Called by the policy_* tool bodies after a
+// successful PolicyStore mutation. Lives on Manager (not on
+// PolicyStore) because the events package is a Manager dep, not a
+// store one.
+func (m *Manager) EmitPolicyChanged(ctx context.Context, coordSessionID string, meta PolicyChangedMeta) {
+	if coordSessionID == "" {
+		coordSessionID = m.agentID // best-effort fallback for un-scoped writers
+	}
+	if _, err := m.events.AppendEvent(ctx, sessstore.Event{
+		SessionID: coordSessionID,
+		AgentID:   m.agentID,
+		EventType: sessstore.EventTypePolicyChanged,
+		Author:    meta.CreatedBy,
+		Content:   fmt.Sprintf("Policy %s @ %s: %s → %s", meta.ToolName, meta.Scope, meta.OldPolicy, meta.NewPolicy),
+		Metadata: map[string]any{
+			"tool_name":   meta.ToolName,
+			"scope":       meta.Scope,
+			"old_policy":  meta.OldPolicy,
+			"new_policy":  meta.NewPolicy,
+			"note":        meta.Note,
+			"created_by":  meta.CreatedBy,
+		},
+	}); err != nil {
+		m.logger.WarnContext(ctx, "approvals: emit policy_changed",
+			"tool", meta.ToolName, "scope", meta.Scope, "err", err)
+	}
+}
+
+// ToolCall is the input to Gate.Check + PolicyStore.Resolve. Lives
+// in manager.go to keep the central ToolCall shape adjacent to the
+// Manager type that consumes it; the *PolicyStore implementation
+// itself lives in policy.go.
 type ToolCall struct {
 	AgentID        string
 	SessionID      string

@@ -219,6 +219,258 @@ func toolCtxAsContext(toolCtx tool.Context) context.Context {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// policy_list / policy_set / policy_remove (coordinator-only)
+// ─────────────────────────────────────────────────────────────────
+
+type policyListTool struct {
+	m *Manager
+}
+
+func (t *policyListTool) Name() string { return "policy_list" }
+
+func (t *policyListTool) Description() string {
+	return "List persistent tool policies from the hot cache. Returns each row's tool_name, scope, policy (always_allowed | manual_required | denied), note, created_by, and updated_at. Optional filters: scope (global | skill:<name> | role:<skill>:<role>), tool_name (exact). Use this BEFORE policy_set to avoid duplicates and to verify the chain you'd shadow."
+}
+
+func (t *policyListTool) IsLongRunning() bool { return false }
+
+func (t *policyListTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"scope": {
+					Type:        "STRING",
+					Description: "Optional scope filter: global | skill:<name> | role:<skill>:<role>.",
+				},
+				"tool_name": {
+					Type:        "STRING",
+					Description: "Optional exact tool name filter (e.g. data-execute_mutation or data-* for the prefix glob row).",
+				},
+			},
+		},
+	}
+}
+
+func (t *policyListTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *policyListTool) Run(_ tool.Context, args any) (map[string]any, error) {
+	var scope, toolName string
+	if m, ok := args.(map[string]any); ok {
+		scope = stringArg(m, "scope")
+		toolName = stringArg(m, "tool_name")
+	}
+	rows := t.m.PolicyStore().List(scope, toolName)
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		entry := map[string]any{
+			"tool_name":  r.ToolName,
+			"scope":      r.Scope,
+			"policy":     r.Decision.String(),
+			"note":       r.Note,
+			"created_by": r.CreatedBy,
+		}
+		if !r.UpdatedAt.IsZero() {
+			entry["updated_at"] = r.UpdatedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, entry)
+	}
+	return map[string]any{
+		"ok":       true,
+		"policies": out,
+		"count":    len(out),
+	}, nil
+}
+
+type policySetTool struct {
+	m *Manager
+}
+
+func (t *policySetTool) Name() string { return "policy_set" }
+
+func (t *policySetTool) Description() string {
+	return "Persist a tool-policy override. tool_name is exact (data-execute_mutation) or a prefix glob (data-*). policy ∈ {always_allowed, manual_required, denied}. scope ∈ {global, skill:<name>, role:<skill>:<role>}. The runtime enforces a safety net: setting policy=always_allowed on a tool currently resolving to manual_required itself triggers an approval (meta-approval) before taking effect — this defuses prompt-injection attempts to silence the gate. Idempotent on identical rows (no event emitted)."
+}
+
+func (t *policySetTool) IsLongRunning() bool { return false }
+
+func (t *policySetTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"tool_name": {
+					Type:        "STRING",
+					Description: "Exact tool name OR prefix glob ending in * (e.g. data-*).",
+				},
+				"policy": {
+					Type:        "STRING",
+					Description: "Decision: always_allowed | manual_required | denied.",
+					Enum:        []string{"always_allowed", "manual_required", "denied"},
+				},
+				"scope": {
+					Type:        "STRING",
+					Description: "global | skill:<name> | role:<skill>:<role>. Prefer the narrowest scope that fits the user's intent.",
+				},
+				"note": {
+					Type:        "STRING",
+					Description: "Free-form annotation captured for audit (recommended).",
+				},
+			},
+			Required: []string{"tool_name", "policy", "scope"},
+		},
+	}
+}
+
+func (t *policySetTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *policySetTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("policy_set", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	toolName := stringArg(m, "tool_name")
+	policyStr := stringArg(m, "policy")
+	scope := stringArg(m, "scope")
+	note := stringArg(m, "note")
+
+	decision, err := ParsePolicyDecision(policyStr)
+	if err != nil {
+		return errEnvelope("policy_set", err, "invalid_policy")
+	}
+
+	pol := Policy{
+		AgentID:   t.m.AgentID(),
+		ToolName:  toolName,
+		Scope:     scope,
+		Decision:  decision,
+		Note:      note,
+		CreatedBy: "llm",
+	}
+
+	stdCtx := toolCtxAsContext(ctx)
+	old, changed, err := t.m.PolicyStore().Set(stdCtx, pol)
+	if err != nil {
+		return errEnvelope("policy_set", err, classifyPolicyError(err))
+	}
+
+	if changed {
+		t.m.EmitPolicyChanged(stdCtx, ctx.SessionID(), PolicyChangedMeta{
+			ToolName:  toolName,
+			Scope:     scope,
+			OldPolicy: nonEmptyOr(old, "<none>"),
+			NewPolicy: decision.String(),
+			Note:      note,
+			CreatedBy: "llm",
+		})
+	}
+
+	return map[string]any{
+		"ok":         true,
+		"changed":    changed,
+		"tool_name":  toolName,
+		"scope":      scope,
+		"policy":     decision.String(),
+		"old_policy": old,
+	}, nil
+}
+
+type policyRemoveTool struct {
+	m *Manager
+}
+
+func (t *policyRemoveTool) Name() string { return "policy_remove" }
+
+func (t *policyRemoveTool) Description() string {
+	return "Remove a persistent tool-policy row by exact (tool_name, scope) match. Returns existed=true when a row was deleted. Removing a manual_required row does NOT trigger the safe_policy_change safety net even if it effectively widens the resolved policy — to keep that protection, set the policy to manual_required at a broader scope rather than removing the narrower row."
+}
+
+func (t *policyRemoveTool) IsLongRunning() bool { return false }
+
+func (t *policyRemoveTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"tool_name": {Type: "STRING", Description: "Exact tool name or prefix glob — must match the row exactly."},
+				"scope":     {Type: "STRING", Description: "Exact scope — must match the row exactly."},
+			},
+			Required: []string{"tool_name", "scope"},
+		},
+	}
+}
+
+func (t *policyRemoveTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *policyRemoveTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return errEnvelope("policy_remove", fmt.Errorf("unexpected args type %T", args), "invalid_args")
+	}
+	toolName := stringArg(m, "tool_name")
+	scope := stringArg(m, "scope")
+
+	stdCtx := toolCtxAsContext(ctx)
+	old, existed, err := t.m.PolicyStore().Remove(stdCtx, t.m.AgentID(), toolName, scope)
+	if err != nil {
+		return errEnvelope("policy_remove", err, classifyPolicyError(err))
+	}
+
+	if existed {
+		t.m.EmitPolicyChanged(stdCtx, ctx.SessionID(), PolicyChangedMeta{
+			ToolName:  toolName,
+			Scope:     scope,
+			OldPolicy: old,
+			NewPolicy: "removed",
+			CreatedBy: "llm",
+		})
+	}
+
+	return map[string]any{
+		"ok":         true,
+		"existed":    existed,
+		"tool_name":  toolName,
+		"scope":      scope,
+		"old_policy": old,
+	}, nil
+}
+
+func classifyPolicyError(err error) string {
+	switch {
+	case errors.Is(err, ErrInvalidScope):
+		return "invalid_scope"
+	case errors.Is(err, ErrInvalidPolicy):
+		return "invalid_policy"
+	case errors.Is(err, ErrInvalidToolName):
+		return "invalid_tool_name"
+	default:
+		return "internal_error"
+	}
+}
+
+func nonEmptyOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+// ─────────────────────────────────────────────────────────────────
 // helpers
 // ─────────────────────────────────────────────────────────────────
 
