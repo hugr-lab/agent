@@ -48,10 +48,11 @@ const (
 // SECURITY NOTE: this set MUST stay small. No configuration path
 // should be able to extend or shrink it.
 var selfAuthenticatingTools = map[string]struct{}{
-	"approval_respond": {},
-	"policy_list":      {},
-	"policy_set":       {},
-	"policy_remove":    {},
+	"approval_respond":   {},
+	"pending_approvals":  {},
+	"policy_list":        {},
+	"policy_set":         {},
+	"policy_remove":      {},
 }
 
 // Check inspects a tool call and returns the Gate's decision. Side

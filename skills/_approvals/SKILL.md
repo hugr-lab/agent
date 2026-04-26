@@ -42,6 +42,15 @@ jobs:
 
 This skill currently exposes:
 
+- **`pending_approvals(limit?)`** — coordinator-only. Returns the
+  open approval rows on your session with their canonical `app-`
+  ids, tool names, risks, mission ids, args excerpts, ages, and
+  the legal reply choices. **Call this whenever the user
+  references an approval** ("approve the cleanup", "reject it",
+  "approve app-7c") to resolve the canonical id before invoking
+  `approval_respond`. Don't try to find the id by scanning event
+  history — the runtime does NOT auto-inject pending state into
+  your prompt; this tool is the source of truth.
 - **`approval_respond`** — coordinator-only. Translates the user's
   free-form reply (`approve <id>`, `reject <id> because <reason>`,
   `modify <id> {<json>}`, `answer <id> <text>`) into a structured

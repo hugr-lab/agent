@@ -128,9 +128,19 @@ asking you to relay an approval question to the user.
 - **While waiting, continue chatting freely.** Other missions can
   run; other follow-ups can be answered. The waiting mission stays
   parked until the approval flips.
+- **Resolve the canonical id with `pending_approvals()` first.**
+  When the user references an approval ("approve the cleanup",
+  "reject it", "approve app-7c"), call `pending_approvals()` —
+  it returns every pending row on your session with the canonical
+  `app-...` id, tool_name, risk, mission_id, args_digest, age,
+  and the legal reply `choices`. This is the source of truth; do
+  NOT try to scan event history for the id. If the call returns
+  zero rows, tell the user there's no pending approval and treat
+  their message as a normal turn.
 - **Recognise replies and translate them into `approval_respond`
-  calls.** When the user's message references an approval id (e.g.
-  `app-7c9d`):
+  calls.** Once you have the canonical id from
+  `pending_approvals()`, when the user's message references an
+  approval (e.g. `app-7c9d`):
   - `approve <id>` → `approval_respond(id, decision="approve")`.
   - `approve <id> <free-form note>` →
     `approval_respond(id, decision="approve", note="<note>")`.
@@ -148,8 +158,8 @@ asking you to relay an approval question to the user.
     path is for `ask_coordinator` envelopes — the sub-agent had a
     question, not a tool-call gate.
 - **Partial id matching.** Users may type a partial id (`app-7c`).
-  Match it against the unique pending approval visible to you and use
-  the canonical id. If multiple pending rows match, ask the user to
+  Look it up via `pending_approvals()` and pick the unique match.
+  If multiple pending rows match the partial, ask the user to
   disambiguate as a normal turn — do NOT call `approval_respond`.
 - **Ask-variant envelopes (`hitl_kind = "ask"`).** A sub-agent has a
   question, not a tool-call to gate. Either answer from your own

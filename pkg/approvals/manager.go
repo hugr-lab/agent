@@ -437,6 +437,23 @@ func (m *Manager) Get(ctx context.Context, id string) (Approval, error) {
 	return recordToApproval(rec), nil
 }
 
+// ListPending returns the pending approvals visible to coordSessionID,
+// ordered by created_at DESC. Convenience over List that hardcodes
+// status=pending and the coord-session filter — used by the
+// pending_approvals tool which is the coord-side discovery surface.
+//
+// limit defaults to 20 when 0; max 200.
+func (m *Manager) ListPending(ctx context.Context, coordSessionID string, limit int) ([]Approval, error) {
+	if coordSessionID == "" {
+		return nil, fmt.Errorf("approvals: ListPending requires coordSessionID")
+	}
+	return m.List(ctx, ListFilter{
+		CoordSessionID: coordSessionID,
+		Statuses:       []Status{StatusPending},
+		Limit:          limit,
+	})
+}
+
 // List returns approvals matching the filter, ordered by created_at DESC.
 func (m *Manager) List(ctx context.Context, f ListFilter) ([]Approval, error) {
 	statuses := make([]string, 0, len(f.Statuses))
@@ -550,10 +567,12 @@ func (m *Manager) Name() string { return ServiceName }
 //   - ask_coordinator  (sub-agent-only)  — US3
 //   - policy_list / policy_set / policy_remove (coordinator-only) — US2
 //
-// US1 only registers approval_respond; later stories add the rest.
+// US1 only registers approval_respond + pending_approvals; later
+// stories add the rest.
 func (m *Manager) Tools() []tool.Tool {
 	return []tool.Tool{
 		&approvalRespondTool{m: m},
+		&pendingApprovalsTool{m: m},
 	}
 }
 

@@ -1,8 +1,10 @@
 package approvals
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -108,6 +110,112 @@ func (t *approvalRespondTool) Run(ctx tool.Context, args any) (map[string]any, e
 		"status":       string(ref.Status),
 		"responded_at": "now",
 	}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
+// pending_approvals  (coordinator-only)
+// ─────────────────────────────────────────────────────────────────
+
+// pendingApprovalsTool is the coord-side discovery surface for
+// open approval rows. The runtime DOES NOT auto-inject pending
+// approvals into the coord prompt — the coord LLM is expected to
+// call this tool when the user references an approval (e.g. "approve
+// the cleanup"), so it can resolve the canonical app-id without
+// scanning the event history. Recursion-guarded so it never gates
+// itself (see gate.go::selfAuthenticatingTools).
+type pendingApprovalsTool struct {
+	m *Manager
+}
+
+func (t *pendingApprovalsTool) Name() string { return "pending_approvals" }
+
+func (t *pendingApprovalsTool) Description() string {
+	return "List pending HITL approval rows surfaced on YOUR coordinator session. Returns each row's id (app-...), tool_name, risk, mission_id, age, args excerpt, hitl_kind (approval | ask), and the legal reply choices. Call this whenever the user references an approval ('approve the cleanup', 'reject it') so you can resolve the canonical id before invoking approval_respond. Returns [] when nothing is pending."
+}
+
+func (t *pendingApprovalsTool) IsLongRunning() bool { return false }
+
+func (t *pendingApprovalsTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: "OBJECT",
+			Properties: map[string]*genai.Schema{
+				"limit": {
+					Type:        "INTEGER",
+					Description: "Optional max rows to return. Defaults to 20, capped at 200.",
+				},
+			},
+		},
+	}
+}
+
+func (t *pendingApprovalsTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) error {
+	tools.Pack(req, t)
+	return nil
+}
+
+func (t *pendingApprovalsTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	coordSessionID := ctx.SessionID()
+	if coordSessionID == "" {
+		return errEnvelope("pending_approvals", fmt.Errorf("no session id in context"), "internal_error")
+	}
+
+	limit := 20
+	if m, ok := args.(map[string]any); ok {
+		if v, ok := m["limit"].(float64); ok && v > 0 {
+			limit = int(v)
+		}
+		if v, ok := m["limit"].(int); ok && v > 0 {
+			limit = v
+		}
+	}
+
+	rows, err := t.m.ListPending(toolCtxAsContext(ctx), coordSessionID, limit)
+	if err != nil {
+		return errEnvelope("pending_approvals", err, "internal_error")
+	}
+
+	now := t.m.nowFn()
+	pending := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		ageMin := int(now.Sub(row.CreatedAt).Minutes())
+		hitlKind := string(HITLKindApproval)
+		choices := []string{"approve", "reject", "modify"}
+		if row.ToolName == "ask_coordinator" {
+			hitlKind = string(HITLKindAsk)
+			choices = []string{"answer"}
+		}
+		pending = append(pending, map[string]any{
+			"id":            row.ID,
+			"tool_name":     row.ToolName,
+			"risk":          string(row.Risk),
+			"hitl_kind":     hitlKind,
+			"mission_id":    row.MissionSessionID,
+			"created_at":    row.CreatedAt.UTC().Format(time.RFC3339),
+			"age_minutes":   ageMin,
+			"args_digest":   argsDigest(row.Args),
+			"choices":       choices,
+		})
+	}
+
+	return map[string]any{
+		"ok":      true,
+		"pending": pending,
+		"count":   len(pending),
+	}, nil
+}
+
+// toolCtxAsContext extracts a context.Context from the ADK
+// tool.Context (which embeds it). Same helper logic as
+// callback.go::contextFromToolCtx; duplicated here to avoid
+// re-exporting an internal helper.
+func toolCtxAsContext(toolCtx tool.Context) context.Context {
+	if c, ok := any(toolCtx).(context.Context); ok {
+		return c
+	}
+	return context.Background()
 }
 
 // ─────────────────────────────────────────────────────────────────
