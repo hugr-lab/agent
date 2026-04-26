@@ -165,8 +165,16 @@ func (s *SpawnService) Spawn(ctx context.Context, callerSessionID string, args a
 			callerSkill, callerRole))
 	}
 
-	if _, err := s.lookupRole(ctx, skill, role); err != nil {
+	targetSpec, err := s.lookupRole(ctx, skill, role)
+	if err != nil {
 		return errorEnvelope(fmt.Sprintf("unknown (skill, role) pair %s/%s", skill, role))
+	}
+
+	// Spec 009 / US6 — validate parallel_validation merge strategy.
+	// Phase 4 supports `agent_choice` only; user_choice / merge fail
+	// fast at dispatch time so the coord LLM gets a clean error.
+	if err := targetSpec.ParallelValidation.Validate(); err != nil {
+		return errorEnvelope("spawn_sub_mission: " + err.Error())
 	}
 
 	depth, coordID, err := s.walkDepth(caller)
@@ -181,6 +189,30 @@ func (s *SpawnService) Spawn(ctx context.Context, callerSessionID string, args a
 		return errorEnvelope(fmt.Sprintf("spawn depth limit reached (max %d)", limit))
 	}
 
+	// Spec 009 / US6 — when parallel_validation is enabled on the
+	// TARGET role, register two sibling missions instead of one.
+	// Each gets a distinguishable mission string (validator-a /
+	// validator-b suffix) so the coord LLM can tell them apart in
+	// agent_result events.
+	if targetSpec.ParallelValidation != nil && targetSpec.ParallelValidation.Enabled {
+		missionA, err := s.executor.RegisterSingle(coordID, skill, role, task+" (validator-a)", dependsOn, inputArtifacts...)
+		if err != nil {
+			return errorEnvelope("spawn_sub_mission: validator-a: " + err.Error())
+		}
+		missionB, err := s.executor.RegisterSingle(coordID, skill, role, task+" (validator-b)", dependsOn, inputArtifacts...)
+		if err != nil {
+			return errorEnvelope("spawn_sub_mission: validator-b: " + err.Error())
+		}
+		return map[string]any{
+			"mission_ids":    []string{missionA, missionB},
+			"parallel":       true,
+			"merge_strategy": MergeStrategyOrDefault(targetSpec.ParallelValidation.MergeStrategy),
+			"status":         graph.StatusPending,
+			"hint": "Two sibling validators dispatched. Both will run concurrently; " +
+				"on completion their agent_result events surface together — pick the better answer per the merge_strategy.",
+		}
+	}
+
 	missionID, err := s.executor.RegisterSingle(coordID, skill, role, task, dependsOn, inputArtifacts...)
 	if err != nil {
 		return errorEnvelope("spawn_sub_mission: " + err.Error())
@@ -191,6 +223,16 @@ func (s *SpawnService) Spawn(ctx context.Context, callerSessionID string, args a
 		"hint": "Your current mission continues. Call mission_status (from the coordinator) " +
 			"for the new mission's state — the scheduler promotes it on the next tick.",
 	}
+}
+
+// MergeStrategyOrDefault returns the explicit merge strategy when
+// non-empty, falling back to agent_choice (the only phase-4-shipped
+// strategy).
+func MergeStrategyOrDefault(s string) string {
+	if s == "" {
+		return skills.MergeStrategyAgentChoice
+	}
+	return s
 }
 
 // callerRoleMeta extracts (skill, role) cached on a sub-agent

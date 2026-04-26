@@ -11,6 +11,20 @@ description: >
 autoload: true
 autoload_for: [root]
 sub_agents:
+  cross_noter:
+    description: >
+      Cross-skill test fixture (spec 009 / US5). Loads required_skills
+      [domain] alongside the parent gated skill. The role only calls
+      memory_note (gated) but the test verifies the child session
+      has BOTH skills loaded via skill_loaded events.
+    intent: tool_calling
+    max_turns: 2
+    summary_max_tokens: 200
+    required_skills: [domain]
+    instructions: |
+      Call memory_note(content: "<the task content>", scope: "parent")
+      ONCE and report back the synthetic result's approval_id.
+      Do not call any other tool.
   noter:
     description: >
       HITL test fixture. Receives a "fact" string and calls

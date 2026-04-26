@@ -270,6 +270,25 @@ func (d *Dispatcher) runInternal(
 		}, nil
 	}
 
+	// Spec 009 / US5 — cross-skill composition. Roles can declare
+	// `required_skills: [other-skill, …]` to load extra skill bundles
+	// onto the child session. The skill loader handles
+	// allowlist intersection on same-named providers (safer-by-
+	// default) — sub-agent's tool surface becomes the union of
+	// non-overlapping providers + intersection of overlapping ones.
+	for _, name := range spec.RequiredSkills {
+		if name == "" || name == parentSkill {
+			continue
+		}
+		if err := childSess.LoadSkill(runCtx, name); err != nil {
+			d.markChild(runCtx, childID, "failed")
+			return DispatchResult{
+				ChildSessionID: childID,
+				Error:          fmt.Sprintf("load required skill %q: %v", name, err),
+			}, nil
+		}
+	}
+
 	// Step 4 — build the transient llmagent. The InstructionProvider
 	// fronts the role's instructions, then delegates to the child
 	// session's Snapshot prompt so memory hint / autoload skill

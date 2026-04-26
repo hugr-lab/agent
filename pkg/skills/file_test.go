@@ -354,7 +354,7 @@ func TestLoad_CoordinatorSkill_Frontmatter(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "_coordinator", sk.Name)
-	assert.Equal(t, "0.2.0", sk.Version)
+	assert.Equal(t, "0.4.0", sk.Version)
 	assert.True(t, sk.Autoload)
 	assert.Equal(t, []string{SessionTypeRoot}, sk.AutoloadFor)
 	require.Len(t, sk.Providers, 1,
