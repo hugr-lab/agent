@@ -72,6 +72,14 @@ type MergedConfig struct {
 	// ExcludeEventTypes — union of per-skill exclude lists.
 	ExcludeEventTypes map[string]struct{}
 
+	// IncludeEventTypes — union of per-skill include lists. Wins over
+	// the agent-level DefaultExcludeEventTypes default (a skill can
+	// pull a default-excluded type back into its review window).
+	// Per-skill ExcludeEventTypes still wins over IncludeEventTypes
+	// from the SAME skill — but cross-skill, include from any skill
+	// overrides default-exclude.
+	IncludeEventTypes map[string]struct{}
+
 	CompactPreserve []string
 	CompactDiscard  []string
 }
@@ -103,6 +111,7 @@ func mergeConfigs(configs []NamedConfig, logger *slog.Logger) MergedConfig {
 		Categories:        map[string]skills.CategoryConfig{},
 		CategoryOrigin:    map[string]string{},
 		ExcludeEventTypes: map[string]struct{}{},
+		IncludeEventTypes: map[string]struct{}{},
 	}
 	seenCompact := map[string]struct{}{}
 
@@ -159,6 +168,12 @@ func mergeConfigs(configs []NamedConfig, logger *slog.Logger) MergedConfig {
 				continue
 			}
 			out.ExcludeEventTypes[et] = struct{}{}
+		}
+		for _, et := range rc.IncludeEventTypes {
+			if et == "" {
+				continue
+			}
+			out.IncludeEventTypes[et] = struct{}{}
 		}
 
 		for _, s := range nc.Config.Compaction.Preserve {

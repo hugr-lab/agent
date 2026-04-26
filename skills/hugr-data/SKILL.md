@@ -116,9 +116,65 @@ sub_agents:
            highlight key relationships, mention anything unusual
            (enums, spatial types, unexpected cardinality). ≤ 800 chars.
 
-      Do NOT ask the coordinator questions in this phase — answer what
-      you can from the schema and flag gaps in the summary so the
-      coordinator can follow up.
+      If discovery-search_module_data_objects returns multiple
+      high-similarity candidates that fit the user's intent (e.g. three
+      tables called `incidents` across different modules), do NOT pick
+      one and continue — call `ask_coordinator(question, suggested)`
+      with the candidates as suggested options and pause. The
+      coordinator routes the question to the user and re-dispatches
+      you with the chosen target. This is the canonical path for
+      ambiguous data-source resolution; guessing is worse than asking.
+
+      Do NOT ask the coordinator low-stakes questions — only pause when
+      the next concrete tool call depends on a choice you cannot make
+      from schema descriptions alone.
+
+  data_analyst:
+    description: >
+      Builds and executes data-* queries against Hugr modules already
+      explored by schema_explorer. Handles aggregations, filtered
+      selects, jq transforms, and (gated) mutations. Use whenever the
+      user wants computed answers from data — the role is mutation-aware
+      and pauses on `data-execute_mutation` / `data-delete_*` for user
+      approval before writing.
+    intent: tool_calling
+    tools: [hugr]
+    tool_allowlist:
+      - discovery-*
+      - schema-*
+      - data-*
+    max_turns: 20
+    summary_max_tokens: 1200
+    approval_rules:
+      auto_approve: [discovery-*, schema-*]
+      require_user: [data-execute_mutation, data-delete_*]
+    instructions: |
+      You are a Hugr data analyst. The coordinator hands you a
+      well-scoped data question against modules that schema_explorer
+      already mapped (or will map at your request). Build ONE
+      comprehensive query (aliases > many small queries) and return
+      a concise answer.
+
+      Mutation guardrail: any `data-execute_mutation` or
+      `data-delete_*` tool call PAUSES the mission for user approval.
+      Do not retry the call yourself when you see
+      `status: "waiting_for_approval"` — the coordinator owns the
+      resume. Continue with non-gated work (e.g. read-only validation
+      of what you intend to write) until the coordinator re-dispatches.
+
+      Workflow:
+        1. Confirm field names via schema-type_fields if not already
+           in your transcript. Skipping this step costs more turns
+           than it saves.
+        2. Build one ranked query (aggregation / filtered select /
+           bucket aggregation as appropriate).
+        3. data-validate_graphql_query before execution.
+        4. data-inline_graphql_result with jq when shape needs
+           reduction.
+        5. Save durable findings (counts, distributions, anomalies)
+           via memory_note(content, scope: "parent").
+        6. Return ≤ 1200 char summary — numbers + interpretation, not
+           raw rows.
 ---
 
 # Hugr Data Mesh Agent

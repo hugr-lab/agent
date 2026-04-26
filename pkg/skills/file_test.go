@@ -362,6 +362,70 @@ func TestLoad_CoordinatorSkill_Frontmatter(t *testing.T) {
 	assert.Equal(t, "_mission_tools", sk.Providers[0].Provider)
 }
 
+// TestSkillLoader_Coordinator_v040_HasAdditiveSections asserts that
+// the shipping `_coordinator` skill body carries the three additive
+// sections introduced in spec 009 / phase 4 (HITL routing rules,
+// Search-first patterns, Policy surface) — without disturbing the
+// pre-existing phase-2 sections. T106.
+func TestSkillLoader_Coordinator_v040_HasAdditiveSections(t *testing.T) {
+	mgr, err := NewFileManager("../../skills")
+	require.NoError(t, err)
+	sk, err := mgr.Load(context.Background(), "_coordinator")
+	require.NoError(t, err)
+
+	require.Equal(t, "0.4.0", sk.Version,
+		"phase 4 bumps frontmatter version to 0.4.0")
+
+	// New phase-4 sections.
+	for _, header := range []string{
+		"## HITL routing rules",
+		"## Search-first patterns",
+		"## Policy surface",
+	} {
+		assert.Contains(t, sk.Instructions, header,
+			"_coordinator body missing phase-4 section %q", header)
+	}
+
+	// Regression guard — pre-existing sections still present.
+	for _, header := range []string{
+		"## Decision tree",
+		"## Context discipline",
+		"## Delegation discipline",
+		"## Communication",
+	} {
+		assert.Contains(t, sk.Instructions, header,
+			"_coordinator body lost pre-phase-4 section %q", header)
+	}
+}
+
+// TestSkillLoader_HugrAnalyst asserts that the demo `hugr-analyst`
+// skill loads, registers its sole role, and declares the two
+// required_skills (hugr-data, python-sandbox) — both of which must
+// also resolve to skills present on disk so RequiredSkills wiring at
+// dispatch time succeeds without surprises. T109.
+func TestSkillLoader_HugrAnalyst(t *testing.T) {
+	mgr, err := NewFileManager("../../skills")
+	require.NoError(t, err)
+	sk, err := mgr.Load(context.Background(), "hugr-analyst")
+	require.NoError(t, err)
+
+	assert.Equal(t, "hugr-analyst", sk.Name)
+	assert.Equal(t, "0.1.0", sk.Version)
+	require.Contains(t, sk.SubAgents, "cross_domain_analyst")
+
+	role := sk.SubAgents["cross_domain_analyst"]
+	require.ElementsMatch(t,
+		[]string{"hugr-data", "python-sandbox"}, role.RequiredSkills,
+		"cross_domain_analyst declares the canonical phase-4 composition pair")
+
+	// Each required skill must exist on disk and load — that's what
+	// "resolve to existing on-disk skills" buys us against typos.
+	for _, name := range role.RequiredSkills {
+		_, err := mgr.Load(context.Background(), name)
+		require.NoError(t, err, "required skill %q must exist on disk", name)
+	}
+}
+
 func TestLoad_SubAgents_PhaseTwoFields_Validation(t *testing.T) {
 	cases := []struct {
 		name    string

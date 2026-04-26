@@ -55,6 +55,16 @@ type ReviewConfig struct {
 	// union semantics — if ANY active skill excludes a type, it is
 	// dropped.
 	ExcludeEventTypes []string `yaml:"exclude_event_types"`
+
+	// IncludeEventTypes overrides the agent-level default exclude list
+	// for this skill, putting the listed event types BACK into the
+	// reviewer window even when DefaultExcludeEventTypes would drop
+	// them. Use cases: hugr-data wants approval_responded back so it
+	// can learn from user-tweaked queries; learning skills want
+	// agent_result back to capture sub-mission outcomes. Merged across
+	// active skills with union semantics — if ANY active skill
+	// includes a type, it is kept.
+	IncludeEventTypes []string `yaml:"include_event_types"`
 }
 
 // CompactionHints tell the rolling-window compactor what to keep vs.

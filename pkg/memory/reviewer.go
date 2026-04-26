@@ -21,6 +21,35 @@ import (
 	"google.golang.org/genai"
 )
 
+// DefaultExcludeEventTypes returns the reviewer's default exclude
+// list: high-noise transcript chrome (compaction_summary, reasoning,
+// error) plus all framework lifecycle audit events from missions
+// (phase 2), artifacts (phase 3), and HITL/policy/composition (phase
+// 4). Skills can include any of these back via memory.yaml's
+// `reviewer.include_event_types`.
+func DefaultExcludeEventTypes() []string {
+	return []string{
+		// Transcript chrome
+		sessstore.EventTypeCompactionSummary,
+		"reasoning",
+		sessstore.EventTypeError,
+		// Mission lifecycle (phase 2)
+		sessstore.EventTypeAgentSpawn,
+		sessstore.EventTypeAgentResult,
+		sessstore.EventTypeAgentAbstained,
+		sessstore.EventTypeUserFollowupRouted,
+		// Artifact lifecycle (phase 3)
+		sessstore.EventTypeArtifactPublished,
+		sessstore.EventTypeArtifactGranted,
+		sessstore.EventTypeArtifactRemoved,
+		// HITL / policy / composition lifecycle (phase 4)
+		sessstore.EventTypeApprovalRequested,
+		sessstore.EventTypeApprovalResponded,
+		sessstore.EventTypePolicyChanged,
+		sessstore.EventTypeAskCoordinator,
+	}
+}
+
 // Reviewer drives rolling-window session fact extraction. One Reviewer
 // instance is shared across the scheduler (scheduler picks session IDs
 // and calls Review). Unlike the earlier "one review per closed
@@ -170,7 +199,7 @@ func NewReviewer(opts ReviewerOptions) (*Reviewer, error) {
 	}
 	exclude := opts.DefaultExcludeTypes
 	if len(exclude) == 0 {
-		exclude = []string{"compaction_summary", "reasoning", "error"}
+		exclude = DefaultExcludeEventTypes()
 	}
 
 	return &Reviewer{
@@ -614,15 +643,22 @@ func (r *Reviewer) overlapTokens(merged MergedConfig) int {
 }
 
 // excludeTypes returns the union of the merged config's exclude set
-// and the reviewer's default list. Always returns a non-nil map.
+// and the reviewer's default list, MINUS any types a skill explicitly
+// included via include_event_types (which overrides defaults but NOT
+// per-skill explicit excludes — if any skill excludes an event type,
+// it stays excluded). Always returns a non-nil map.
 func (r *Reviewer) excludeTypes(merged MergedConfig) map[string]struct{} {
 	out := make(map[string]struct{}, len(merged.ExcludeEventTypes)+len(r.defaultExcludeTypes))
-	for k := range merged.ExcludeEventTypes {
-		if k != "" {
-			out[k] = struct{}{}
-		}
-	}
 	for _, k := range r.defaultExcludeTypes {
+		if k == "" {
+			continue
+		}
+		if _, included := merged.IncludeEventTypes[k]; included {
+			continue
+		}
+		out[k] = struct{}{}
+	}
+	for k := range merged.ExcludeEventTypes {
 		if k != "" {
 			out[k] = struct{}{}
 		}
