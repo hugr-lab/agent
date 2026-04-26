@@ -83,6 +83,14 @@ type Config struct {
 	TTLSessionGrace int64 // seconds
 	TTL7dSeconds    int64 // seconds
 	TTL30dSeconds   int64 // seconds
+
+	// UploadDefaultVisibility / UploadDefaultTTL are the operator
+	// knobs applied when ADK runner auto-publishes a user upload via
+	// the artifact.Service.Save shim. Validated at New() — invalid
+	// values fail fast. See pkg/config/artifacts.go for the operator
+	// surface.
+	UploadDefaultVisibility Visibility
+	UploadDefaultTTL        TTL
 }
 
 // Manager is the public surface of the artifact registry. Implements
@@ -126,6 +134,18 @@ func New(cfg Config, deps Deps) (*Manager, error) {
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if cfg.UploadDefaultVisibility == "" {
+		cfg.UploadDefaultVisibility = VisibilityUser
+	}
+	if !cfg.UploadDefaultVisibility.IsValid() {
+		return nil, fmt.Errorf("artifacts: New: invalid UploadDefaultVisibility %q", cfg.UploadDefaultVisibility)
+	}
+	if cfg.UploadDefaultTTL == "" {
+		cfg.UploadDefaultTTL = TTL7d
+	}
+	if !cfg.UploadDefaultTTL.IsValid() {
+		return nil, fmt.Errorf("artifacts: New: invalid UploadDefaultTTL %q", cfg.UploadDefaultTTL)
 	}
 	m := &Manager{
 		cfg:  cfg,
@@ -189,11 +209,22 @@ func (m *Manager) LocalPathFor(ctx context.Context, _ string, _ string) (string,
 // above (Publish / OpenReader / Remove / ListVisible).
 // ─────────────────────────────────────────────────────────────────
 
-// Save implements adkartifact.Service. The ADK contract is opaque
-// to our Visibility / Tags / DerivedFrom / TTL knobs — Save calls
-// always land as visibility=self, ttl=session, no tags, no
-// derivation. Producers that need richer metadata go through the
-// artifact_publish tool instead.
+// Save implements adkartifact.Service. ADK runner dispatches a Save
+// call exactly once per InlineData part on a user message
+// (runner.go::appendMessageToSession, gated on
+// RunConfig.SaveInputBlobsAsArtifacts). That's the user-upload
+// ingest path: a person attached a file via A2A FilePart{FileBytes}
+// → adka2a decoded it into genai.Part{InlineData} → runner called
+// us. Defaults reflect that semantics:
+//
+//   - Visibility = cfg.UploadDefaultVisibility (operator knob, default "user")
+//   - TTL        = cfg.UploadDefaultTTL        (operator knob, default "7d")
+//   - EventSource = "user_upload" so downstream consumers can tell
+//     this artifact came from the runner ingest path, not a tool call.
+//
+// Tool-driven Save calls (tool.Context.SaveArtifact) inherit the
+// same defaults — phase-3 design choice. Tools that want different
+// semantics use the explicit artifact_publish tool instead.
 //
 // Returns version=1 for every successful Save; phase 3 treats
 // artifacts as immutable single-version objects (research §1).
@@ -209,21 +240,28 @@ func (m *Manager) Save(ctx context.Context, req *adkartifact.SaveRequest) (*adka
 	// text (Part.Text). For our purposes both flow through Publish
 	// as inline bytes; text becomes a UTF-8 byte slice typed as
 	// "txt".
+	displayName := req.FileName
 	pubReq := PublishRequest{
 		CallerSessionID: req.SessionID,
-		Name:            req.FileName,
-		Visibility:      VisibilitySelf,
-		TTL:             TTLSession,
+		Name:            displayName,
+		Visibility:      m.cfg.UploadDefaultVisibility,
+		TTL:             m.cfg.UploadDefaultTTL,
+		EventSource:     "user_upload",
 	}
 	switch {
 	case req.Part.InlineData != nil && len(req.Part.InlineData.Data) > 0:
 		pubReq.Source = PublishSource{InlineBytes: req.Part.InlineData.Data}
 		pubReq.Type = typeFromMIME(req.Part.InlineData.MIMEType)
-		pubReq.Description = req.FileName
+		if req.Part.InlineData.DisplayName != "" {
+			pubReq.Name = req.Part.InlineData.DisplayName
+			pubReq.Description = "User-uploaded " + req.Part.InlineData.DisplayName
+		} else {
+			pubReq.Description = "User-uploaded " + displayName
+		}
 	case req.Part.Text != "":
 		pubReq.Source = PublishSource{InlineBytes: []byte(req.Part.Text)}
 		pubReq.Type = "txt"
-		pubReq.Description = req.FileName
+		pubReq.Description = "User-uploaded " + displayName
 	default:
 		return nil, errors.New("artifacts: Save: empty part (need InlineData or Text)")
 	}

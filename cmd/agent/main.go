@@ -273,8 +273,17 @@ func serveConsole(ctx context.Context, a *app) error {
 // attachA2A wires the agent card, /invoke, and /admin/* routes onto
 // the given mux. Idempotent only if called at most once per mux —
 // http.ServeMux rejects duplicate registrations.
+//
+// The runtime's artifact manager doubles as the user-upload ADK
+// plugin source: BuildHandlers wires the plugin into runner.Config so
+// incoming A2A FilePart{FileBytes} land in the registry with a rich
+// text placeholder before the LLM ever sees the bytes (US10).
 func attachA2A(a *app, mux *http.ServeMux, rt *agentRuntime, artifacts artifact.Service, baseURL string) {
-	cardH, invokeH := a2a.BuildHandlers(rt.Agent, rt.Sessions, artifacts, baseURL)
+	uploadPlugin, err := rt.Artifacts.UserUploadPlugin()
+	if err != nil {
+		a.logger.Warn("artifacts: user-upload plugin disabled", "err", err)
+	}
+	cardH, invokeH := a2a.BuildHandlers(rt.Agent, rt.Sessions, artifacts, uploadPlugin, baseURL)
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
 	registerAdminRoutes(mux, rt.Tools, rt.Skills)

@@ -873,12 +873,14 @@ func artifactsConfigFromOperatorConfig(cfg config.ArtifactsConfig) artifacts.Con
 		schemaInspect = *cfg.SchemaInspect
 	}
 	return artifacts.Config{
-		InlineBytesMax:  cfg.InlineBytesMax,
-		ADKLoadMaxBytes: cfg.DownloadMaxBytes,
-		SchemaInspect:   schemaInspect,
-		TTLSessionGrace: int64(cfg.TTLSession.Seconds()),
-		TTL7dSeconds:    int64(cfg.TTL7d.Seconds()),
-		TTL30dSeconds:   int64(cfg.TTL30d.Seconds()),
+		InlineBytesMax:          cfg.InlineBytesMax,
+		ADKLoadMaxBytes:         cfg.DownloadMaxBytes,
+		SchemaInspect:           schemaInspect,
+		TTLSessionGrace:         int64(cfg.TTLSession.Seconds()),
+		TTL7dSeconds:            int64(cfg.TTL7d.Seconds()),
+		TTL30dSeconds:           int64(cfg.TTL30d.Seconds()),
+		UploadDefaultVisibility: artifacts.Visibility(cfg.UploadDefaultVisibility),
+		UploadDefaultTTL:        artifacts.TTL(cfg.UploadDefaultTTL),
 	}
 }
 

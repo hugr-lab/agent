@@ -58,6 +58,33 @@ func (m *Manager) InfoExists(ctx context.Context, callerSession, id string) erro
 	return err
 }
 
+// ResolveLocalPath returns the active backend's local filesystem
+// path for an artifact, when one exists. Used by the user-upload
+// plugin (US10) to expose a path the LLM can hand to python /
+// duckdb / curl tools without first calling artifact_info. Skips
+// visibility checks because the caller already has the artifact id
+// directly from a publish operation it just performed.
+//
+// Returns:
+//   - (path, true, nil)  — backend supports local mount.
+//   - ("", false, nil)   — backend doesn't expose a path (s3, etc.).
+//   - ("", false, err)   — id missing, backend mismatch, or I/O failure.
+func (m *Manager) ResolveLocalPath(ctx context.Context, artifactID string) (string, bool, error) {
+	rec, found, err := m.store().Get(ctx, artifactID)
+	if err != nil {
+		return "", false, fmt.Errorf("artifacts: ResolveLocalPath: %w", err)
+	}
+	if !found {
+		return "", false, fmt.Errorf("%w: %s", ErrUnknownArtifact, artifactID)
+	}
+	if rec.StorageBackend != m.deps.Storage.Name() {
+		return "", false, fmt.Errorf("%w: %s (artifact backend=%q, active=%q)",
+			ErrUnregisteredBackend, artifactID, rec.StorageBackend, m.deps.Storage.Name())
+	}
+	ref := storage.ObjectRef{Backend: rec.StorageBackend, Key: rec.StorageKey}
+	return m.deps.Storage.LocalPath(ctx, ref)
+}
+
 // Info returns the full metadata for an artifact subject to caller
 // visibility. Returns ErrUnknownArtifact when the id is missing or
 // not visible to callerSession.

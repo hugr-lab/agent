@@ -64,6 +64,20 @@ type ArtifactsConfig struct {
 	// Parquet/CSV files; operators who push GB-scale tabular sources
 	// can flip it off).
 	SchemaInspect *bool `mapstructure:"schema_inspect"`
+
+	// UploadDefaultVisibility is the visibility applied when ADK's
+	// runner auto-publishes a user-uploaded blob via the artifact.Service
+	// shim (see runner.go::appendMessageToSession). Operators who want
+	// uploads to stay session-scoped can set "self"; the default "user"
+	// makes them visible across the whole session graph for that user.
+	// One of: "self" | "parent" | "graph" | "user". Zero falls back to
+	// "user".
+	UploadDefaultVisibility string `mapstructure:"upload_default_visibility"`
+
+	// UploadDefaultTTL is the TTL applied to ADK-runner-auto-published
+	// uploads. One of: "session" | "7d" | "30d" | "permanent". Zero
+	// falls back to "7d".
+	UploadDefaultTTL string `mapstructure:"upload_default_ttl"`
 }
 
 // FSBackendConfig configures the filesystem storage backend.
@@ -128,5 +142,11 @@ func applyArtifactsDefaults(c *ArtifactsConfig) {
 	if c.SchemaInspect == nil {
 		t := true
 		c.SchemaInspect = &t
+	}
+	if c.UploadDefaultVisibility == "" {
+		c.UploadDefaultVisibility = "user"
+	}
+	if c.UploadDefaultTTL == "" {
+		c.UploadDefaultTTL = "7d"
 	}
 }

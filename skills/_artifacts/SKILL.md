@@ -1,6 +1,6 @@
 ---
 name: _artifacts
-version: "0.6.0"
+version: "0.7.0"
 description: >
   Persistent artifact registry. Publish bulky outputs (Parquet, CSV,
   HTML, charts, generated reports) as references that the
@@ -109,10 +109,9 @@ codes:
 `artifact_info(id)` returns the registered metadata for an artifact
 you can see: `name`, `type`, `size_bytes`, `description`, `tags`,
 `storage_backend`, `created_at`, plus tabular fields (`row_count`,
-`col_count`, `file_schema`) when available. Use it before
-`artifact_query` to confirm the artifact still exists and to learn
-its schema. Visibility miss returns `{error, code: "unknown_artifact"}`
-— the call cannot leak the existence of artifacts you do not own.
+`col_count`, `file_schema`) when available. Visibility miss returns
+`{error, code: "unknown_artifact"}` — the call cannot leak the
+existence of artifacts you do not own.
 
 ## Rendering artifacts in user replies
 
@@ -184,9 +183,58 @@ was derived from without reading the row).
 Sub-agents calling this get `{error, code: not_coordinator}` —
 escalate to the coordinator if you need a lineage trace.
 
-## Surface still pending
+## Reading artifact contents
 
-`artifact_query` (analytical SQL across artifacts) lands when the
-local DuckDB sandbox MCP server arrives. Phase-3 ships publish,
-info, list, visibility, remove, and chain — the artifact
-lifecycle is fully closed.
+The artifact tools surface metadata and references — they do not
+return file contents inline. To read or analyse the bytes, use the
+appropriate execution surface:
+
+- **DuckDB MCP sandbox** (when available) — runs analytical SQL over
+  artifact paths via `read_parquet('art:art_…')`, `read_csv(…)`,
+  etc. The recommended path for tabular artifacts.
+- **Other MCP tools** (curl, python, etc., when wired in) — for
+  binary or non-tabular blobs.
+
+Do NOT try to load artifact bytes into the conversation directly —
+that defeats the purpose of the registry.
+
+## User-uploaded files
+
+When a user attaches a file to their A2A message (FilePart), the
+runtime publishes it as an artifact BEFORE you see the message and
+substitutes the binary part with a header block in the user
+message:
+
+```text
+[user-upload]
+artifact_id: art_ag01_…
+name: report.csv
+type: csv
+mime: text/csv
+size_bytes: 12345
+visibility: user
+local_path: /var/data/artifacts/abc.csv
+# The local_path is mounted on the same host the agent runs on;
+# pass it directly to python/duckdb/curl tools when available.
+# Use artifact_info(id) for richer metadata; the bytes are NOT inlined here.
+```
+
+How to act on a `[user-upload]` block:
+
+- **Prefer `local_path`** when present — pass it directly to
+  duckdb (`read_parquet('/var/…')`), python, curl, bash via the
+  appropriate MCP tool. No HTTP roundtrip needed.
+- **Fall back to `artifact_id`** when there is no `local_path`
+  (e.g. operator selected the s3 backend). Use `artifact_info(id)`
+  for richer metadata; future MCP tools will resolve `art:art_…`
+  URIs into a fetchable handle.
+- **Never reference user-uploaded artifacts as `[name](artifact:id)`
+  download links** unless the user asks for one — the user already
+  has the file. Render artifacts that *you* produced for them
+  (parent → user widening); echo back what they sent only when it
+  helps the conversation.
+
+User messages may also carry `FileURI` parts (URL pointers). Those
+are NOT auto-published — the runtime passes the URI through to you
+as-is. If you need the bytes, dispatch a fetch through curl / python
+MCP tools; do not try to inline them.

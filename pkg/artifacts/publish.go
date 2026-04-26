@@ -106,6 +106,7 @@ func (m *Manager) Publish(ctx context.Context, req PublishRequest) (ArtifactRef,
 		Visibility: rec.Visibility,
 		SizeBytes:  size,
 		Tags:       rec.Tags,
+		Source:     req.EventSource,
 	}
 	metaJSON, _ := json.Marshal(meta)
 	metaMap := map[string]any{}

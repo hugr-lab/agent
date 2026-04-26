@@ -40,6 +40,11 @@ type ArtifactPublishedMeta struct {
 	Visibility string   `json:"visibility"`
 	SizeBytes  int64    `json:"size_bytes,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	// Source identifies what published the artifact. Values:
+	//   - ""             — explicit artifact_publish tool call (default).
+	//   - "user_upload"  — ADK runner auto-published a user upload via
+	//                      artifact.Service.Save (spec 008 / US10).
+	Source string `json:"source,omitempty"`
 }
 
 // ArtifactGrantedMeta is the payload of an artifact_granted event

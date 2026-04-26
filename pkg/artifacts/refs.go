@@ -127,6 +127,13 @@ type PublishRequest struct {
 	Tags            []string
 	DerivedFrom     string
 	TTL             TTL
+
+	// EventSource tags the emitted artifact_published event so
+	// downstream consumers can tell what triggered the publish. Empty
+	// = explicit artifact_publish tool call (default). Currently only
+	// "user_upload" is set explicitly — by Manager.Save on the ADK
+	// runner ingest path.
+	EventSource string
 }
 
 // PublishSource is the bytes input for a publish. Exactly one of

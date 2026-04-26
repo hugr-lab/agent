@@ -103,6 +103,120 @@ func Engine(t *testing.T, opt ...Opts) (*hugr.Service, string) {
 	return service, hubPath
 }
 
+// SharedEngine returns a process-singleton hugr engine + its hub.db
+// path, initialised once and reused across every test in the
+// package. Pair with TestMain that calls CloseShared at the end:
+//
+//	func TestMain(m *testing.M) {
+//	    code := m.Run()
+//	    testenv.CloseShared()
+//	    os.Exit(code)
+//	}
+//
+// Each fixture builder is responsible for cleaning up its own rows
+// between subtests (truncate the tables it touches) — the engine
+// itself has no per-test isolation. Use Engine(t) when a test must
+// have a pristine DB on its own (incompatible with package-shared
+// state).
+//
+// Opts on first call wins; subsequent calls ignore Opts since the
+// shared engine is already up. Tests with conflicting Opts must use
+// Engine(t) instead.
+func SharedEngine(opt ...Opts) (*hugr.Service, string) {
+	sharedEngineOnce.Do(func() {
+		var o Opts
+		if len(opt) > 0 {
+			o = opt[0]
+		}
+		ctx := context.Background()
+
+		dir, err := os.MkdirTemp("", "testenv-shared-*")
+		if err != nil {
+			panic(fmt.Sprintf("testenv: SharedEngine: tmpdir: %v", err))
+		}
+		hubPath := filepath.Join(dir, "memory.db")
+
+		if err := migrate.Ensure(migrate.Config{
+			Path:       hubPath,
+			VectorSize: o.VectorDim,
+			Seed: &migrate.SeedData{
+				AgentType: migrate.SeedAgentType{
+					ID:          "hugr-data",
+					Name:        "Hugr Data Agent",
+					Description: "Default agent type for tests",
+					Config:      map[string]any{"constitution": "test"},
+				},
+				Agent: migrate.SeedAgent{
+					ID:      "agt_ag01",
+					ShortID: "ag01",
+					Name:    "hugr-data-agent-test",
+				},
+			},
+		}); err != nil {
+			panic(fmt.Sprintf("testenv: SharedEngine: migrate: %v", err))
+		}
+
+		source := local.NewSource(local.SourceConfig{
+			Path:          hubPath,
+			VectorSize:    o.VectorDim,
+			EmbedderModel: o.EmbedderModel,
+		})
+		service, err := hugr.New(hugr.Config{
+			DB:     db.Config{},
+			CoreDB: coredb.New(coredb.Config{VectorSize: 0}),
+			Auth:   &auth.Config{},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("testenv: SharedEngine: hugr.New: %v", err))
+		}
+		if err := service.AttachRuntimeSource(ctx, source); err != nil {
+			panic(fmt.Sprintf("testenv: SharedEngine: AttachRuntimeSource: %v", err))
+		}
+		if err := service.Init(ctx); err != nil {
+			panic(fmt.Sprintf("testenv: SharedEngine: Init: %v", err))
+		}
+
+		if o.EmbedderURL != "" && o.EmbedderModel != "" {
+			path := fmt.Sprintf("%s?model=%s&timeout=30s", o.EmbedderURL, o.EmbedderModel)
+			if err := service.RegisterDataSource(ctx, types.DataSource{
+				Name:    o.EmbedderModel,
+				Type:    types.DataSourceType("embedding"),
+				Prefix:  o.EmbedderModel,
+				Path:    path,
+				Sources: []types.CatalogSource{},
+			}); err != nil {
+				panic(fmt.Sprintf("testenv: SharedEngine: register embedder: %v", err))
+			}
+		}
+
+		sharedEngineSvc = service
+		sharedEngineHubPath = hubPath
+		sharedEngineDir = dir
+	})
+	return sharedEngineSvc, sharedEngineHubPath
+}
+
+// CloseShared tears down the singleton built by SharedEngine. Call
+// once at the end of TestMain. Idempotent and safe to call when the
+// shared engine was never created.
+func CloseShared() {
+	if sharedEngineSvc != nil {
+		_ = sharedEngineSvc.Close()
+		sharedEngineSvc = nil
+	}
+	if sharedEngineDir != "" {
+		_ = os.RemoveAll(sharedEngineDir)
+		sharedEngineDir = ""
+	}
+}
+
+var (
+	sharedEngineOnce    sync.Once
+	sharedEngineSvc     *hugr.Service
+	sharedEngineHubPath string
+	sharedEngineDir     string
+)
+
 // EnvOrSkip returns the value of the named env variable; when unset
 // (or empty) the test is skipped with a helpful message. Handles the
 // common "we need a live local model for this test" pattern so

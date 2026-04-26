@@ -64,7 +64,7 @@ func startTestA2AServer(t *testing.T, llmResponse string) *a2aclient.Client {
 	sessionSvc := adksession.InMemoryService()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2a.BuildHandlers(a, sessionSvc, artifactSvc, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, sessionSvc, artifactSvc, nil, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -140,7 +140,7 @@ func TestA2A_AgentCard(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 
 	baseURL := "http://" + listener.Addr().String()
-	cardH, invokeH := a2a.BuildHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, adksession.InMemoryService(), artifact.InMemoryService(), nil, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
@@ -229,7 +229,7 @@ func startTestHugrAgentWithConfig(t *testing.T, cfg testHugrAgentConfig) (*a2acl
 	baseURL := "http://" + listener.Addr().String()
 	artifactSvc := artifact.InMemoryService()
 
-	cardH, invokeH := a2a.BuildHandlers(a, sessionMgr, artifactSvc, baseURL)
+	cardH, invokeH := a2a.BuildHandlers(a, sessionMgr, artifactSvc, nil, baseURL)
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
