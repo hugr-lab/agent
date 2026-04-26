@@ -22,6 +22,23 @@ import (
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 )
 
+// ArtifactGranter is the slice of *artifacts.Manager the executor
+// uses for input-artifact handoff (US6 / spec 008). Decoupled
+// behind an interface so tests can pass a fake without standing up
+// the registry. nil-safe — when the executor isn't wired with one,
+// missions with InputArtifacts fail at promotion.
+//
+// Visibility is checked via existence (returning a nil error from
+// Info indicates "this artifact is visible to the coordinator");
+// the executor doesn't read any fields off the result, so the
+// concrete return type can vary across producers (Manager.Info
+// returns artifacts.ArtifactDetail; tests pass a fake that
+// returns any type they like).
+type ArtifactGranter interface {
+	AddGrant(ctx context.Context, artifactID, agentID, sessionID, grantedBy string) error
+	InfoExists(ctx context.Context, callerSession, id string) error
+}
+
 // Executor drives the mission graph state machine. Holds an
 // in-memory DAG per coordinator session; gates overlapping Tick
 // calls via TryLock.
@@ -32,6 +49,8 @@ type Executor struct {
 	parallelism int
 	nowFn       func() time.Time
 	logger      *slog.Logger
+	artifacts   ArtifactGranter
+	agentID     string
 
 	// baseCtx is the parent context every dispatcher goroutine + the
 	// completion-summary RunOnce derive from. Wired from the runtime's
@@ -85,6 +104,17 @@ type Config struct {
 	// falls back to context.Background — useful in narrow tests
 	// that don't care about cancellation propagation.
 	BaseContext context.Context
+
+	// Artifacts is the optional artifact-grant surface (US6 /
+	// spec 008). Nil ⇒ missions with InputArtifacts fail at
+	// promotion (treated as "no manager → no grants").
+	Artifacts ArtifactGranter
+
+	// AgentID is the scope every grant carries. When empty, the
+	// executor falls back to the artifact's recorded agent_id at
+	// resolution time (Manager.AddGrant tolerates an empty
+	// agentID).
+	AgentID string
 }
 
 // New builds an Executor. Parallelism < 1 is clamped to 4. Logger is
@@ -107,6 +137,8 @@ func New(cfg Config) *Executor {
 		nowFn:       time.Now,
 		logger:      cfg.Logger,
 		baseCtx:     cfg.BaseContext,
+		artifacts:   cfg.Artifacts,
+		agentID:     cfg.AgentID,
 	}
 }
 
@@ -119,6 +151,16 @@ func (e *Executor) SetBaseContext(ctx context.Context) {
 		ctx = context.Background()
 	}
 	e.baseCtx = ctx
+}
+
+// SetArtifactGranter wires the artifact-grant surface for US6
+// input-artifact handoff. Safe to call before Start; after Start
+// the executor reads e.artifacts on the goroutine that promotes
+// missions, so a setter race is benign (worst case: a single
+// mission promotion sees the older granter). Pass nil to detach.
+func (e *Executor) SetArtifactGranter(g ArtifactGranter, agentID string) {
+	e.artifacts = g
+	e.agentID = agentID
 }
 
 // addWorker reserves a slot in the executor's WaitGroup for a
@@ -243,6 +285,7 @@ func (e *Executor) Register(coordSessionID string, plan *graph.PlanResult) {
 func (e *Executor) RegisterSingle(
 	coordSessionID, skill, role, task string,
 	dependsOn []string,
+	inputArtifacts ...string,
 ) (string, error) {
 	d := e.ensureDag(coordSessionID)
 	d.mu.Lock()
@@ -257,13 +300,14 @@ func (e *Executor) RegisterSingle(
 
 	missionID := "sub_" + uuid.NewString()
 	node := &missionNode{
-		id:       missionID,
-		coordID:  coordSessionID,
-		skill:    skill,
-		role:     role,
-		task:     task,
-		status:   graph.StatusPending,
-		upstream: append([]string(nil), dependsOn...),
+		id:             missionID,
+		coordID:        coordSessionID,
+		skill:          skill,
+		role:           role,
+		task:           task,
+		status:         graph.StatusPending,
+		upstream:       append([]string(nil), dependsOn...),
+		inputArtifacts: append([]string(nil), inputArtifacts...),
 	}
 	for _, dep := range dependsOn {
 		if upN, ok := d.missions[dep]; ok {
@@ -856,6 +900,32 @@ func (e *Executor) promoteReady(d *dag) {
 	}
 }
 
+// preflightInputArtifacts validates that every input artifact is
+// visible to the coordinator and grants the child session access.
+// Returns (reason, ok). Caller marks the mission failed when
+// ok=false.
+//
+// Edge cases:
+//   - No ArtifactGranter wired ⇒ fail with manager_unavailable.
+//   - Info() miss ⇒ fail with input_artifact_unknown_or_invisible.
+//   - AddGrant() error ⇒ fail with grant_failed (we DO NOT roll
+//     back already-issued grants — they're idempotent and a future
+//     promotion attempt simply reissues them).
+func (e *Executor) preflightInputArtifacts(ctx context.Context, coordID string, node *missionNode) (string, bool) {
+	if e.artifacts == nil {
+		return "input_artifact_handoff_failed: artifact manager not wired", false
+	}
+	for _, aid := range node.inputArtifacts {
+		if err := e.artifacts.InfoExists(ctx, coordID, aid); err != nil {
+			return fmt.Sprintf("input_artifact_unknown_or_invisible: %s", aid), false
+		}
+		if err := e.artifacts.AddGrant(ctx, aid, e.agentID, node.id, coordID); err != nil {
+			return fmt.Sprintf("input_artifact_grant_failed: %s: %v", aid, err), false
+		}
+	}
+	return "", true
+}
+
 // promoteRunning launches dispatcher goroutines for ready missions,
 // bounded by Parallelism. Goroutines write their DispatchResult into
 // per-node channels drained by the next Tick's drainTerminals.
@@ -892,6 +962,23 @@ func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
 		if inFlight >= e.parallelism {
 			break
 		}
+		// Input artifacts pre-flight: every id must be visible to
+		// the coordinator AND, on success, be granted to the new
+		// child session. Visibility miss ⇒ short-circuit the
+		// mission with an `input_artifact_unknown_or_invisible`
+		// reason; spec 008 / FR-022.
+		if len(node.inputArtifacts) > 0 {
+			if reason, ok := e.preflightInputArtifacts(ctx, coordID, node); !ok {
+				node.status = graph.StatusFailed
+				node.terminated = time.Now()
+				node.reason = reason
+				node.summary = reason
+				e.logger.Warn("missions: input artifact handoff failed",
+					"mission_id", node.id, "coord", coordID, "reason", reason)
+				continue
+			}
+		}
+
 		// Reserve a wg slot BEFORE we mutate node state — if Stop has
 		// already been called, we leave the mission in StatusReady and
 		// the next process boot's RestoreState will abandon it cleanly.
@@ -914,6 +1001,7 @@ func (e *Executor) promoteRunning(ctx context.Context, coordID string, d *dag) {
 			Role:            node.role,
 			Task:            node.task,
 			DependsOn:       append([]string(nil), node.upstream...),
+			InputArtifacts:  append([]string(nil), node.inputArtifacts...),
 		}
 		ch := node.resultCh
 		driver := e.driver

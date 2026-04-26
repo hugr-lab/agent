@@ -1,0 +1,82 @@
+name: mission_input_artifacts
+session_id: scenario-mission-input-1
+# Coord publishes + spawn → mission promotes + grants → mission
+# runs first turn. Three round-trips, give it 90s.
+final_wait: 90s
+
+steps:
+  # Step 1 — coord publishes a small "task spec" artifact AND
+  # spawns one mission with input_artifacts pointing at it.
+  - say: |
+      Step A: publish a small file via artifact_publish with
+        name="task-spec",
+        type="txt",
+        description="Per-record processing instructions",
+        inline_bytes (base64-encoded): cHJvY2VzcyByZWNvcmRzIDEtMTAw
+        (this is "process records 1-100" in plain text),
+        visibility="self".
+      Get back the art_... id.
+
+      Step B: call spawn_sub_mission with:
+        role="summariser",
+        goal="As your FIRST action, call artifact_list and report
+              back what is visible. The task-spec artifact should be
+              available to you because the coordinator granted it.",
+        input_artifacts=[<the art_... id you just got>]
+
+      Then return ONLY one short sentence saying you've spawned the
+      mission.
+    queries:
+      # The grant row that the executor's preflight hook should
+      # have created. Granted_by points at the coord session id;
+      # session_id at the new sub-agent.
+      - name: grant_rows
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.artifact_grants | map({artifact_id, agent_id, session_id, granted_by})") {
+              hub { db { agent {
+                artifact_grants { artifact_id agent_id session_id granted_by }
+              }}}
+            }
+          }
+
+      # artifact_granted event on the coord — confirms the grant
+      # path emitted lifecycle audit.
+      - name: granted_events
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {event_type: {eq: "artifact_granted"}, session_id: {eq: $sid}}
+              ) { metadata seq }
+            }}}
+          }
+        vars:
+          sid: scenario-mission-input-1
+
+      # Mission's first artifact_list result should mention
+      # task-spec by name. Excerpt the tool_result content.
+      - name: mission_first_list_result
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"tool_result\" and .tool_name == \"artifact_list\")) | sort_by(.seq) | first | {session_id, content_excerpt: .content[0:500]}"
+            ) {
+              hub { db { agent {
+                session_events { session_id event_type tool_name content seq }
+              }}}
+            }
+          }
+
+      # Mission session row — sanity that the spawn fired.
+      - name: mission_session
+        graphql: |
+          query ($coord: String!) {
+            jq(query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord and .session_type == \"subagent\")) | map({id, status, role: .metadata.role, mission})") {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-mission-input-1

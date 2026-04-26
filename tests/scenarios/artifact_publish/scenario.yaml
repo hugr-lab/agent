@@ -1,0 +1,99 @@
+name: artifact_publish
+session_id: scenario-artifact-publish-1
+# Coord may delegate, sub-agent may publish — give the chain time
+# to settle (sub-agent turn + coord follow-up turn).
+final_wait: 90s
+
+steps:
+  # Step 1 — coord delegates a task whose deliverable is explicitly
+  # an artifact. Summariser carries the _artifacts skill via
+  # autoload_for: [subagent], so artifact_publish is in its tool
+  # surface.
+  - say: |
+      Use subagent_domain_summariser to produce a ~200-word essay
+      on "context engineering" and PUBLISH that essay as an
+      artifact via artifact_publish (name="context-engineering",
+      type="txt", visibility="parent",
+      description="Short essay on context engineering").
+      Return ONLY the artifact id in your reply (the
+      "art_..." string).
+    queries:
+      # 1. The artifacts table grows by one row.
+      - name: artifact_rows
+        graphql: |
+          query {
+            hub { db { agent {
+              artifacts {
+                id name type visibility size_bytes session_id
+                storage_backend ttl
+              }
+            }}}
+          }
+
+      # 2. artifact_published event lands on the SUB-AGENT session
+      # (whichever one summariser ran in), not on the coord.
+      - name: publish_events
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"artifact_published\")) | map({session_id, tool_name, source: .metadata.source, name: .metadata.name, vis: .metadata.visibility})"
+            ) {
+              hub { db { agent {
+                session_events {
+                  session_id event_type tool_name metadata
+                }
+              }}}
+            }
+          }
+
+      # 3. Coord can see the artifact through the session_artifacts
+      # view at scope=parent (sub-agent published with
+      # visibility=parent). Confirms the recursive view's
+      # parent_rows branch fires.
+      - name: coord_visibility
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_artifacts(args: {session_artifacts_input: {session_id: $sid, agent_id: "agt_ag01"}}) {
+                id name type visibility scope
+              }
+            }}}
+          }
+        vars:
+          sid: scenario-artifact-publish-1
+
+      # 4. Subagent session that produced the artifact — gives a
+      # ground truth for what the coord delegated to.
+      - name: subagent_sessions
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | map({id, status, parent: .parent_session_id, role: .metadata.role})") {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata }
+              }}}
+            }
+          }
+
+  # Step 2 — coord uses artifact_info on the id from step 1. Lets
+  # us observe info-tool wiring end-to-end (publish → info on the
+  # same artifact across two turns).
+  - say: |
+      Now call artifact_info on the artifact id you just published.
+      Tell me its size_bytes and visibility — those two numbers,
+      nothing else.
+    queries:
+      - name: info_calls_on_coord
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.tool_name == \"artifact_info\")) | map({seq, type: .event_type})"
+            ) {
+              hub { db { agent {
+                session_events(filter: {session_id: {eq: $sid}}) {
+                  seq event_type tool_name
+                }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-artifact-publish-1

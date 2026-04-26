@@ -21,22 +21,23 @@ type dag struct {
 // missionNode is the in-memory per-mission state. Not persisted —
 // Executor.RestoreState rebuilds one from persisted rows at boot.
 type missionNode struct {
-	id           string
-	coordID      string
-	skill        string
-	role         string
-	task         string
-	status       string
-	upstream     []string
-	downstream   []string
-	resultCh     chan missionResult
-	cancel       context.CancelFunc
-	startedAt    time.Time
-	terminated   time.Time
-	turnsUsed    int
-	summary      string
-	reason       string
-	spawnEventID string
+	id             string
+	coordID        string
+	skill          string
+	role           string
+	task           string
+	status         string
+	upstream       []string
+	downstream     []string
+	inputArtifacts []string
+	resultCh       chan missionResult
+	cancel         context.CancelFunc
+	startedAt      time.Time
+	terminated     time.Time
+	turnsUsed      int
+	summary        string
+	reason         string
+	spawnEventID   string
 }
 
 // missionResult is what a dispatcher goroutine writes to its mission's

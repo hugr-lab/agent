@@ -648,6 +648,230 @@ type session_reviews @table(name: "session_reviews") @module(name: "agent") {
 }
 
 # ============================================================
+# Artifacts (spec 008) — persistent registry for files produced by
+# sessions. Bytes live OUTSIDE hub.db in the active Storage backend
+# (pkg/artifacts/storage); this row is metadata-only. Description is
+# embedded server-side via Hugr's `summary:` argument when the
+# embedder data source is attached, identical to memory_items and
+# session_events.
+# ============================================================
+
+"""A reference to a file produced by a session. Metadata-only — bytes live in pkg/artifacts/storage. Description is vectorised server-side for semantic search via the @embeddings directive."""
+type artifacts @table(name: "artifacts") @module(name: "agent")
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderModel }}", vector: "description_embedding", distance: Cosine){{ end }} {
+  """Synthetic sortable id: art_{agentShort}_{ts}_{rnd}"""
+  id:                 String! @pk
+  """Agent that owns this artifact"""
+  agent_id:           String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that owns this artifact"
+    references_query: "artifacts"
+    references_description: "Artifacts published by this agent"
+  )
+  """Producer-supplied display name (no extension; type field carries the type)"""
+  name:               String!
+  """Artifact type: parquet | csv | json | html | svg | pdf | txt | md | bin | ..."""
+  type:               String!
+  """Opaque to the manager; backend-specific key resolved by Storage.Open(ObjectRef{Backend, Key})"""
+  storage_key:        String!
+  """Backend name that wrote the bytes (fs | s3). Persisted so a future config flip keeps historical reads working."""
+  storage_backend:    String!
+  """Optional: caller-supplied source path before publish (for audit/debug)"""
+  original_path:      String
+  """Human-readable description; embedded server-side into description_embedding"""
+  description:        String!
+  {{ if gt .VectorSize 0 }}
+  """Vector embedding of description (cosine similarity)"""
+  description_embedding: Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
+  """Creator session id"""
+  session_id:         String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Session that created this artifact"
+    references_query: "artifacts"
+    references_description: "Artifacts created in this session"
+  )
+  """Equals session_id when the creator is a sub-agent session; NULL when the creator is a coordinator (root) session"""
+  mission_session_id: String
+  """Parent artifact id (lineage chain)"""
+  derived_from:       String  @field_references(
+    references_name: "artifacts"
+    field: "id"
+    query: "parent"
+    description: "Artifact this one was derived from"
+    references_query: "derivatives"
+    references_description: "Artifacts derived from this one"
+  )
+  """Visibility: self | parent | graph | user. Strict-widening only."""
+  visibility:         String! @default(value: "self")
+  """Created at timestamp"""
+  created_at:         Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  """Stat'd size in bytes"""
+  size_bytes:         Int
+  """Tabular only: row count from DESCRIBE / COUNT(*) probe at publish time"""
+  row_count:          Int
+  """Tabular only: column count"""
+  col_count:          Int
+  """Tabular only: column schema as DuckDB DESCRIBE output (JSON)"""
+  file_schema:        JSON
+  """Free-form tags for filtering in artifact_list"""
+  tags:               [String!]
+  """TTL classification: session | 7d | 30d | permanent"""
+  ttl:                String! @default(value: "session")
+}
+
+# ============================================================
+# Artifact grants (spec 008) — explicit access overlay. Coordinator-
+# only. Records widen-only deviations from artifacts.visibility for a
+# specific (agent_id, session_id) pair. Issued by Manager.WidenVisibility
+# (and at mission spawn time when MissionSpec.InputArtifacts is set).
+# ============================================================
+
+# ============================================================
+# Session artifacts — recursive view that resolves "which artifacts
+# can session $s see?" Single SQL surface every visibility-aware read
+# path consumes (Manager.ListVisible, resolveVisibleArtifact). Manager
+# never joins artifacts ↔ artifact_grants from Go; it ALWAYS goes
+# through this view.
+# ============================================================
+
+"""Resolves visibility for a (agent_id, session_id) pair. Returns each artifact the session can see, with a synthetic visible_via column ('self' | 'parent' | 'graph' | 'grant' | 'user'). Same artifact may appear once per qualifying scope — deduplication happens at the manager (broadest scope wins). Phase-3 spec 008."""
+type session_artifacts @view(
+  name: "session_artifacts"
+  sql: """
+    WITH RECURSIVE ancestor_chain AS (
+      SELECT id AS session_id, 0 AS depth
+      FROM [sessions]
+      WHERE id = [$session_id] AND agent_id = [$agent_id]
+
+      UNION ALL
+
+      SELECT s.parent_session_id AS session_id, ac.depth + 1
+      FROM ancestor_chain ac
+      JOIN [sessions] s ON s.id = ac.session_id
+      WHERE s.parent_session_id IS NOT NULL
+        AND s.agent_id = [$agent_id]
+        AND ac.depth < 8
+    ),
+    root_session AS (
+      SELECT session_id FROM ancestor_chain
+      WHERE depth = (SELECT MAX(depth) FROM ancestor_chain)
+    ),
+    graph_members AS (
+      SELECT session_id, 0 AS gdepth FROM root_session
+
+      UNION ALL
+
+      SELECT s.id AS session_id, gm.gdepth + 1
+      FROM graph_members gm
+      JOIN [sessions] s ON s.parent_session_id = gm.session_id
+      WHERE s.agent_id = [$agent_id] AND gm.gdepth < 8
+    ),
+    own_rows AS (
+      SELECT a.*, 'self' AS visible_via
+      FROM [artifacts] a
+      WHERE a.agent_id = [$agent_id] AND a.session_id = [$session_id]
+    ),
+    parent_rows AS (
+      SELECT a.*, 'parent' AS visible_via
+      FROM [artifacts] a
+      JOIN [sessions] s ON s.id = a.session_id
+      WHERE a.agent_id = [$agent_id]
+        AND a.visibility IN ('parent','graph','user')
+        AND s.parent_session_id = [$session_id]
+    ),
+    graph_rows AS (
+      SELECT a.*, 'graph' AS visible_via
+      FROM [artifacts] a
+      JOIN graph_members gm ON gm.session_id = a.session_id
+      WHERE a.agent_id = [$agent_id]
+        AND a.visibility IN ('graph','user')
+        AND a.session_id <> [$session_id]
+    ),
+    grant_rows AS (
+      SELECT a.*, 'grant' AS visible_via
+      FROM [artifacts] a
+      JOIN [artifact_grants] g ON g.artifact_id = a.id
+      WHERE g.agent_id = [$agent_id] AND g.session_id = [$session_id]
+    ),
+    user_rows AS (
+      SELECT a.*, 'user' AS visible_via
+      FROM [artifacts] a
+      WHERE a.agent_id = [$agent_id] AND a.visibility = 'user'
+    )
+    SELECT * FROM own_rows
+    UNION ALL SELECT * FROM parent_rows
+    UNION ALL SELECT * FROM graph_rows
+    UNION ALL SELECT * FROM grant_rows
+    UNION ALL SELECT * FROM user_rows
+  """
+) @args(name: "session_artifacts_input", required: true) @module(name: "agent")
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderModel }}", vector: "description_embedding", distance: Cosine){{ end }} {
+  id:                 String!
+  agent_id:           String!
+  name:               String!
+  type:               String!
+  storage_key:        String!
+  storage_backend:    String!
+  original_path:      String
+  description:        String!
+  {{ if gt .VectorSize 0 }}
+  description_embedding: Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
+  session_id:         String!
+  mission_session_id: String
+  derived_from:       String
+  visibility:         String!
+  created_at:         Timestamp
+  size_bytes:         Int
+  row_count:          Int
+  col_count:          Int
+  file_schema:        JSON
+  tags:               [String!]
+  ttl:                String!
+  """How the calling session can see this artifact: 'self' | 'parent' | 'graph' | 'grant' | 'user'"""
+  visible_via:        String!
+}
+
+"""Input for parameterized session_artifacts view"""
+input session_artifacts_input {
+  """Agent scope — multi-tenant boundary"""
+  agent_id:   String!
+  """Calling session id"""
+  session_id: String!
+}
+
+"""Explicit grant authorising a (agent_id, session_id) pair to see an artifact whose visibility level alone would otherwise hide it. Idempotent on composite PK."""
+type artifact_grants @table(name: "artifact_grants") @module(name: "agent") {
+  """Artifact this grant applies to"""
+  artifact_id: String! @pk @field_references(
+    references_name: "artifacts"
+    field: "id"
+    query: "artifact"
+    description: "Artifact this grant applies to"
+    references_query: "grants"
+    references_description: "Explicit grants extending this artifact's visibility"
+  )
+  """Agent receiving access"""
+  agent_id:    String! @pk
+  """Session receiving access"""
+  session_id:  String! @pk @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Session receiving access"
+  )
+  """Agent_id of the grant issuer (the coordinator)"""
+  granted_by:  String!
+  """When the grant was issued"""
+  granted_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.granted_at")
+}
+
+# ============================================================
 # Data source config:
 #   Name:     "hub.db"
 #   AsModule: true

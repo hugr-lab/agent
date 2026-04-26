@@ -1,0 +1,97 @@
+name: artifact_visibility
+session_id: scenario-artifact-visibility-1
+# Two delegate-then-coord cycles + a manual coord widen call.
+final_wait: 120s
+
+steps:
+  # Step 1 — sub_A publishes self-only. sub_B (sibling) tries to
+  # list and sees nothing.
+  - say: |
+      I need TWO sub-agents in parallel via mission_plan:
+        - mission "draft" → role summariser → task: "Write 'project
+          alpha plan: ship Q3' as a txt and publish it via
+          artifact_publish with name='alpha-plan', type='txt',
+          visibility='self', description='Internal draft of alpha
+          plan'. Return only the artifact id."
+        - mission "audit" → role summariser → task: "Call
+          artifact_list to see what's visible. Report the list
+          back as JSON."
+      Wait for both to finish (use wait_for_missions), then echo
+      back the audit's list.
+    queries:
+      - name: artifacts_after_step1
+        graphql: |
+          query {
+            hub { db { agent {
+              artifacts { id name visibility session_id }
+            }}}
+          }
+
+      - name: audit_list_event
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.tool_name == \"artifact_list\")) | map({session_id, content_excerpt: .content[0:300]})"
+            ) {
+              hub { db { agent {
+                session_events { session_id event_type tool_name content }
+              }}}
+            }
+          }
+
+      - name: subagent_sessions
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | map({id, mission, role: .metadata.role, status})") {
+              hub { db { agent {
+                sessions { id session_type status mission metadata }
+              }}}
+            }
+          }
+
+  # Step 2 — coord widens the artifact to user. Triggers
+  # artifact_granted event + Visibility flip.
+  - say: |
+      Take the artifact id from the draft mission. Call
+      artifact_visibility with id=<that id> and visibility="user"
+      to widen it. Confirm with one sentence.
+    queries:
+      - name: artifact_after_widen
+        graphql: |
+          query {
+            hub { db { agent {
+              artifacts { id name visibility }
+            }}}
+          }
+
+      - name: granted_events
+        graphql: |
+          query {
+            hub { db { agent {
+              session_events(
+                filter: {event_type: {eq: "artifact_granted"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { session_id event_type metadata }
+            }}}
+          }
+
+  # Step 3 — re-spawn an audit mission, check that the now-user
+  # artifact surfaces. Confirms session_artifacts view's user_rows
+  # branch sees the widening immediately.
+  - say: |
+      Now spawn ONE more sub_mission via spawn_sub_mission with
+      role=summariser, goal="Call artifact_list once and return its
+      result verbatim — I want to see if the alpha-plan artifact is
+      visible now."
+    queries:
+      - name: post_widen_audit_list
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.tool_name == \"artifact_list\")) | sort_by(.seq) | last | {session_id, content}"
+            ) {
+              hub { db { agent {
+                session_events { session_id event_type tool_name content seq }
+              }}}
+            }
+          }

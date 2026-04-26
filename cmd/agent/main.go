@@ -186,8 +186,11 @@ func registerProviderAuth(ctx context.Context, cfg *config.Config, reg *auth.Sou
 // a single A2A listener. OIDC callbacks live on the same mux, so the
 // redirect_uri matches prod.
 func serveA2A(ctx context.Context, a *app) error {
-	artifactSvc := artifact.InMemoryService()
-	attachA2A(a.authMux, a.runtime, artifactSvc, a.cfg.A2A.BaseURL)
+	// Spec 008: a.runtime.Artifacts is the persistent registry that
+	// implements adk artifact.Service directly. The previous
+	// artifact.InMemoryService() stub is gone.
+	artifactSvc := a.runtime.Artifacts
+	attachA2A(a, a.authMux, a.runtime, artifactSvc, a.cfg.A2A.BaseURL)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", a.cfg.A2A.Port),
@@ -204,8 +207,11 @@ func serveA2A(ctx context.Context, a *app) error {
 // the ADK webui + REST + /dev helpers on cfg.DevUI.Port, loopback-
 // only. Two listeners, one runtime.
 func serveDevUI(ctx context.Context, a *app) error {
-	artifactSvc := artifact.InMemoryService()
-	attachA2A(a.authMux, a.runtime, artifactSvc, a.cfg.A2A.BaseURL)
+	// Spec 008: a.runtime.Artifacts is the persistent registry that
+	// implements adk artifact.Service directly. The previous
+	// artifact.InMemoryService() stub is gone.
+	artifactSvc := a.runtime.Artifacts
+	attachA2A(a, a.authMux, a.runtime, artifactSvc, a.cfg.A2A.BaseURL)
 
 	devHandler, err := buildDevRouter(a.runtime, artifactSvc,
 		a.authReg.TokenStores(), a.cfg.DevUI.BaseURL, a.cfg.A2A.BaseURL)
@@ -267,11 +273,25 @@ func serveConsole(ctx context.Context, a *app) error {
 // attachA2A wires the agent card, /invoke, and /admin/* routes onto
 // the given mux. Idempotent only if called at most once per mux —
 // http.ServeMux rejects duplicate registrations.
-func attachA2A(mux *http.ServeMux, rt *agentRuntime, artifacts artifact.Service, baseURL string) {
-	cardH, invokeH := a2a.BuildHandlers(rt.Agent, rt.Sessions, artifacts, baseURL)
+//
+// The runtime's artifact manager doubles as the user-upload ADK
+// plugin source: BuildHandlers wires the plugin into runner.Config so
+// incoming A2A FilePart{FileBytes} land in the registry with a rich
+// text placeholder before the LLM ever sees the bytes (US10).
+func attachA2A(a *app, mux *http.ServeMux, rt *agentRuntime, artifacts artifact.Service, baseURL string) {
+	uploadPlugin, err := rt.Artifacts.UserUploadPlugin()
+	if err != nil {
+		a.logger.Warn("artifacts: user-upload plugin disabled", "err", err)
+	}
+	cardH, invokeH := a2a.BuildHandlers(rt.Agent, rt.Sessions, artifacts, uploadPlugin, baseURL)
 	mux.Handle(a2asrv.WellKnownAgentCardPath, cardH)
 	mux.Handle("/invoke", invokeH)
 	registerAdminRoutes(mux, rt.Tools, rt.Skills)
+	registerArtifactDownload(mux, rt.Artifacts, artifactDownloadConfig{
+		MaxBytes:     a.cfg.Artifacts.DownloadMaxBytes,
+		WriteChunk:   a.cfg.Artifacts.DownloadWriteChunk,
+		WriteTimeout: a.cfg.Artifacts.DownloadWriteTimeout,
+	}, a.logger)
 }
 
 // buildDevRouter assembles the ADK webui + REST API + dev helpers

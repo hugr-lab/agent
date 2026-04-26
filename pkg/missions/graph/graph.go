@@ -111,6 +111,14 @@ type DispatchArgs struct {
 	Task            string
 	Notes           string
 	DependsOn       []string
+	// InputArtifacts is the list of artifact ids the new mission
+	// must be granted access to before its first turn. Visibility is
+	// resolved against the coordinator session at promotion time —
+	// a missing/invisible id fails the mission with an
+	// `input_artifact_unknown_or_invisible: <id>` reason. Empty
+	// slice = no auto-grant; the new mission sees only the default
+	// `self`-scoped surface.
+	InputArtifacts []string
 }
 
 // DispatchResult is what the mission driver returns.
