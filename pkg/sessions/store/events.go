@@ -29,6 +29,15 @@ const (
 	EventTypeArtifactPublished = "artifact_published"
 	EventTypeArtifactGranted   = "artifact_granted"
 	EventTypeArtifactRemoved   = "artifact_removed"
+
+	// HITL lifecycle events (spec 009 / phase 4). Emitted on the
+	// coordinator session (and on the gated mission session for
+	// approval_requested + ask_coordinator). Excluded from the
+	// reviewer pipeline by default — audit only.
+	EventTypeApprovalRequested = "approval_requested"
+	EventTypeApprovalResponded = "approval_responded"
+	EventTypePolicyChanged     = "policy_changed"
+	EventTypeAskCoordinator    = "ask_coordinator"
 )
 
 // ArtifactPublishedMeta is the payload of an artifact_published event

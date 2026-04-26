@@ -145,7 +145,7 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.3", ver)
+	assert.Equal(t, "0.0.5", ver)
 
 	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
 	// land additively. Both must exist on a fresh DuckDB provision.
@@ -170,6 +170,30 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
          WHERE table_name IN ('artifacts','artifact_grants')`,
 	).Scan(&artIdxCount))
 	assert.Equal(t, 0, artIdxCount, "DuckDB must have zero indexes on artifacts / artifact_grants")
+
+	// spec 009 / migration 0.0.5 — approvals + tool_policies tables
+	// land additively. Both must exist on a fresh DuckDB provision.
+	for _, table := range []string{"approvals", "tool_policies"} {
+		t.Run("phase4/"+table, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
+				table,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected table %s to exist", table)
+		})
+	}
+
+	// Project rule: indexes only on Postgres. DuckDB stays index-free
+	// for the phase-4 tables too. Asserted here so a future edit
+	// dropping `{{ if isPostgres }}` fails loudly on the CI DuckDB pass.
+	var phase4IdxCount int
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM duckdb_indexes
+         WHERE table_name IN ('approvals','tool_policies')`,
+	).Scan(&phase4IdxCount))
+	assert.Equal(t, 0, phase4IdxCount, "DuckDB must have zero indexes on approvals / tool_policies")
 }
 
 // TestEnsure_v002_NoVectorColumnWhenDisabled — when VectorSize == 0

@@ -370,3 +370,43 @@ CREATE INDEX IF NOT EXISTS artifacts_desc_vss
     ON artifacts USING hnsw (description_embedding vector_cosine_ops);
 {{ end }}
 {{ end }}
+
+-- ============================================================
+-- HITL Approvals + Tool Policies (spec 009 / phase 4)
+--   See pkg/store/local/migrate/migrations/0.0.5/ for upgrade
+--   migrations against existing 0.0.3 deployments.
+--   Indexes are POSTGRES-ONLY — DuckDB stays index-free.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id                  VARCHAR PRIMARY KEY,
+    agent_id            VARCHAR NOT NULL,
+    mission_session_id  VARCHAR NOT NULL,
+    coord_session_id    VARCHAR NOT NULL,
+    tool_name           VARCHAR NOT NULL,
+    args                {{ if isPostgres }}JSONB{{ else }}JSON{{ end }} NOT NULL,
+    risk                VARCHAR NOT NULL,
+    status              VARCHAR NOT NULL,
+    response            {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
+    created_at          {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL,
+    responded_at        {{ if isPostgres }}TIMESTAMPTZ{{ else }}TIMESTAMP{{ end }}
+);
+
+CREATE TABLE IF NOT EXISTS tool_policies (
+    agent_id    VARCHAR NOT NULL,
+    tool_name   VARCHAR NOT NULL,
+    scope       VARCHAR NOT NULL,
+    policy      VARCHAR NOT NULL,
+    note        VARCHAR,
+    created_by  VARCHAR NOT NULL,
+    created_at  {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL,
+    updated_at  {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL,
+    PRIMARY KEY (agent_id, tool_name, scope)
+);
+
+{{ if isPostgres }}
+CREATE INDEX IF NOT EXISTS idx_approvals_coord
+    ON approvals (agent_id, coord_session_id, status);
+CREATE INDEX IF NOT EXISTS idx_policies_agent_scope
+    ON tool_policies (agent_id, scope);
+{{ end }}

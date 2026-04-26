@@ -47,6 +47,8 @@ type Config struct {
 	MCP         tools.MCPConfig
 	Missions    MissionsConfig
 	Artifacts   ArtifactsConfig
+	Approvals   ApprovalsConfig
+	Search      SearchConfig
 
 	Auth      []AuthConfig
 	Providers []tools.ProviderConfig
@@ -138,6 +140,8 @@ func LoadLocal(yamlPath string, boot *BootstrapConfig) (*Config, error) {
 		cfg.MCP.TTL = 60 * time.Second
 		cfg.MCP.FetchTimeout = 30 * time.Second
 		applyArtifactsDefaults(&cfg.Artifacts)
+		applyApprovalsDefaults(&cfg.Approvals)
+		applySearchDefaults(&cfg.Search)
 	}
 	return cfg, nil
 }
@@ -318,6 +322,14 @@ func unmarshalSections(v *viper.Viper, cfg *Config) error {
 		return fmt.Errorf("unmarshal artifacts: %w", err)
 	}
 	applyArtifactsDefaults(&cfg.Artifacts)
+	if err := v.UnmarshalKey("approvals", &cfg.Approvals); err != nil {
+		return fmt.Errorf("unmarshal approvals: %w", err)
+	}
+	applyApprovalsDefaults(&cfg.Approvals)
+	if err := v.UnmarshalKey("search", &cfg.Search); err != nil {
+		return fmt.Errorf("unmarshal search: %w", err)
+	}
+	applySearchDefaults(&cfg.Search)
 	if a := v.GetString("hugr.auth"); a != "" {
 		cfg.Hugr.Auth = a
 	}
