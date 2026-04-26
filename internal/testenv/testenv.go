@@ -119,15 +119,19 @@ func Engine(t *testing.T, opt ...Opts) (*hugr.Service, string) {
 // have a pristine DB on its own (incompatible with package-shared
 // state).
 //
-// Opts on first call wins; subsequent calls ignore Opts since the
-// shared engine is already up. Tests with conflicting Opts must use
-// Engine(t) instead.
+// Opts on first call wins. Subsequent calls validate that the
+// passed Opts equal the cached ones and PANIC on mismatch — silently
+// returning the already-built engine when a caller asked for a
+// different VectorDim / EmbedderURL would produce flaky tests
+// that are very hard to diagnose. Tests with conflicting Opts must
+// use Engine(t) instead.
 func SharedEngine(opt ...Opts) (*hugr.Service, string) {
+	var requested Opts
+	if len(opt) > 0 {
+		requested = opt[0]
+	}
 	sharedEngineOnce.Do(func() {
-		var o Opts
-		if len(opt) > 0 {
-			o = opt[0]
-		}
+		o := requested
 		ctx := context.Background()
 
 		dir, err := os.MkdirTemp("", "testenv-shared-*")
@@ -192,7 +196,12 @@ func SharedEngine(opt ...Opts) (*hugr.Service, string) {
 		sharedEngineSvc = service
 		sharedEngineHubPath = hubPath
 		sharedEngineDir = dir
+		sharedEngineOpts = o
 	})
+	if requested != sharedEngineOpts {
+		panic(fmt.Sprintf("testenv: SharedEngine: Opts mismatch — first call cached %#v, but caller passed %#v. Use Engine(t) for tests with custom Opts.",
+			sharedEngineOpts, requested))
+	}
 	return sharedEngineSvc, sharedEngineHubPath
 }
 
@@ -215,6 +224,7 @@ var (
 	sharedEngineSvc     *hugr.Service
 	sharedEngineHubPath string
 	sharedEngineDir     string
+	sharedEngineOpts    Opts
 )
 
 // EnvOrSkip returns the value of the named env variable; when unset

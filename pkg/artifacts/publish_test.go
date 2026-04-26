@@ -39,7 +39,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	service, _ := testenv.SharedEngine()
-	require.NoError(t, artifacts.ResetSharedTables(context.Background(), service))
+	require.NoError(t, artifacts.ResetSharedTables(t, context.Background(), service))
 
 	sess, err := sessstore.New(service, sessstore.Options{
 		AgentID: "agt_ag01", AgentShort: "ag01", Logger: logger,
