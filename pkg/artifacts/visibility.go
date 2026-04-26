@@ -17,9 +17,17 @@ import (
 // mission graph. Either `vis` or `target` must be set; both may be.
 //
 // Errors:
-//   - ErrUnknownArtifact      — id missing / invisible to caller.
 //   - ErrNotCoordinator       — caller has a parent_session_id.
+//   - ErrUnknownArtifact      — id missing / invisible to caller.
 //   - ErrVisibilityNarrowing  — vis is narrower than current.
+//
+// Order matters: coord-gate runs BEFORE the visibility resolution
+// so a sub-agent attempting to widen any artifact (visible or not)
+// gets a single ErrNotCoordinator response. Otherwise we'd leak
+// "this id doesn't exist for you" vs "you'd be allowed to look at
+// it but you're not coord" to unauthorised callers — and worse,
+// the LLM-facing tool envelope would change shape based on whether
+// the upstream artifact happened to be visible.
 func (m *Manager) WidenVisibility(ctx context.Context, callerSession, id string, vis Visibility, target *GrantTarget) error {
 	if vis == "" && target == nil {
 		return fmt.Errorf("artifacts: WidenVisibility: at least one of vis/target required")
@@ -28,15 +36,8 @@ func (m *Manager) WidenVisibility(ctx context.Context, callerSession, id string,
 		return ErrInvalidVisibility
 	}
 
-	rec, ok, err := m.resolveVisibleArtifact(ctx, callerSession, id)
-	if err != nil {
-		return fmt.Errorf("artifacts: WidenVisibility: %w", err)
-	}
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrUnknownArtifact, id)
-	}
-
-	// Coordinator gate.
+	// Coord gate first — authorization independent of artifact
+	// visibility. See doc comment above.
 	sess, err := m.deps.SessionEvents.GetSession(ctx, callerSession)
 	if err != nil {
 		return fmt.Errorf("artifacts: WidenVisibility: lookup session: %w", err)
@@ -46,6 +47,14 @@ func (m *Manager) WidenVisibility(ctx context.Context, callerSession, id string,
 	}
 	if sess.ParentSessionID != "" {
 		return ErrNotCoordinator
+	}
+
+	rec, ok, err := m.resolveVisibleArtifact(ctx, callerSession, id)
+	if err != nil {
+		return fmt.Errorf("artifacts: WidenVisibility: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownArtifact, id)
 	}
 
 	current := Visibility(rec.Visibility)

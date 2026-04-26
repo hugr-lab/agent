@@ -110,27 +110,18 @@ func TestManager_ListVisible_ParentScope(t *testing.T) {
 }
 
 func TestManager_WidenVisibility_HappyPath(t *testing.T) {
-	// TODO(spec 008 follow-up): WidenVisibility funnels through
-	// resolveVisibleArtifact → session_artifacts view, which
-	// (correctly) does NOT surface self-scoped artifacts owned by
-	// descendants to a coordinator. So this test as written
-	// cannot pass against the current view contract — coord can
-	// see the artifact via the graph_members chain only when it's
-	// already published with visibility >= 'graph'. The existing
-	// test predates the view's parent_rows fix; it was masked by
-	// pre-existing 600s test budget timeouts. Skipping until we
-	// either (a) bypass the view in WidenVisibility for
-	// graph-member coordinators, or (b) rewrite the test to
-	// publish at visibility=parent and widen to user.
-	t.Skip("pre-existing: view hides self-of-descendant from coordinator")
 	f := newVfixture(t)
 	ctx := context.Background()
 
-	// Sub-A self-scoped → widen to user via coord.
+	// Sub-A publishes parent-scope so coord sees it through the
+	// view's parent_rows branch. (visibility=self by design hides
+	// the artifact from everyone except sub_A — coord should NOT
+	// be able to widen what sub_A explicitly marked private.)
 	ref, err := f.mgr.Publish(ctx, artifacts.PublishRequest{
 		CallerSessionID: f.subAID,
-		Source:          artifacts.PublishSource{InlineBytes: []byte("hidden")},
-		Name:            "secret", Type: "txt", Description: "self only",
+		Source:          artifacts.PublishSource{InlineBytes: []byte("for parent")},
+		Name:            "draft", Type: "txt", Description: "draft for coord review",
+		Visibility: artifacts.VisibilityParent,
 	})
 	require.NoError(t, err)
 
@@ -143,14 +134,6 @@ func TestManager_WidenVisibility_HappyPath(t *testing.T) {
 }
 
 func TestManager_WidenVisibility_NotCoordinator(t *testing.T) {
-	// TODO(spec 008 follow-up): same view-vs-WidenVisibility
-	// semantic mismatch as TestManager_WidenVisibility_HappyPath.
-	// Coord-published self artifact is invisible to sub-A through
-	// the view, so resolveVisibleArtifact returns ErrUnknownArtifact
-	// before WidenVisibility can reject on the not-coordinator
-	// gate. Test skipped until the view-vs-Widen contract is
-	// reconciled.
-	t.Skip("pre-existing: view hides coord's self artifact from sub-A before not-coordinator gate fires")
 	f := newVfixture(t)
 	ctx := context.Background()
 
@@ -161,7 +144,10 @@ func TestManager_WidenVisibility_NotCoordinator(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Sub-A tries to widen → ErrNotCoordinator.
+	// Sub-A tries to widen → ErrNotCoordinator. Coord-gate fires
+	// before the visibility resolution, so the response is the
+	// same regardless of whether the artifact would be visible
+	// to sub-A through the view.
 	err = f.mgr.WidenVisibility(ctx, f.subAID, ref.ID, artifacts.VisibilityUser, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, artifacts.ErrNotCoordinator), "got %v", err)
