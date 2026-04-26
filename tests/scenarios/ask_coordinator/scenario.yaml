@@ -1,0 +1,55 @@
+name: ask_coordinator
+session_id: scenario-ask-coordinator-1
+# Sub-agent escalates ambiguity via ask_coordinator. Coord
+# answers via approval_respond(decision=answer). Foundation
+# evidence that US3 plumbing works end-to-end.
+final_wait: 90s
+
+steps:
+  - say: |
+      Use subagent_gated_asker to ask which color you want.
+      The role will call ask_coordinator and pause. Just dispatch
+      it and tell me what tool result you got back.
+    queries:
+      - name: ask_approvals_row
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, tool_name, status, question: .args.question})"
+            ) {
+              hub { db { agent {
+                approvals { id tool_name status args }
+              }}}
+            }
+          }
+
+      - name: ask_event_on_subagent
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"ask_coordinator\")) | map({session_id, question: .metadata.question})"
+            ) {
+              hub { db { agent {
+                session_events { event_type session_id metadata }
+              }}}
+            }
+          }
+
+  - say: |
+      Find the pending ask via pending_approvals if you need to.
+      Then answer it: call
+
+          approval_respond(id="<that id>", decision="answer",
+                          answer="purple")
+
+      Report what status came back.
+    queries:
+      - name: ask_after_answer
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, status, answer: .response.answer})"
+            ) {
+              hub { db { agent { approvals { id status response } }}}
+            }
+          }

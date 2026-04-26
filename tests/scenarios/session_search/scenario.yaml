@@ -1,0 +1,87 @@
+name: session_search
+session_id: scenario-session-search-1
+# Three steps that exercise the multi-horizon session_context:
+# 1. Coord generates content the search will later look for.
+# 2. Coord runs session_context with scope=turn (no query) — proves
+#    the simple tail path. Then with scope=session + query —
+#    proves the semantic + recency rerank against own root events.
+# 3. Coord runs session_events on its own session — proves the raw
+#    audit path.
+final_wait: 60s
+
+steps:
+  # Step 1 — seed events. Coord answers a question with concrete
+  # content. The text is intentionally unique ("ZetaProject magnetic
+  # alignment") so the semantic + keyword paths can find it later.
+  - say: |
+      Briefly explain (in 2-3 sentences) why ZetaProject's
+      experimental magnetic alignment failed last week. Make up
+      reasonable details — it's a fictitious scenario for testing
+      semantic search.
+    queries:
+      - name: events_after_seed
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.session_events | length") {
+              hub { db { agent {
+                session_events { id }
+              }}}
+            }
+          }
+
+  # Step 2 — exercise session_context. The coord LLM is told to do
+  # two queries in order and report results back.
+  - say: |
+      I want to test the session_context tool. Do these two calls
+      and report back what each returned in 1 sentence each:
+
+      1. session_context(scope="turn", last_n=3)
+         — should return your last 3 events as a chronological tail.
+
+      2. session_context(scope="session", query="ZetaProject magnetic alignment", last_n=5)
+         — should find the explanation you gave in step 1, ranked
+         by relevance × recency.
+
+      Just call the tools and tell me how many hits each returned
+      and (for the second call) which session the top hit came
+      from. Do not include the raw event content in your reply.
+    queries:
+      - name: tool_calls_in_step2
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.tool_name == \"session_context\")) | sort_by(.seq) | map({seq, args: .tool_args, has_result: (.event_type == \"tool_result\")})"
+            ) {
+              hub { db { agent {
+                session_events(filter: {session_id: {eq: $sid}}) {
+                  seq event_type tool_name tool_args
+                }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-session-search-1
+
+  # Step 3 — session_events for raw audit access. Coord queries its
+  # own session by id.
+  - say: |
+      Now call session_events(session_id="scenario-session-search-1",
+      tool_name="session_context", limit=10) and tell me how many
+      session_context tool calls it found. Don't dump the events
+      themselves — just the count.
+    queries:
+      - name: session_events_results
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.tool_name == \"session_events\" and .event_type == \"tool_result\")) | last | .content[:300]"
+            ) {
+              hub { db { agent {
+                session_events(filter: {session_id: {eq: $sid}}) {
+                  seq event_type tool_name content
+                }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-session-search-1

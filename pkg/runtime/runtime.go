@@ -30,7 +30,10 @@ import (
 	"google.golang.org/genai"
 
 	hugen "github.com/hugr-lab/hugen/pkg/agent"
+	"github.com/hugr-lab/hugen/pkg/approvals"
+	approvalsstore "github.com/hugr-lab/hugen/pkg/approvals/store"
 	"github.com/hugr-lab/hugen/pkg/artifacts"
+	"github.com/hugr-lab/hugen/pkg/search"
 	artstorage "github.com/hugr-lab/hugen/pkg/artifacts/storage"
 	artfs "github.com/hugr-lab/hugen/pkg/artifacts/storage/fs"
 	arts3 "github.com/hugr-lab/hugen/pkg/artifacts/storage/s3"
@@ -81,6 +84,13 @@ type Runtime struct {
 	// google.golang.org/adk/artifact.Service (for the A2A / dev-UI
 	// path), so the same value flows through every consumer.
 	Artifacts *artifacts.Manager
+
+	// Approvals is the phase-4 HITL gate + tool policies manager.
+	// Implements tools.Provider; its Gate is wired into the
+	// Dispatcher's BeforeToolCallbacks so every sub-agent tool call
+	// is consulted against the resolution chain. nil when phase-4
+	// foundation is disabled (currently always built).
+	Approvals *approvals.Manager
 
 	// Engine is the embedded query-engine (nil in hub-only mode).
 	Engine *qe.Service
@@ -352,11 +362,89 @@ func Build(
 	toolsMgr.AddProvider(memService)
 	toolsMgr.AddProvider(chat.Provider())
 
+	// Spec 009 phase 4 — HITL approvals manager. Built before the
+	// Dispatcher so the Gate can hook every sub-agent tool dispatch
+	// via BeforeToolCallbacks. The manager exposes approval_respond
+	// (coord-only) immediately; policy_* and ask_coordinator land
+	// in US2 and US3 respectively.
+	//
+	// missionsStore is built early too so approvals.Manager can flip
+	// the mission row to `waiting` in the same logical step as the
+	// approvals insert. The full missions.Service / Executor
+	// construction follows below at the usual phase-2 location and
+	// reuses the same store pointer.
+	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
+	approvalsStoreClient, err := approvalsstore.New(memoryQuerier, approvalsstore.Options{
+		AgentID: cfg.Identity.ID,
+		Logger:  logger,
+	})
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build approvals store: %w", err)
+	}
+	approvalsManager, err := approvals.New(
+		approvalsConfigFromOperatorConfig(cfg.Approvals),
+		approvals.Deps{
+			Store:         approvalsStoreClient,
+			SessionEvents: sessHub,
+			Missions:      missionsStore,
+			AgentID:       cfg.Identity.ID,
+			Logger:        logger,
+		},
+	)
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build approvals manager: %w", err)
+	}
+	rt.Approvals = approvalsManager
+	toolsMgr.AddProvider(approvalsManager)
+
+	// Spec 009 phase 4 / US4 — multi-horizon session-context search.
+	// Tools land via autoload skill `_search`; service wraps the
+	// session_events Hugr table with semantic + recency reranker.
+	searchService, err := search.New(search.Deps{
+		Querier:             memoryQuerier,
+		SessionReader:       sessHub,
+		AgentID:             cfg.Identity.ID,
+		Logger:              logger,
+		EmbedderEnabled:     embedderEnabled,
+		HalfLifeMission:     cfg.Search.DefaultHalfLifeMission,
+		HalfLifeSession:     cfg.Search.DefaultHalfLifeSession,
+		HalfLifeUser:        cfg.Search.DefaultHalfLifeUser,
+		DefaultLimit:        cfg.Search.DefaultLimit,
+		UserBatchAliasLimit: cfg.Search.UserBatchAliasLimit,
+	})
+	if err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: build search service: %w", err)
+	}
+	toolsMgr.AddProvider(searchService)
+
+	// Sweeper cron — every cfg.SweeperInterval (default 5m), expire
+	// any pending approvals older than cfg.DefaultTimeout. Errors
+	// are logged + counted as removed=0; nothing aborts the agent.
+	if err := sched.Every("approvals-sweeper", cfg.Approvals.SweeperInterval,
+		func(ctx context.Context) error {
+			expired, err := approvalsManager.SweepExpired(ctx)
+			if err != nil {
+				logger.Warn("approvals: sweep pass", "err", err)
+				return err
+			}
+			if expired > 0 {
+				logger.Info("approvals: sweep pass", "expired", expired)
+			}
+			return nil
+		}); err != nil {
+		closeOnErr()
+		return nil, fmt.Errorf("runtime: register approvals-sweeper: %w", err)
+	}
+
 	dispatcher, err := hugen.NewDispatcher(hugen.DispatcherConfig{
-		Sessions: sessionMgr,
-		Skills:   skillsMgr,
-		Router:   router,
-		Logger:   logger,
+		Sessions:  sessionMgr,
+		Skills:    skillsMgr,
+		Router:    router,
+		Logger:    logger,
+		Approvals: approvalsManager,
 	})
 	if err != nil {
 		closeOnErr()
@@ -381,7 +469,6 @@ func Build(
 	// ServiceName key, and skills that want mission_plan /
 	// mission_status declare `provider: _mission_tools` in their
 	// frontmatter — same pattern as _memory / _context / _system.
-	missionsStore := missionsstore.New(sessHub, memoryQuerier, logger)
 	plannerHeader, err := loadCoordinatorPrompt(skillsPath, "planner-prompt.md", logger)
 	if err != nil {
 		closeOnErr()
@@ -860,6 +947,22 @@ func openArtifactStorage(cfg config.ArtifactsConfig, logger *slog.Logger) (artst
 	default:
 		return nil, fmt.Errorf("runtime: unknown artifacts.backend %q (want fs|s3)", cfg.Backend)
 	}
+}
+
+// approvalsConfigFromOperatorConfig translates the operator's
+// pkg/config.ApprovalsConfig into the approvals package's
+// internal Config — keeps pkg/approvals free of any pkg/config
+// import (one-way dependency: runtime translates).
+func approvalsConfigFromOperatorConfig(cfg config.ApprovalsConfig) approvals.Config {
+	out := approvals.Config{
+		DefaultTimeout:         cfg.DefaultTimeout,
+		SafePolicyChange:       cfg.SafePolicyChange,
+		EnableImpactEstimators: cfg.EnableImpactEstimators,
+	}
+	if len(cfg.DestructiveTools) > 0 {
+		out.DestructiveTools = append([]string(nil), cfg.DestructiveTools...)
+	}
+	return out
 }
 
 // artifactsConfigFromOperatorConfig translates the operator's

@@ -1,0 +1,40 @@
+# Memory categories for cross-domain analyses. The reviewer prefixes
+# these with `hugr-analyst.` automatically (skill namespacing), so a
+# `cross_domain_findings` fact extracted in this skill won't collide
+# with `_memory.session_summary` or any future skill's category named
+# `findings`.
+
+categories:
+  cross_domain_findings:
+    description: >
+      A durable insight derived from combining Hugr-sourced data with
+      Python-side computation — a correlation, distribution shape,
+      cluster, model coefficient, or anomaly worth remembering across
+      sessions.
+    volatility: slow
+    initial_score: 0.7
+    tags_hint: "metric_or_dataset"
+
+  chart_recipe:
+    description: >
+      A reusable computation recipe (Python snippet pattern) the
+      analyst converged on for a particular chart or model — useful
+      when the same question shape recurs.
+    volatility: stable
+    initial_score: 0.6
+    tags_hint: "chart_kind"
+
+review:
+  enabled: true
+  min_tool_calls: 2  # at least one Hugr fetch + one Python compute
+  # Pull approval_responded back into our review window — when the
+  # user tweaks a query mid-flight via approval_respond(decision=
+  # "modify"), the corrected args are evidence of preference and
+  # should feed cross_domain_findings.
+  include_event_types:
+    - approval_responded
+  prompt: |
+    Extract durable cross-domain findings (correlations, model fits,
+    distribution surprises) and chart recipes (the Python pattern that
+    produced an effective visualisation). Skip the data-fetch
+    transcript chrome — focus on the analytical conclusion.

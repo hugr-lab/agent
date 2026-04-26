@@ -872,6 +872,94 @@ type artifact_grants @table(name: "artifact_grants") @module(name: "agent") {
 }
 
 # ============================================================
+# Approvals (spec 009 / phase 4) — persistent HITL approval rows.
+# A row is created when the Gate decides Manual on a sub-agent's
+# tool call (tool_name = the gated tool) OR when a sub-agent calls
+# ask_coordinator (tool_name = "ask_coordinator"). The row's args
+# carry the tool's original arguments verbatim; the response (when
+# populated) carries the user's decision payload.
+# ============================================================
+
+"""HITL approval row: a sub-agent's gated tool call (or ask_coordinator question) awaiting user decision. Pending rows survive process restart."""
+type approvals @table(name: "approvals") @module(name: "agent") {
+  """Synthetic id: app-{12 hex chars from crypto/rand}"""
+  id:                  String! @pk
+  """Owning agent"""
+  agent_id:            String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that owns this approval"
+    references_query: "approvals"
+    references_description: "Approvals owned by this agent"
+  )
+  """Sub-agent session whose tool call is gated (or the asking sub-agent's session for ask_coordinator)"""
+  mission_session_id:  String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "mission_session"
+    description: "Sub-agent session whose tool call is gated"
+  )
+  """Coordinator session that surfaces the approval envelope to the user"""
+  coord_session_id:    String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "coord_session"
+    description: "Coordinator session that surfaces the approval"
+  )
+  """Gated tool name; literal "ask_coordinator" for ask-variant rows"""
+  tool_name:           String!
+  """Original tool arguments as a JSON object (verbatim, not redacted)"""
+  args:                JSON!
+  """Risk classification: low | medium | high"""
+  risk:                String!
+  """Lifecycle status: pending | approved | rejected | modified | expired"""
+  status:              String!
+  """User decision payload (decision, modified_args?, note?, answer?). NULL while pending."""
+  response:            JSON
+  """Created at timestamp"""
+  created_at:          Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  """When the row left the pending status (NULL while pending)"""
+  responded_at:        Timestamp
+}
+
+# ============================================================
+# Tool policies (spec 009 / phase 4) — persistent overrides for the
+# default approval behavior of a tool. Hot-cached by *PolicyStore in
+# pkg/approvals; reads are lock-free via atomic.Pointer[snapshot].
+# Resolution chain: role exact > role prefix > skill exact > skill
+# prefix > global exact > global prefix > frontmatter rules >
+# hardcoded default.
+# ============================================================
+
+"""Persistent policy override for a tool, scoped global / skill / role. Hot-cached by *PolicyStore."""
+type tool_policies @table(name: "tool_policies") @module(name: "agent") {
+  """Owning agent"""
+  agent_id:    String! @pk @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that owns this policy"
+    references_query: "tool_policies"
+    references_description: "Tool policies for this agent"
+  )
+  """Exact tool name OR prefix glob (e.g. "data-*")"""
+  tool_name:   String! @pk
+  """Scope: global | skill:<name> | role:<skill>:<role>"""
+  scope:       String! @pk
+  """Decision: always_allowed | manual_required | denied"""
+  policy:      String!
+  """Free-form annotation captured at policy_set time"""
+  note:        String
+  """Authorship: user | llm | system"""
+  created_by:  String!
+  """Created at timestamp"""
+  created_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  """Updated at timestamp; advances on every upsert"""
+  updated_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}")
+}
+
+# ============================================================
 # Data source config:
 #   Name:     "hub.db"
 #   AsModule: true

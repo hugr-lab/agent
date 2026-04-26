@@ -1,0 +1,61 @@
+name: hitl_modify
+session_id: scenario-hitl-modify-1
+# Forks hitl_approve. Same setup (subagent_gated_noter calls
+# memory_note → gate intercepts), but in step 2 the user replies
+# `modify <id> {"content": "<new>"}` instead of `approve <id>`.
+# Verify approvals row flips to `modified` with the new args
+# captured in `response.modified_args`.
+final_wait: 90s
+
+steps:
+  - say: |
+      Use subagent_gated_noter to persist the fact:
+      "Original fact about phase 4."
+      Don't paraphrase — pass the fact verbatim.
+    queries:
+      - name: approvals_after_gate
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, tool_name, status, content_arg: .args.content})"
+            ) {
+              hub { db { agent {
+                approvals { id tool_name status args }
+              }}}
+            }
+          }
+
+  - say: |
+      Find the pending approval id (call pending_approvals if you
+      need to). Then call:
+
+          approval_respond(id="<that id>", decision="modify",
+                          modified_args={"content": "Modified fact about phase 4 widening.",
+                                         "scope": "parent"},
+                          note="user wants different wording")
+
+      Report back the approval's new status.
+    queries:
+      - name: approvals_after_modify
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, status, decision: .response.decision, modified_args: .response.modified_args, note: .response.note})"
+            ) {
+              hub { db { agent {
+                approvals { id status response }
+              }}}
+            }
+          }
+
+      - name: approval_responded_modify_event
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"approval_responded\")) | last | {decision: .metadata.decision, has_modified_args: (.metadata.modified_args != null)}"
+            ) {
+              hub { db { agent {
+                session_events { event_type metadata }
+              }}}
+            }
+          }

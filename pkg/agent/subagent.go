@@ -19,6 +19,7 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
+	"github.com/hugr-lab/hugen/pkg/approvals"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
@@ -41,10 +42,11 @@ const SubAgentProviderName = "_subagent"
 // and creates its own child session + transient agent. Safe for
 // concurrent calls from different coordinator sessions.
 type Dispatcher struct {
-	sessions *sessions.Manager
-	skills   skills.Manager
-	router   *models.Router
-	logger   *slog.Logger
+	sessions  *sessions.Manager
+	skills    skills.Manager
+	router    *models.Router
+	logger    *slog.Logger
+	approvals *approvals.Manager
 
 	// Timeout bounds each Run end-to-end. Defaults to 5 minutes when
 	// zero.
@@ -58,6 +60,13 @@ type DispatcherConfig struct {
 	Router   *models.Router
 	Logger   *slog.Logger
 	Timeout  time.Duration
+
+	// Approvals is the optional HITL gate manager (spec 009). When
+	// non-nil, every sub-agent tool call is consulted against
+	// Approvals.Gate before dispatch; Manual decisions pause the
+	// mission via a synthetic tool result. nil ⇒ no gating (phase-1
+	// behaviour preserved for tests + minimal deployments).
+	Approvals *approvals.Manager
 }
 
 // NewDispatcher constructs a Dispatcher. All three dependencies are
@@ -79,11 +88,12 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		cfg.Timeout = 5 * time.Minute
 	}
 	return &Dispatcher{
-		sessions: cfg.Sessions,
-		skills:   cfg.Skills,
-		router:   cfg.Router,
-		logger:   cfg.Logger,
-		Timeout:  cfg.Timeout,
+		sessions:  cfg.Sessions,
+		skills:    cfg.Skills,
+		router:    cfg.Router,
+		logger:    cfg.Logger,
+		approvals: cfg.Approvals,
+		Timeout:   cfg.Timeout,
 	}, nil
 }
 
@@ -260,6 +270,25 @@ func (d *Dispatcher) runInternal(
 		}, nil
 	}
 
+	// Spec 009 / US5 — cross-skill composition. Roles can declare
+	// `required_skills: [other-skill, …]` to load extra skill bundles
+	// onto the child session. The skill loader handles
+	// allowlist intersection on same-named providers (safer-by-
+	// default) — sub-agent's tool surface becomes the union of
+	// non-overlapping providers + intersection of overlapping ones.
+	for _, name := range spec.RequiredSkills {
+		if name == "" || name == parentSkill {
+			continue
+		}
+		if err := childSess.LoadSkill(runCtx, name); err != nil {
+			d.markChild(runCtx, childID, "failed")
+			return DispatchResult{
+				ChildSessionID: childID,
+				Error:          fmt.Sprintf("load required skill %q: %v", name, err),
+			}, nil
+		}
+	}
+
 	// Step 4 — build the transient llmagent. The InstructionProvider
 	// fronts the role's instructions, then delegates to the child
 	// session's Snapshot prompt so memory hint / autoload skill
@@ -280,6 +309,33 @@ func (d *Dispatcher) runInternal(
 		return roleInstr + "\n\n" + base, nil
 	}
 
+	// Build the optional HITL gate callback. Only wired when
+	// Approvals manager is configured AND the role declares
+	// approval_rules OR the operator-level DestructiveTools list is
+	// non-empty. The gate enforces the resolution chain on every
+	// sub-agent tool dispatch (spec 009).
+	var beforeToolCBs []llmagent.BeforeToolCallback
+	if d.approvals != nil {
+		coordSessionID := overrides.CoordSessionID
+		if coordSessionID == "" {
+			coordSessionID = parentSessionID
+		}
+		gateCB, gateErr := approvals.GateCallback(d.approvals, approvals.GateCallbackConfig{
+			AgentID:          d.approvals.AgentID(),
+			MissionSessionID: childID,
+			CoordSessionID:   coordSessionID,
+			Skill:            parentSkill,
+			Role:             role,
+			Frontmatter:      convertApprovalRules(spec.ApprovalRules),
+		})
+		if gateErr != nil {
+			d.logger.WarnContext(runCtx, "subagent: build gate callback",
+				"skill", parentSkill, "role", role, "err", gateErr)
+		} else {
+			beforeToolCBs = append(beforeToolCBs, gateCB)
+		}
+	}
+
 	subAgent, err := llmagent.New(llmagent.Config{
 		Name:                fmt.Sprintf("subagent_%s_%s", parentSkill, role),
 		Description:         spec.Description,
@@ -289,6 +345,7 @@ func (d *Dispatcher) runInternal(
 		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
 			sessions.Inject(d.sessions),
 		},
+		BeforeToolCallbacks: beforeToolCBs,
 	})
 	if err != nil {
 		d.markChild(runCtx, childID, "failed")
@@ -482,7 +539,25 @@ func (t *subagentRoleTool) Run(ctx tool.Context, args any) (map[string]any, erro
 // write failure here doesn't bubble up to the coordinator; the row's
 // status drift is rare and self-correcting at the next reviewer pass.
 // No-op when the SessionManager runs without a hub (test mode).
+//
+// Spec 009 phase 4: when the Gate fires during the dispatch (sub-agent
+// called a tool that resolved to manual_required), the approvals
+// manager flips the child session's status to "waiting" inline. The
+// runner.Run loop then continues until the LLM produces a turn
+// without further tool calls and exits naturally — at which point
+// markChild would otherwise overwrite "waiting" with "completed" or
+// "abandoned". We protect against that by reading the current status
+// first and refusing to overwrite "waiting" with a terminal value.
+// User-driven resume happens later via approval_respond → coord LLM
+// re-dispatches per constitution.
 func (d *Dispatcher) markChild(ctx context.Context, childID, status string) {
+	if d.approvals != nil {
+		if cur, err := d.sessions.SessionStatus(ctx, childID); err == nil && cur == "waiting" {
+			d.logger.DebugContext(ctx, "subagent: skip markChild overwrite of waiting",
+				"child", childID, "requested", status)
+			return
+		}
+	}
 	if err := d.sessions.UpdateSessionStatus(ctx, childID, status); err != nil {
 		d.logger.Warn("subagent: update child status",
 			"child", childID, "status", status, "err", err)
@@ -495,6 +570,28 @@ const (
 	defaultDispatchMaxTurns      = 15
 	defaultDispatchSummaryMaxTok = 800
 )
+
+// convertApprovalRules maps skills.SubAgentApprovalRules onto the
+// approvals package's FrontmatterApprovalRules shape. Returns nil
+// when the input is nil so the resolution chain falls through to
+// its hardcoded default.
+func convertApprovalRules(in *skills.SubAgentApprovalRules) *approvals.FrontmatterApprovalRules {
+	if in == nil {
+		return nil
+	}
+	out := &approvals.FrontmatterApprovalRules{
+		AutoApprove:      append([]string(nil), in.AutoApprove...),
+		RequireUser:      append([]string(nil), in.RequireUser...),
+		ParentCanApprove: append([]string(nil), in.ParentCanApprove...),
+	}
+	if len(in.Risk) > 0 {
+		out.RiskOverrides = make(map[string]approvals.Risk, len(in.Risk))
+		for k, v := range in.Risk {
+			out.RiskOverrides[k] = approvals.Risk(v)
+		}
+	}
+	return out
+}
 
 // approxTokenCount is a coarse heuristic mirroring
 // pkg/models.TokenEstimator's default ratio (≈4 chars per token).

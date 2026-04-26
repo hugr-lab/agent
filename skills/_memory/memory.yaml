@@ -17,18 +17,16 @@ categories:
 review:
   # Reviewer defaults come from agent-level config.Memory.Review;
   # per-skill overrides go here if _memory wants distinct knobs.
+  #
+  # The reviewer's pkg/memory.DefaultExcludeEventTypes() already
+  # excludes transcript chrome (compaction_summary, reasoning, error)
+  # plus all framework lifecycle events from missions (spec 007),
+  # artifacts (spec 008), and HITL/policy/composition (spec 009).
+  # Skills that want any of those back in their review window declare
+  # them under `include_event_types` (e.g. hugr-data may want
+  # approval_responded back to learn from user-tweaked queries).
   enabled: true
   min_tool_calls: 0  # session_summary can apply even to tool-less chats
-  exclude_event_types:
-    - compaction_summary
-    - reasoning
-    - error
-    # Spec 007 lifecycle events — coordinator-side audit, not learning
-    # material. Missions' own transcripts are reviewed independently.
-    - agent_spawn
-    - agent_result
-    - agent_abstained
-    - user_followup_routed
   prompt: |
     Extract durable facts about the USER (preferences, working style,
     recurring asks) and a short session_summary capturing the

@@ -1,0 +1,43 @@
+name: cross_skill
+session_id: scenario-cross-skill-1
+# Verify spec 009 / US5: a role with `required_skills: [domain]`
+# loads BOTH `gated` (the parent skill) AND `domain` into the
+# child session. We dispatch subagent_gated_cross_noter, then
+# inspect the child session's skill_loaded events.
+final_wait: 90s
+
+steps:
+  - say: |
+      Use subagent_gated_cross_noter to persist the fact:
+      "Cross-skill composition is spec 009 US5."
+      Don't paraphrase — just dispatch the role with that exact
+      task and report what comes back.
+    queries:
+      # Skill_loaded events on the sub-agent session — should
+      # include both `gated` (parent skill) and `domain` (the
+      # required skill).
+      - name: subagent_skills_loaded
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | .[0].id"
+            ) {
+              hub { db { agent {
+                sessions { id session_type metadata }
+              }}}
+            }
+          }
+
+      # Direct query of session_events for the sub-agent — show
+      # every skill_loaded event with its skill name.
+      - name: subagent_skill_loaded_events
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"skill_loaded\")) | map({session_id, skill: .metadata.skill}) | group_by(.session_id) | map({session_id: .[0].session_id, skills: [.[].skill]})"
+            ) {
+              hub { db { agent {
+                session_events { session_id event_type metadata }
+              }}}
+            }
+          }

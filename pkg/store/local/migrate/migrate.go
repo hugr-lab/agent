@@ -37,7 +37,7 @@ import (
 )
 
 // SchemaVersion is the version that Ensure targets.
-const SchemaVersion = "0.0.3"
+const SchemaVersion = "0.0.5"
 
 //go:embed schema.tmpl.sql
 var initSchemaTmpl string

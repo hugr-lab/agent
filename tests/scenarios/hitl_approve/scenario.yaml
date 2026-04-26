@@ -1,0 +1,126 @@
+name: hitl_approve
+session_id: scenario-hitl-approve-1
+# Coord delegates to the gated_summariser fixture role; sub-agent
+# calls memory_note; gate intercepts; coord surfaces envelope to
+# the simulated user; user approves; coord re-dispatches; second
+# pass should now bypass the gate (because we'll widen the policy
+# inline before the second dispatch). Single coord+sub-agent loop
+# is enough for foundation evidence — give it 90s.
+final_wait: 90s
+
+steps:
+  # Step 1 — coord delegates to gated_summariser. The role's
+  # frontmatter approval_rules.require_user lists memory_note, so
+  # the sub-agent's first (and only) tool call should fire the
+  # Gate. Verify:
+  #   - approvals row at status=pending with tool_name=memory_note
+  #   - approval_requested events on coord + sub-agent sessions
+  #   - sub-agent session.status = "waiting" (Gate.Manual side effect)
+  #   - mission's agent_result event reflects the "waiting for
+  #     approval" summary the role's instructions produce
+  - say: |
+      Use subagent_gated_noter to persist the fact:
+      "Phase 4 of design 008 closes the multi-level agent loop."
+
+      Do not paraphrase or summarise — pass the fact verbatim.
+      The specialist will call memory_note. Report whatever it
+      replies, without adding your own commentary.
+    queries:
+      - name: approvals_after_gate
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, tool_name, status, risk, mission: .mission_session_id, coord: .coord_session_id})"
+            ) {
+              hub { db { agent {
+                approvals {
+                  id tool_name status risk
+                  mission_session_id coord_session_id
+                }
+              }}}
+            }
+          }
+
+      - name: approval_requested_events
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"approval_requested\")) | map({session_id, kind: .metadata.hitl_kind, tool: .metadata.tool_name, risk: .metadata.risk, app_id: .metadata.approval_id})"
+            ) {
+              hub { db { agent {
+                session_events {
+                  session_id event_type tool_name metadata
+                }
+              }}}
+            }
+          }
+
+      - name: gated_subagent_session
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | map({id, status, role: .metadata.role, mission})"
+            ) {
+              hub { db { agent {
+                sessions {
+                  id session_type status metadata mission
+                }
+              }}}
+            }
+          }
+
+      - name: agent_result_summary
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"agent_result\")) | map({session_id, summary_excerpt: (.metadata.summary // \"\")[:200], status: .metadata.status})"
+            ) {
+              hub { db { agent {
+                session_events {
+                  session_id event_type metadata
+                }
+              }}}
+            }
+          }
+
+  # Step 2 — simulated user approves the pending approval. The
+  # coordinator's _coordinator/SKILL.md HITL routing rules tell the
+  # LLM to translate "approve <id>" into approval_respond(id,
+  # decision="approve"). Verify:
+  #   - approvals row flips to status=approved
+  #   - approval_responded event lands on coord
+  #   - the coord's reply does NOT redispatch the role here (we
+  #     don't widen the policy mid-scenario, so a second dispatch
+  #     would pause again — the LLM is told to stop after the
+  #     approval lands and let the user decide next steps).
+  - say: |
+      The pending approval id is in the agent_result summary above.
+      Approve it now: reply with `approve <id>` using that exact
+      id. Do not redispatch the gated_summariser; just confirm to
+      me that the approval went through.
+    queries:
+      - name: approvals_after_respond
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, status, decision: .response.decision, note: .response.note})"
+            ) {
+              hub { db { agent {
+                approvals { id status response }
+              }}}
+            }
+          }
+
+      - name: approval_responded_events
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"approval_responded\")) | map({session_id, decision: .metadata.decision, app_id: .metadata.approval_id, author})"
+            ) {
+              hub { db { agent {
+                session_events {
+                  session_id event_type author metadata
+                }
+              }}}
+            }
+          }

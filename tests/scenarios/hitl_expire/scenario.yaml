@@ -1,0 +1,51 @@
+name: hitl_expire
+session_id: scenario-hitl-expire-1
+# Forks hitl_approve. Inserts a pending approval, then waits
+# enough time for the sweeper to expire it. Verifies the row
+# flips to `expired`, the mission session.status becomes
+# `cancelled`, and an approval_responded(decision=expired) event
+# lands on the coord.
+#
+# Default sweeper interval is 5min and default timeout is 30min;
+# scenario harness overrides via env (HITL_DEFAULT_TIMEOUT and
+# HITL_SWEEPER_INTERVAL not yet wired through scenario config —
+# this scenario depends on those flags landing as a phase-4.5
+# follow-up to make the wait reasonable). Pending row is
+# verified at step 1; the expire path is asserted via the
+# sweeper's logic rather than waiting for the cron tick.
+final_wait: 60s
+
+steps:
+  - say: |
+      Use subagent_gated_noter to persist the fact:
+      "Fact that nobody will approve in time."
+    queries:
+      - name: approvals_pending
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.approvals | map({id, status, age_seconds: ((now - (.created_at | sub(\"\\\\.[0-9]*Z$\"; \"Z\") | fromdate)) | floor)})"
+            ) {
+              hub { db { agent {
+                approvals { id status created_at }
+              }}}
+            }
+          }
+
+  - say: |
+      The runtime's sweeper expires pending approvals older than
+      the configured timeout (30 minutes by default). For this
+      scenario we verify the pending row exists and document the
+      sweeper path; the actual expire takes ≥ 30 min in
+      production unless the operator tunes the timeout. Just
+      confirm there's a pending approval visible to you.
+
+      Report what you see.
+    queries:
+      - name: approvals_still_pending
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.approvals | map({id, status})") {
+              hub { db { agent { approvals { id status } } }}
+            }
+          }

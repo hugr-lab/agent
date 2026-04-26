@@ -1,0 +1,123 @@
+name: policy_widen
+session_id: scenario-policy-widen-1
+# Coord exercises the policy_* tool surface end-to-end:
+# 1. policy_set creates a manual_required entry → tool_policies row + policy_changed event
+# 2. policy_list reflects it
+# 3. policy_set widens to always_allowed → row updated, second policy_changed event
+# 4. policy_remove drops the row, third policy_changed event
+#
+# The runtime safety net (safe_policy_change inserting a meta-approval
+# when widening manual_required→always_allowed) sits in gate.go but
+# is dead code from the coord (the gate is wired only into sub-agent
+# llmagent BeforeToolCallback). Moving the widening detection into
+# the policy_set tool body to cover coord-side calls is a tracked
+# phase-4.5 follow-up; this scenario is observational evidence that
+# the basic policy CRUD + chain consultation works.
+final_wait: 60s
+
+steps:
+  - say: |
+      Use the policy tools to set up a tool policy. Do these calls
+      in order:
+
+      1. policy_set(tool_name="data-execute_mutation",
+                    policy="manual_required",
+                    scope="global",
+                    note="destructive — require user approval")
+      2. policy_list()
+      3. Tell me back the policy you just set, in one short sentence.
+    queries:
+      - name: tool_policies_after_set
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.tool_policies | map({tool_name, scope, policy, note, created_by})"
+            ) {
+              hub { db { agent {
+                tool_policies {
+                  tool_name scope policy note created_by
+                }
+              }}}
+            }
+          }
+
+      - name: policy_changed_events
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"policy_changed\")) | map({session_id, tool: .metadata.tool_name, scope: .metadata.scope, old: .metadata.old_policy, new: .metadata.new_policy})"
+            ) {
+              hub { db { agent {
+                session_events {
+                  session_id event_type metadata
+                }
+              }}}
+            }
+          }
+
+  - say: |
+      Now widen that policy: change `data-execute_mutation` from
+      manual_required to always_allowed. Use:
+
+          policy_set(tool_name="data-execute_mutation",
+                     policy="always_allowed",
+                     scope="global",
+                     note="user trusts the cleanup mission")
+
+      Then call policy_list() again to confirm the change.
+    queries:
+      - name: tool_policies_after_widen
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.tool_policies | map({tool_name, scope, policy, note})"
+            ) {
+              hub { db { agent {
+                tool_policies {
+                  tool_name scope policy note
+                }
+              }}}
+            }
+          }
+
+      - name: policy_changed_events_after_widen
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"policy_changed\")) | map({old: .metadata.old_policy, new: .metadata.new_policy})"
+            ) {
+              hub { db { agent {
+                session_events { event_type metadata }
+              }}}
+            }
+          }
+
+  - say: |
+      Finally, remove the policy entirely:
+
+          policy_remove(tool_name="data-execute_mutation", scope="global")
+
+      Then call policy_list() one more time and confirm the row is
+      gone.
+    queries:
+      - name: tool_policies_after_remove
+        graphql: |
+          query {
+            jq(query: ".hub.db.agent.tool_policies | length") {
+              hub { db { agent {
+                tool_policies { tool_name }
+              }}}
+            }
+          }
+
+      - name: policy_changed_events_full
+        graphql: |
+          query {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"policy_changed\")) | sort_by(.seq) | map({old: .metadata.old_policy, new: .metadata.new_policy})"
+            ) {
+              hub { db { agent {
+                session_events { event_type seq metadata }
+              }}}
+            }
+          }

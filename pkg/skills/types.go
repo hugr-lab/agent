@@ -5,6 +5,8 @@
 // skill_load.
 package skills
 
+import "fmt"
+
 // SkillMeta is a compact catalog entry for prompt injection (~50 tokens per skill).
 //
 // MemoryCategories lists the fully-qualified `<skill>.<cat>` names the
@@ -140,6 +142,113 @@ type SubAgentSpec struct {
 	AsyncHint string `yaml:"async_hint" json:"async_hint,omitempty" mapstructure:"async_hint"`
 	CanSpawn  bool   `yaml:"can_spawn"  json:"can_spawn,omitempty"  mapstructure:"can_spawn"`
 	MaxDepth  int    `yaml:"max_depth"  json:"max_depth,omitempty"  mapstructure:"max_depth"`
+
+	// Phase-4 additions (spec 009). Optional declarative gate rules
+	// consulted by *approvals.Gate before each sub-agent tool call.
+	// Sits in the resolution chain between the persistent
+	// tool_policies overrides and the hardcoded default. nil ⇒ chain
+	// falls through to the default.
+	ApprovalRules *SubAgentApprovalRules `yaml:"approval_rules" json:"approval_rules,omitempty" mapstructure:"approval_rules"`
+
+	// RequiredSkills (spec 009 / US5) is the union of additional
+	// skills loaded into the child session at dispatch time on top
+	// of the parent skill. Allows roles to compose tools across
+	// multiple skills (e.g. cross_domain_analyst needs both
+	// hugr-data and python-sandbox). nil ⇒ only the parent skill
+	// is loaded. Missing skill names fail dispatch fast.
+	RequiredSkills []string `yaml:"required_skills" json:"required_skills,omitempty" mapstructure:"required_skills"`
+
+	// ParallelValidation (spec 009 / US6) enables the executor to
+	// spawn TWO sibling missions on dispatch and ask the
+	// coordinator to reconcile their answers. nil ⇒ single-spawn
+	// behaviour preserved.
+	ParallelValidation *ParallelValidationSpec `yaml:"parallel_validation" json:"parallel_validation,omitempty" mapstructure:"parallel_validation"`
+}
+
+// ParallelValidationSpec configures a role for the parallel-
+// validation pattern (spec 009 phase 4 / US6). When `enabled` is
+// true, every dispatch of this role spawns two sibling sub-agent
+// missions with the same parent_session_id and distinguishable
+// mission strings. Both siblings run concurrently; when both reach
+// terminal status, the coordinator's next turn sees both
+// agent_result events and reconciles them via the merge_strategy.
+//
+// Phase 4 ships only `agent_choice` — the coordinator picks a
+// winner based on agent_result metadata. `user_choice` and `merge`
+// are documented (parsed by the YAML decoder) but the executor
+// rejects them at dispatch time with a clear error.
+type ParallelValidationSpec struct {
+	// Enabled toggles the parallel spawn behaviour. false / nil
+	// spec ⇒ single-spawn (default phase-1/2/3 behaviour).
+	Enabled bool `yaml:"enabled" json:"enabled" mapstructure:"enabled"`
+
+	// When is a free-form rationale describing under what
+	// circumstances the role should run with parallel validation.
+	// Currently informational (used only in role descriptions /
+	// audit logs). Phase-4.5 may expand this to a runtime gate.
+	When string `yaml:"when" json:"when,omitempty" mapstructure:"when"`
+
+	// MergeStrategy is how the coordinator reconciles the two
+	// sibling outputs. Phase 4 supports `agent_choice` only.
+	// Default empty string is treated as `agent_choice`.
+	MergeStrategy string `yaml:"merge_strategy" json:"merge_strategy,omitempty" mapstructure:"merge_strategy"`
+}
+
+// Recognised merge strategies (only the first is implemented in
+// phase 4; the others parse but error at dispatch time).
+const (
+	MergeStrategyAgentChoice = "agent_choice"
+	MergeStrategyUserChoice  = "user_choice"
+	MergeStrategyMerge       = "merge"
+)
+
+// Validate reports whether the spec is dispatchable. Returns nil
+// when Enabled is false (parallel validation off). Otherwise
+// requires merge_strategy to be agent_choice — other strategies
+// are recognised but fail dispatch in phase 4.
+func (s *ParallelValidationSpec) Validate() error {
+	if s == nil || !s.Enabled {
+		return nil
+	}
+	strategy := s.MergeStrategy
+	if strategy == "" {
+		strategy = MergeStrategyAgentChoice
+	}
+	switch strategy {
+	case MergeStrategyAgentChoice:
+		return nil
+	case MergeStrategyUserChoice, MergeStrategyMerge:
+		return fmt.Errorf("parallel_validation merge_strategy %q is recognised but not supported in phase 4 — use %q", strategy, MergeStrategyAgentChoice)
+	default:
+		return fmt.Errorf("parallel_validation merge_strategy %q is unknown — use %q", strategy, MergeStrategyAgentChoice)
+	}
+}
+
+// SubAgentApprovalRules is the declarative HITL gate ruleset
+// declared in a role's frontmatter. Mirrors
+// approvals.FrontmatterApprovalRules; lives here so pkg/skills does
+// not have to import pkg/approvals (one-way dependency direction:
+// pkg/agent + pkg/runtime + pkg/approvals consume; pkg/skills declares).
+//
+// Each list accepts exact tool names (`data-execute_mutation`) or
+// prefix globs ending in `*` (`data-*`).
+type SubAgentApprovalRules struct {
+	// AutoApprove tools bypass the gate entirely (sets policy to
+	// always_allowed via the frontmatter step of the resolution chain).
+	AutoApprove []string `yaml:"auto_approve" json:"auto_approve,omitempty" mapstructure:"auto_approve"`
+
+	// RequireUser tools always pause the mission and surface an
+	// approval envelope.
+	RequireUser []string `yaml:"require_user" json:"require_user,omitempty" mapstructure:"require_user"`
+
+	// ParentCanApprove (declared but currently treated as RequireUser
+	// in phase 4 — parent grant inheritance lands in a follow-up).
+	ParentCanApprove []string `yaml:"parent_can_approve" json:"parent_can_approve,omitempty" mapstructure:"parent_can_approve"`
+
+	// Risk overrides per tool name. Default risk is `medium`; entries
+	// here let the role mark specific tools as `high` or `low` for
+	// envelope rendering.
+	Risk map[string]string `yaml:"risk" json:"risk,omitempty" mapstructure:"risk"`
 }
 
 // Valid values for SubAgentSpec.AsyncHint. The parser treats empty
