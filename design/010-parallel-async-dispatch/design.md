@@ -610,14 +610,21 @@ level metadata mutation. That's a future design — out of scope here.
    Read last 10 events per session (single SQL query per row, can
    be parallelised). Apply Case A-F below. Decision per session is
    one of:
-     - {markCompleted, queueChildCompletedForParent}  (Case A)
-     - {ignore — already resolved}                     (Case B)
-     - {appendSyntheticToolError, queueResume}         (Case C)
-     - {addToRespawnList}                              (Case D)
-     - {appendSyntheticChildFailed}                    (Case E)
-     - {markAbandoned, queueChildFailedForParent}      (Case F — stale)
+     - {AppendEvent(session_terminal{status: "completed"}),
+        queueChildCompletedForParent}                   (Case A)
+     - {ignore — already resolved}                      (Case B)
+     - {AppendEvent(tool_result{error: "interrupted"}),
+        queueResume}                                    (Case C)
+     - {addToRespawnList}                               (Case D)
+     - {AppendEvent(tool_result{error: "child failed
+        before start"})}                                (Case E)
+     - {AppendEvent(session_terminal{status:"abandoned",
+        reason:"restart-stale"}),
+        queueChildFailedForParent}                      (Case F)
 
-   Classification is metadata mutation only — no inbox sends yet.
+   All Case actions are existing Session.AppendEvent calls (the
+   single append-only path on the manager) — no new writer surface
+   is introduced for terminal transitions or synthetic tool results.
    "Queue" actions stash messages in a per-session pending-Sends
    slice; step 4 delivers them after that session's actor starts.
 
@@ -653,14 +660,17 @@ level metadata mutation. That's a future design — out of scope here.
 Read the last events of each active session. Pick the first matching
 case top-down:
 
+All actions below use the existing `(*Session).AppendEvent` —
+no new writer interface.
+
 | Case | Last event pattern | Action |
 |---|---|---|
-| A | Final `llm_response` (no pending tool_calls in same content) | Session is logically complete. **INSERT** `session_terminal{status: "completed"}` event. If parent exists, queue `ChildCompleted` for parent's inbox. |
+| A | Final `llm_response` (no pending tool_calls in same content) | Session is logically complete. AppendEvent `session_terminal{status: "completed"}`. If parent exists, queue `ChildCompleted` for parent's inbox. |
 | B | `tool_result` matching every prior `tool_call` (no pending calls in last assistant turn) | Session is paused on next user message. Idle. No spawn — will run on next user_message append. |
-| C | `tool_call` (sync, non-long-running) without a `tool_result` | In-flight tool died mid-execution. **INSERT** synthetic `tool_result{metadata.error="interrupted by restart"}`. Spawn runner; LLM decides retry/give-up per its skill instructions. |
+| C | `tool_call` (sync, non-long-running) without a `tool_result` | In-flight tool died mid-execution. AppendEvent synthetic `tool_result{metadata.error="interrupted by restart"}`. Spawn runner; LLM decides retry/give-up per its skill instructions. |
 | D | `tool_call` long_running (subagent_dispatch) without `tool_result`, AND child session exists | Child must continue. Add child to respawnList. Parent's pendingCalls remains; parent's actor will eventually consume the ChildCompleted from the resumed child. |
-| E | `tool_call` long_running without `tool_result` AND child session missing/never created | Child failed before start. **INSERT** synthetic `tool_result{metadata.error="child failed before start", metadata.call_id=X}`. |
-| F | Any case where last event timestamp `< now() - 24h` | Stale. **INSERT** `session_terminal{status: "abandoned", reason: "restart-stale"}` event. Cascade abandons via the actor model (Case F children get the same INSERT once their own classification runs). |
+| E | `tool_call` long_running without `tool_result` AND child session missing/never created | Child failed before start. AppendEvent synthetic `tool_result{metadata.error="child failed before start", metadata.call_id=X}`. |
+| F | Any case where last event timestamp `< now() - 24h` | Stale. AppendEvent `session_terminal{status: "abandoned", reason: "restart-stale"}`. Cascade abandons via the actor model (Case F children get the same AppendEvent once their own classification runs). |
 
 #### Edge cases
 

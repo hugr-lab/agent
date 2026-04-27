@@ -243,29 +243,20 @@ type EventSummary struct {
 }
 
 // ---------------------------------------------------------------------
-// Terminal event helper
+// Terminal events use the existing AppendEvent path
 // ---------------------------------------------------------------------
-
-// TerminalEventWriter is the append-only path that supersedes UPDATE
-// on sessions.status. Each call inserts a fresh `session_terminal`
-// event in session_events with status + reason in metadata. Status
-// reads derive from "latest session_terminal event per session".
 //
-// Writes through the existing single-writer hub channel — no
-// concurrency concerns beyond the manager's writeMu.
-type TerminalEventWriter interface {
-	// MarkTerminal inserts a session_terminal event. Returns nil on
-	// success. Idempotent: callers MAY post the same terminal event
-	// multiple times; only the first is meaningful, subsequent reads
-	// still return the same status.
-	//
-	// status ∈ {"completed", "abandoned", "failed", "cancelled"}.
-	MarkTerminal(
-		ctx context.Context,
-		sessionID, status, reason string,
-	) error
-}
-
+// No new writer interface needed for terminal-status transitions —
+// (*sessions.Session).AppendEvent(ctx, sessstore.Event, summary)
+// already exists and is the canonical append-only path. Callers
+// build a sessstore.Event{
+//     EventType: "session_terminal",
+//     Metadata:  {"status": "completed"|"abandoned"|"failed"|"cancelled",
+//                 "reason": "<free text>"},
+// } and AppendEvent it. Status queries derive from "latest
+// session_terminal event per session" — read via the existing
+// session_events GraphQL surface.
+//
 // Single-instance enforcement is intentionally NOT modelled here:
 // it's the supervisor's responsibility (systemd / k8s / launchd),
 // not the agent's. See design.md §"Single-instance — supervisor,
