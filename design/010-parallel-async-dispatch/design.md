@@ -360,6 +360,16 @@ the actor loop has correct state with zero special-case code.
    uniform between local DuckDB and remote Postgres deployments
    and makes restart/replay correctness automatic.
 
+8. **Append-only writes to hub.db**: design 010 introduces NO new
+   `UPDATE` statements. State transitions (terminal status,
+   abandonment cascade, restart classification side-effects) are
+   expressed as fresh `session_events` rows. Single-writer DuckDB
+   serialises INSERTs via the existing writeMu; never contend on
+   the same row because rows are never re-touched. Existing UPDATE
+   patterns on the `sessions` table (markChild etc.) predate this
+   design and are tagged for follow-up migration; new mechanisms
+   here MUST NOT introduce more.
+
 ## Proposed Design
 
 ### Architecture
@@ -455,21 +465,26 @@ In summary:
 
 Migration `0.0.6` (additive only — no dropped columns / tables):
 
-```graphql
-# session_events.metadata is already a free JSON map; we standardise
-# two keys for long-running flow:
-#
-# tool_call event:
-#   metadata.call_id      string  — ADK function_call ID
-#   metadata.long_running bool    — true when tool.IsLongRunning()
-#
-# tool_result event:
-#   metadata.call_id      string  — matches the tool_call's call_id
-#
-# sessions:
-#   metadata.last_runner_at  RFC3339 string  — for stale detection
-#   metadata.locked_by       int  (pid)      — process advisory lock
-#   metadata.locked_at       RFC3339 string  — lock acquired ts
+```text
+session_events.metadata is already a free JSON map; we standardise
+three keys around the long-running flow + a new event type for
+terminal-state transitions:
+
+tool_call event:
+  metadata.call_id      string  — ADK function_call ID
+  metadata.long_running bool    — true when tool.IsLongRunning()
+
+tool_result event:
+  metadata.call_id      string  — matches the tool_call's call_id
+
+session_terminal event (NEW event_type):
+  metadata.status       string  — "completed" | "abandoned" | "failed" | "cancelled"
+  metadata.reason       string  — free text (e.g. "restart-stale", "parent abandoned")
+
+  This event is the append-only record of a session's terminal
+  transition. It supersedes prior practice of UPDATEing
+  sessions.status. Status queries become "latest session_terminal
+  event per session" — derivable from session_events alone.
 ```
 
 PostgreSQL-only indexes (gated by `{{ if isPostgres }}` per project
@@ -480,68 +495,157 @@ CREATE INDEX idx_events_call_id ON session_events
   USING btree ((metadata->>'call_id'))
   WHERE event_type IN ('tool_call', 'tool_result');
 
-CREATE INDEX idx_sessions_locked_by ON sessions
-  USING btree ((metadata->>'locked_by'))
-  WHERE status = 'active';
+CREATE INDEX idx_events_terminal ON session_events
+  (session_id, seq DESC)
+  WHERE event_type = 'session_terminal';
 ```
+
+#### Append-only — no UPDATE on hub.db
+
+The design adds **only INSERT** writes to hub.db. New mechanisms
+introduced by 010 (terminal transitions, cascade abandonment, restart
+classification side-effects) are expressed as fresh `session_events`
+rows, not as `sessions.status` mutations. Pre-existing UPDATE
+patterns on the `sessions` row (`Manager.markChild`,
+`hub.UpdateSession`) predate this design — they are out of scope but
+the migration target is clear: replace each UPDATE site with an
+INSERT of a `session_terminal` event and read status via
+"latest-status-event-per-session" view (or a materialised view if
+read pressure demands).
+
+This invariant unlocks several properties:
+
+- **Trivial replay/audit**: any state mutation is visible by
+  reading the events stream chronologically.
+- **No write conflicts** between concurrent actor goroutines —
+  INSERTs serialise via DuckDB's writeMu (already in place); they
+  never contend on the same row.
+- **Restart-resilient**: a half-completed UPDATE has no analogue
+  in INSERT-only; either the row exists (and is visible) or it
+  doesn't.
+- **Forward path to event-sourcing migrations / projections**: the
+  `sessions` table itself can become a derived projection later
+  without needing a new write path.
 
 #### No new tables
 
 The actor model adds no persistent tables. `pendingCalls` is derived
-by the SQL view above. Inboxes are in-memory only — restart drops
-in-flight messages, but the underlying state (pendingCalls,
-session_events) is recomputable.
+by the SQL view above. `status` becomes derived from the latest
+`session_terminal` event. Inboxes are in-memory only — restart drops
+in-flight messages, but the underlying state (pendingCalls, session
+status) is recomputable from session_events alone.
 
 ### Restart Semantics
 
-Booted process must restore active sessions to a working state. The
-flow is bottom-up over the depth tree, and the actor inbox cascade
-naturally rewires parent-child relationships as goroutines come up.
+Booted process must restore active sessions to a working state.
+**Instance uniqueness is the supervisor's responsibility, not the
+agent's** (see "Single-instance — supervisor, not DB lock" below).
+The agent only worries about correctly bringing the actor topology
+back online.
+
+The flow is **top-down** over the depth tree:
+1. Walk parent → children, **wire all inboxes and parent.children
+   maps before any goroutine starts**. Channel topology exists in
+   memory before any send happens.
+2. Classify each session by its last persisted event (no goroutines
+   yet — pure DB read + decision).
+3. Spawn actor goroutines top-down by depth. Parent's actor starts
+   consuming its inbox before any child can post `ChildCompleted` to
+   it; back-pressure on the inbox channel is meaningful from turn 0.
+
+Bottom-up spawn would also work mechanically (channels are buffered),
+but parent-first spawn matches the runtime semantics: a parent's
+actor exists and is listening before its children's goroutines try
+to send. No race window where a child posts to a stub-but-not-running
+inbox.
+
+#### Single-instance — supervisor, not DB lock
+
+A previous draft proposed a DB advisory lock (`sessions.metadata.locked_by`)
+as a singleton check. **That was wrong** for several reasons:
+
+- Race window between the "are we alone?" SQL check and the
+  subsequent state mutation; making it atomic requires DB-level
+  serialisable isolation that DuckDB doesn't natively offer.
+- PID liveness check can't tell the difference between "stale
+  crashed process" and "live process on a different host" (PID
+  reuse, container PID-1 always being 1, etc.).
+- Adds DB-write traffic on every boot for a property the
+  supervisor already enforces.
+- Fights legitimate rolling restarts where supervisor briefly
+  overlaps two instances during health-check cutover.
+
+The correct boundary is **process supervision** (systemd unit with
+`Type=notify`, k8s Deployment with `replicas: 1` or StatefulSet,
+launchd `KeepAlive`). The supervisor guarantees at-most-one running
+instance against the same hub.db; the agent assumes it is alone and
+acts accordingly.
+
+If a clustered agent fleet ever becomes a goal (multiple agents
+sharing a Postgres hub), the right primitive will be Postgres
+advisory locks (`pg_try_advisory_lock`) at boot, not application-
+level metadata mutation. That's a future design — out of scope here.
 
 #### Boot sequence
 
-```
-1. Acquire process lock:
-   UPDATE sessions
-     SET metadata.locked_by=$pid, metadata.locked_at=now()
-   WHERE locked_by IS NULL
-      OR locked_at < now() - INTERVAL '5 minutes';
-   If 0 rows updated AND there exist locked rows by another live
-   pid → abort startup with "another agent instance running".
-
-2. Restore session stubs (existing Manager.RestoreOpen):
+```text
+1. Restore session stubs (existing Manager.RestoreOpen, extended):
    For every row in sessions WHERE status='active':
      - Build Session struct (depth, parent, mission, metadata).
-     - Create inbox.
+     - Allocate inbox channel (buffered).
      - Register in m.sessions map.
-   For every parent-child relation (parent_session_id != ''):
+   No goroutines yet.
+
+2. Wire parent → children topology, walking top-down by depth:
+   For every active session with parent_session_id != '':
+     - Look up parent stub (must exist — depth ordering guarantees
+       it was built in this same step).
      - parent.children[child.callID] = child stub
-     (callID derived from the parent's tool_call event; see step 4)
+       (callID derived from the parent's tool_call event for this
+       child — see Case D below).
+   After step 2, every actor inbox can receive Sends from any other
+   actor without panicking on a missing reference.
 
-3. Classify each session by last meaningful event:
-   Read last 10 events of each restored session. Apply Case A-F
-   below. Decision per session is one of:
-     - {markCompleted, emitChildCompletedToParent}  (Case A)
-     - {ignore — already resolved}                   (Case B)
-     - {syntheticToolError, runnerResume}            (Case C)
-     - {addToRespawnList}                            (Case D)
-     - {syntheticChildFailed}                        (Case E)
-     - {markAbandoned, emitChildFailedToParent}      (Case F — timeout)
+3. Classify each active session by last meaningful event:
+   Read last 10 events per session (single SQL query per row, can
+   be parallelised). Apply Case A-F below. Decision per session is
+   one of:
+     - {markCompleted, queueChildCompletedForParent}  (Case A)
+     - {ignore — already resolved}                     (Case B)
+     - {appendSyntheticToolError, queueResume}         (Case C)
+     - {addToRespawnList}                              (Case D)
+     - {appendSyntheticChildFailed}                    (Case E)
+     - {markAbandoned, queueChildFailedForParent}      (Case F — stale)
 
-4. Bottom-up spawn goroutines:
-   Sort respawnList descending by depth. For each session:
-     - Spawn actor goroutine (it will run runner.Run loop).
-     - Actor reads its inbox, processes any inherited messages
-       (in particular ChildCompleted from step 3's emissions).
+   Classification is metadata mutation only — no inbox sends yet.
+   "Queue" actions stash messages in a per-session pending-Sends
+   slice; step 4 delivers them after that session's actor starts.
 
-5. After all goroutines started, the inbox cascade settles:
-   - Leaves complete (or are already terminal) → emit Completed
-     up to their parents.
-   - Parents accumulate Completed messages, AppendFunctionResponse
-     to their events, decrement their derived pendingCalls.
-   - When parent's pendingCalls drains, parent's actor calls
-     runner.Run again, continues mid-turn.
-   - Recurses up to root.
+4. Spawn actor goroutines top-down by depth (root first):
+   Sort restored sessions ASCENDING by depth. For each:
+     - Start actor goroutine.
+     - Actor enters its main loop: select { inbox, ctx.Done }.
+     - Deliver any queued messages from step 3 to this actor's inbox
+       (now safe — actor is consuming).
+     - For sessions in respawnList (Case D): the actor invokes
+       runner.Run on its session as part of its loop body. ADK
+       reads existing events; if the last event is a tool_call
+       awaiting tool_result the runner waits silently (it has no
+       new content to feed the model). The actor is alive,
+       processing inbox; when its child eventually emits
+       ChildCompleted, the function_response gets appended and a
+       Resume sentinel re-fires runner.Run.
+
+5. Inbox cascade settles asynchronously:
+   - Leaves that completed (Case A) deliver ChildCompleted upward.
+   - Parents accumulate ChildCompleted, AppendFunctionResponse,
+     pendingCalls drains, Resume fires runner.Run on the parent.
+   - Mid-turn parents continue from where they left off, optionally
+     issuing more tool_calls or producing a final llm_response.
+   - Cascade recurses up to root with no special-casing.
+
+   No "wait for cascade" gate — startup completes when step 4
+   returns; cascade happens in the background like normal runtime.
 ```
 
 #### Case classification
@@ -551,12 +655,12 @@ case top-down:
 
 | Case | Last event pattern | Action |
 |---|---|---|
-| A | Final `llm_response` (no pending tool_calls in same content) | Session is logically complete. Mark `status=completed`. If parent exists, emit `ChildCompleted` to parent's inbox. |
+| A | Final `llm_response` (no pending tool_calls in same content) | Session is logically complete. **INSERT** `session_terminal{status: "completed"}` event. If parent exists, queue `ChildCompleted` for parent's inbox. |
 | B | `tool_result` matching every prior `tool_call` (no pending calls in last assistant turn) | Session is paused on next user message. Idle. No spawn — will run on next user_message append. |
-| C | `tool_call` (sync, non-long-running) without a `tool_result` | In-flight tool died mid-execution. Append a synthetic `tool_result` with `metadata.error="interrupted by restart"`. Spawn runner; LLM decides retry/give-up per its skill instructions. |
+| C | `tool_call` (sync, non-long-running) without a `tool_result` | In-flight tool died mid-execution. **INSERT** synthetic `tool_result{metadata.error="interrupted by restart"}`. Spawn runner; LLM decides retry/give-up per its skill instructions. |
 | D | `tool_call` long_running (subagent_dispatch) without `tool_result`, AND child session exists | Child must continue. Add child to respawnList. Parent's pendingCalls remains; parent's actor will eventually consume the ChildCompleted from the resumed child. |
-| E | `tool_call` long_running without `tool_result` AND child session missing/never created | Child failed before start. Append synthetic `tool_result` with `metadata.error="child failed before start"` and `metadata.call_id=X`. |
-| F | Any case where `last_event_at < now() - 24h` | Stale. Mark `status=abandoned` with reason `restart-stale`. Cascade to children. |
+| E | `tool_call` long_running without `tool_result` AND child session missing/never created | Child failed before start. **INSERT** synthetic `tool_result{metadata.error="child failed before start", metadata.call_id=X}`. |
+| F | Any case where last event timestamp `< now() - 24h` | Stale. **INSERT** `session_terminal{status: "abandoned", reason: "restart-stale"}` event. Cascade abandons via the actor model (Case F children get the same INSERT once their own classification runs). |
 
 #### Edge cases
 
@@ -574,25 +678,30 @@ the function_response (it's persisted). Case B applies (no pending
 calls — they all resolved). Parent's runner runs and continues.
 Self-healing.
 
-**Two concurrent agent instances.** Step 1's advisory lock prevents
-this. The lock is timestamp-based (5min stale window) so a hard-
-crashed instance's lock is taken over by the next start.
+**Two concurrent agent instances.** Out of scope for the agent
+itself — the supervisor (systemd / k8s) enforces single-instance.
+See "Single-instance — supervisor, not DB lock" above.
 
-**Orphan children (parent abandoned).** Periodic sweep:
+**Orphan children (parent abandoned).** Cascade is event-driven, not
+sweep-driven. When a parent's actor inserts its `session_terminal`
+event, it walks `parent.children` and posts `CancelChild{Reason:
+"parent abandoned"}` to each child's inbox. Each child's actor on
+receiving CancelChild:
 
-```sql
-UPDATE sessions SET status='abandoned',
-  metadata.abandon_reason='orphan'
-WHERE status='active'
-  AND parent_session_id IN (
-    SELECT id FROM sessions
-    WHERE status IN ('abandoned', 'failed')
-  );
-```
+1. Cancels its runner ctx.
+2. Appends its own `session_terminal{status: "cancelled", reason:
+   "parent abandoned"}` event to its session_events.
+3. Recursively posts CancelChild to its own children.
+4. Exits the actor goroutine.
 
-Run on a 5min ticker. Cascade abandons happen via the actor model
-in normal operation; this is the cleanup for cases the actor flow
-missed (e.g. parent's actor crashed before emitting cascade).
+If a parent's actor crashed before posting cascade messages (process
+died mid-cleanup), the orphans are caught at next restart by the
+top-down classification: when classifying child whose parent's last
+event is `session_terminal{abandoned/failed}`, we treat it as Case F
+(stale by inheritance) and INSERT the same terminal event for the
+child. No periodic UPDATE sweep — orphan reaping happens on the
+next restart, which is acceptable because orphans aren't doing
+useful work anyway.
 
 **Worker pool exhaustion.** If 1000 sessions need respawning at
 boot, don't launch 1000 goroutines all racing for LLM clients. Use
@@ -738,14 +847,19 @@ Behaviour the user sees:
   restart; cascade to dependent children.
 
 Behaviour the operator sees:
-- A new advisory lock on `sessions.metadata.locked_by` prevents
-  double-instance startup.
+- Single-instance enforcement is the supervisor's responsibility
+  (systemd unit / k8s replicas:1). The agent does NOT try to
+  detect peers via DB locks.
 - Configurable worker pool (`sessions.worker_pool_size`, default
   `NumCPU*2` capped 32) bounds concurrent runner goroutines.
-- New schema-additive metadata keys: tool_call.metadata.call_id,
-  tool_call.metadata.long_running, tool_result.metadata.call_id,
-  sessions.metadata.{last_runner_at, locked_by, locked_at}.
-- One Postgres-only index per spec on session_events.metadata.call_id.
+- New schema-additive event metadata: tool_call.metadata.call_id,
+  tool_call.metadata.long_running, tool_result.metadata.call_id.
+- New event type `session_terminal` carrying status + reason in
+  metadata; replaces all UPDATEs on `sessions.status` for
+  mechanisms introduced by this design.
+- Two Postgres-only indexes per spec: one on
+  session_events.metadata.call_id, one on session_events ordered
+  by (session_id, seq DESC) WHERE event_type='session_terminal'.
 
 Out of scope (later phases):
 - HITL escalation chain (Phase 5 — uses same primitive).

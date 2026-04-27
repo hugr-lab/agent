@@ -243,18 +243,30 @@ type EventSummary struct {
 }
 
 // ---------------------------------------------------------------------
-// Process advisory lock
+// Terminal event helper
 // ---------------------------------------------------------------------
 
-// ProcessLock acquires the single-instance lock at boot. Implemented
-// as an UPDATE on sessions.metadata.locked_by; stale locks (>5min)
-// are taken over.
-type ProcessLock interface {
-	// Acquire returns nil if this process is now the active agent.
-	// Returns ErrAnotherInstance if another non-stale instance holds
-	// the lock.
-	Acquire(ctx context.Context, pid int) error
-
-	// Release clears the lock. Called from main on graceful shutdown.
-	Release(ctx context.Context, pid int) error
+// TerminalEventWriter is the append-only path that supersedes UPDATE
+// on sessions.status. Each call inserts a fresh `session_terminal`
+// event in session_events with status + reason in metadata. Status
+// reads derive from "latest session_terminal event per session".
+//
+// Writes through the existing single-writer hub channel — no
+// concurrency concerns beyond the manager's writeMu.
+type TerminalEventWriter interface {
+	// MarkTerminal inserts a session_terminal event. Returns nil on
+	// success. Idempotent: callers MAY post the same terminal event
+	// multiple times; only the first is meaningful, subsequent reads
+	// still return the same status.
+	//
+	// status ∈ {"completed", "abandoned", "failed", "cancelled"}.
+	MarkTerminal(
+		ctx context.Context,
+		sessionID, status, reason string,
+	) error
 }
+
+// Single-instance enforcement is intentionally NOT modelled here:
+// it's the supervisor's responsibility (systemd / k8s / launchd),
+// not the agent's. See design.md §"Single-instance — supervisor,
+// not DB lock".
