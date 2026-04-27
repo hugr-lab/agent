@@ -399,10 +399,8 @@ func TestSkillLoader_Coordinator_v040_HasAdditiveSections(t *testing.T) {
 }
 
 // TestSkillLoader_HugrAnalyst asserts that the demo `hugr-analyst`
-// skill loads, registers its sole role, and declares the two
-// required_skills (hugr-data, python-sandbox) — both of which must
-// also resolve to skills present on disk so RequiredSkills wiring at
-// dispatch time succeeds without surprises. T109.
+// skill loads, registers its sole role, and declares hugr-data as a
+// required skill that resolves on disk. T109.
 func TestSkillLoader_HugrAnalyst(t *testing.T) {
 	mgr, err := NewFileManager("../../skills")
 	require.NoError(t, err)
@@ -415,11 +413,9 @@ func TestSkillLoader_HugrAnalyst(t *testing.T) {
 
 	role := sk.SubAgents["cross_domain_analyst"]
 	require.ElementsMatch(t,
-		[]string{"hugr-data", "python-sandbox"}, role.RequiredSkills,
-		"cross_domain_analyst declares the canonical phase-4 composition pair")
+		[]string{"hugr-data"}, role.RequiredSkills,
+		"cross_domain_analyst wraps hugr-data via required_skills")
 
-	// Each required skill must exist on disk and load — that's what
-	// "resolve to existing on-disk skills" buys us against typos.
 	for _, name := range role.RequiredSkills {
 		_, err := mgr.Load(context.Background(), name)
 		require.NoError(t, err, "required skill %q must exist on disk", name)

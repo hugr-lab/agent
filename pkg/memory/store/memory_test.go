@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
-	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/internal/testenv"
 )
 
@@ -26,14 +25,7 @@ func newClient(t *testing.T, agentID, shortID string) *memstore.Client {
 	t.Helper()
 	service, _ := testenv.Engine(t)
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
-	reg, err := agentstore.New(service, agentstore.Options{
-		AgentID: agentID, AgentShort: shortID, Logger: logger,
-	})
-	require.NoError(t, err)
-	require.NoError(t, reg.RegisterAgent(context.Background(), agentstore.Agent{
-		ID: agentID, AgentTypeID: "hugr-data", ShortID: shortID,
-		Name: "test-agent", Status: "active",
-	}))
+	testenv.RegisterAgent(t, service, agentID, shortID, "test-agent")
 	c, err := memstore.New(service, memstore.Options{
 		AgentID: agentID, AgentShort: shortID, Logger: logger,
 	})

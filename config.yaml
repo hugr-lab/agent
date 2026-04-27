@@ -6,7 +6,7 @@ agent:
   short_id: ag01
   name: hugr-data-agent
   type: hugr-data
-  constitution: constitution/base.md
+  constitution: constitution/agent.md
 
 # ── Hugr connection (URL comes from .env:HUGR_URL) ──────────
 # auth: references an entry in `auth:` — used for the LLM client,

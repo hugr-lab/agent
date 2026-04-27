@@ -7,26 +7,25 @@
 categories:
   cross_domain_findings:
     description: >
-      A durable insight derived from combining Hugr-sourced data with
-      Python-side computation — a correlation, distribution shape,
-      cluster, model coefficient, or anomaly worth remembering across
-      sessions.
+      A durable insight derived from combining Hugr-sourced data
+      across modules — a correlation, cohort comparison, trend
+      callback, or anomaly worth remembering across sessions.
     volatility: slow
     initial_score: 0.7
     tags_hint: "metric_or_dataset"
 
-  chart_recipe:
+  cohort_definition:
     description: >
-      A reusable computation recipe (Python snippet pattern) the
-      analyst converged on for a particular chart or model — useful
-      when the same question shape recurs.
+      A reusable cohort definition the analyst converged on — the
+      filter / aggregation shape that defines "EU enterprise tier"
+      or "post-migration users". Useful when the same scoping recurs.
     volatility: stable
     initial_score: 0.6
-    tags_hint: "chart_kind"
+    tags_hint: "cohort_name"
 
 review:
   enabled: true
-  min_tool_calls: 2  # at least one Hugr fetch + one Python compute
+  min_tool_calls: 2  # at least one schema lookup + one data fetch
   # Pull approval_responded back into our review window — when the
   # user tweaks a query mid-flight via approval_respond(decision=
   # "modify"), the corrected args are evidence of preference and
@@ -34,7 +33,7 @@ review:
   include_event_types:
     - approval_responded
   prompt: |
-    Extract durable cross-domain findings (correlations, model fits,
-    distribution surprises) and chart recipes (the Python pattern that
-    produced an effective visualisation). Skip the data-fetch
-    transcript chrome — focus on the analytical conclusion.
+    Extract durable cross-domain findings (cohort comparisons, trend
+    interpretations, anomaly callouts) and cohort definitions worth
+    reusing. Skip the data-fetch transcript chrome — focus on the
+    analytical conclusion.

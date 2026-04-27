@@ -1,0 +1,74 @@
+name: agent_root_thin
+session_id: scenario-root-thin-1
+
+# Phase 1 contract — the `_root` autoload skill makes the user-facing
+# session a thin dispatcher. Substantive work is delegated to a
+# generic worker via `subagent__meta_worker(task=<verbatim>)`; the
+# root MUST NOT load domain skills or do tool work itself.
+#
+# Observational verifier: count the tool_call events on the root
+# session for the substantive turn. After Phase 1.3+1.4 lands the root
+# should fire exactly one tool — the worker dispatch. Pre-Phase-1
+# behaviour will fire several (skill_load, memory_search, …) — running
+# this scenario before/after the rollout makes the difference visible.
+
+steps:
+  - say: |
+      Summarise "context engineering" in one sentence and give it back
+      to me.
+    queries:
+      # Root tool calls — should be a single subagent_dispatch (or
+      # subagent__meta_worker) after Phase 1.
+      - name: root_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"tool_call\")) | map({seq, tool: .tool_name})"
+            ) {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type tool_name }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-root-thin-1
+
+      # Skills loaded onto the root — should NOT include domain
+      # skills like `hugr-data` or any non-system skill. Only autoload
+      # skills marked `autoload_for: [root]` should be present.
+      - name: root_skills_loaded
+        graphql: |
+          query ($sid: String!) {
+            jq(
+              query: ".hub.db.agent.session_events | map(select(.event_type == \"skill_loaded\")) | map({seq, skill: .metadata.skill, autoload: .metadata.autoload})"
+            ) {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "skill_loaded"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }}}
+            }
+          }
+        vars:
+          sid: scenario-root-thin-1
+
+      # The dispatched worker's child session — verifies the worker
+      # role was used (skill = "_meta", role = "worker") and the task
+      # text was forwarded verbatim.
+      - name: worker_child_session
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord)) | map({id, depth: .metadata.depth, skill: .metadata.skill, role: .metadata.role, mission})"
+            ) {
+              hub { db { agent {
+                sessions { id session_type parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-root-thin-1

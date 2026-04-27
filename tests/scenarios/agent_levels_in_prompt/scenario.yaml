@@ -1,0 +1,73 @@
+name: agent_levels_in_prompt
+session_id: scenario-levels-1
+
+# Phase 1 contract — depth tracking in session metadata.
+#
+# Verifies that:
+#   1. Manager.Create writes metadata.depth=0 for a root session.
+#   2. Dispatcher.runInternal writes metadata.depth = parent.depth + 1
+#      for a sub-agent session, plus parent_session_id linkage so the
+#      `child_sessions` GraphQL field (already wired via
+#      references_query in pkg/store/local/schema.tmpl.graphql) can
+#      navigate the chain.
+#
+# Observational only: no hard assertions on LLM output. The queries
+# dump session rows so a human can read off depth=0 / depth=1 / parent
+# linkage at a glance.
+
+steps:
+  - say: |
+      Please summarise the meaning of "context engineering" in one
+      sentence. Use the available specialist via subagent_dispatch
+      rather than answering yourself.
+    queries:
+      # Root row should carry metadata.depth = 0 and no parent.
+      - name: root_session_depth
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {id: {eq: $sid}}) {
+                id
+                session_type
+                parent_session_id
+                metadata
+              }
+            }}}
+          }
+        vars:
+          sid: scenario-levels-1
+
+      # Every spawned sub-agent under this root should have
+      # metadata.depth = 1 and parent_session_id pointing at the root.
+      - name: child_sessions_depth
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord)) | map({id, type: .session_type, depth: .metadata.depth, parent: .parent_session_id, skill: .metadata.skill, role: .metadata.role})"
+            ) {
+              hub { db { agent {
+                sessions { id session_type parent_session_id metadata }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-levels-1
+
+      # Cross-check via the references_query: child_sessions field —
+      # the same set should appear when navigating from the root row.
+      - name: child_sessions_via_reference
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {id: {eq: $sid}}) {
+                id
+                child_sessions {
+                  id
+                  session_type
+                  metadata
+                }
+              }
+            }}}
+          }
+        vars:
+          sid: scenario-levels-1

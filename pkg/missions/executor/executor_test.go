@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/internal/testenv"
 	"github.com/hugr-lab/hugen/pkg/missions/executor"
 	"github.com/hugr-lab/hugen/pkg/missions/graph"
@@ -144,15 +143,7 @@ func newFixture(t *testing.T, parallelism int) *fixture {
 	t.Helper()
 	service, _ := testenv.Engine(t)
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
-
-	reg, err := agentstore.New(service, agentstore.Options{
-		AgentID: "agt_ag01", AgentShort: "ag01", Logger: logger,
-	})
-	require.NoError(t, err)
-	require.NoError(t, reg.RegisterAgent(context.Background(), agentstore.Agent{
-		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01",
-		Name: "test-agent", Status: "active",
-	}))
+	testenv.RegisterAgent(t, service, "agt_ag01", "ag01", "test-agent")
 
 	sess, err := sessstore.New(service, sessstore.Options{
 		AgentID: "agt_ag01", AgentShort: "ag01", Logger: logger,

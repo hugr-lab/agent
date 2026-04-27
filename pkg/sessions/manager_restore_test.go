@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 	adksession "google.golang.org/adk/session"
 
-	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/internal/testenv"
@@ -32,14 +31,7 @@ func newManagerWithHub(t *testing.T) (*Manager, *sessstore.Client) {
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
 
 	// Ensure the agent row exists; FKs on session_events point at it.
-	reg, err := agentstore.New(service, agentstore.Options{
-		AgentID: "agt_ag01", AgentShort: "ag01", Logger: logger,
-	})
-	require.NoError(t, err)
-	require.NoError(t, reg.RegisterAgent(context.Background(), agentstore.Agent{
-		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01",
-		Name: "restore-test-agent", Status: "active",
-	}))
+	testenv.RegisterAgent(t, service, "agt_ag01", "ag01", "restore-test-agent")
 
 	root := makeSkillsDir(t)
 	sk, err := skills.NewFileManager(root)

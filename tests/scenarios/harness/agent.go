@@ -7,7 +7,7 @@
 //
 // Config sourcing: harness loads tests/scenarios/config.yaml (shape
 // mirrors the production config.yaml but stripped to what tests need)
-// through the same pkg/config.LoadLocal path production uses, after
+// through the same pkg/hugenruntime.LoadLocal path production uses, after
 // sourcing tests/scenarios/.test.env into the process environment.
 // That file is gitignored — copy .test.env.example and fill in your
 // LM Studio / remote Hugr URLs. Per-scenario overrides stack on top
@@ -33,7 +33,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/hugr-lab/hugen/internal/testenv"
-	"github.com/hugr-lab/hugen/pkg/config"
 	hugenruntime "github.com/hugr-lab/hugen/pkg/runtime"
 
 	qetypes "github.com/hugr-lab/query-engine/types"
@@ -114,11 +113,11 @@ func Setup(t *testing.T, o Opts) *Agent {
 	skillsPath := buildSkillsDir(t, fixtureSkillsPath())
 
 	// --- Load tests/scenarios/config.yaml via the production path ---
-	boot, err := config.LoadBootstrap("") // .env already applied; skip re-read
+	boot, err := hugenruntime.LoadBootstrap("") // .env already applied; skip re-read
 	require.NoError(t, err, "harness: bootstrap")
 
 	cfgPath := filepath.Join(scenariosRoot(), "config.yaml")
-	cfg, err := config.LoadLocal(cfgPath, boot)
+	cfg, err := hugenruntime.LoadLocal(cfgPath, boot, nil)
 	require.NoError(t, err, "harness: load config %s", cfgPath)
 
 	// --- Override runtime-only fields the YAML can't know about ---
@@ -144,7 +143,21 @@ func Setup(t *testing.T, o Opts) *Agent {
 
 	// --- Build runtime ---
 	ctx := context.Background()
-	rt, err := hugenruntime.Build(ctx, cfg, logger, hugenruntime.Options{})
+	localEngine, localModels, err := hugenruntime.BuildLocalEngine(ctx, cfg, logger)
+	require.NoError(t, err, "harness: BuildLocalEngine")
+	var localQuerier qetypes.Querier
+	if localEngine != nil {
+		localQuerier = localEngine
+	}
+	router := hugenruntime.BuildRouter(localQuerier, nil, localModels, cfg.LLM, logger)
+	rt, err := hugenruntime.Build(ctx, cfg, logger, hugenruntime.Options{
+		LocalQuerier: localQuerier,
+		LocalEngine:  localEngine,
+		Router:       router,
+	})
+	if err != nil && localEngine != nil {
+		_ = localEngine.Close()
+	}
 	require.NoError(t, err, "harness: runtime.Build")
 
 	a := &Agent{
@@ -207,7 +220,7 @@ func applyEnvFile(body string) {
 	}
 }
 
-// configOverride is the subset of *config.Config a scenario may
+// configOverride is the subset of *hugenruntime.RuntimeConfig a scenario may
 // override via <scenarioDir>/config_override.yaml.
 type configOverride struct {
 	LLM *struct {
@@ -221,7 +234,7 @@ type configOverride struct {
 	} `yaml:"chatcontext"`
 }
 
-func applyConfigOverride(cfg *config.Config, path string) error {
+func applyConfigOverride(cfg *hugenruntime.RuntimeConfig, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("harness: read config override %s: %w", path, err)
@@ -284,7 +297,7 @@ func buildSkillsDir(t *testing.T, fixtureDir string) string {
 	require.NoError(t, os.MkdirAll(dst, 0o755))
 
 	root := repoRoot()
-	for _, name := range []string{"_system", "_memory", "_context", "_coordinator", "_approvals", "_artifacts", "_search"} {
+	for _, name := range []string{"_system", "_memory", "_context", "_root", "_meta", "_subagent", "_coordinator", "_approvals", "_artifacts", "_search"} {
 		src := filepath.Join(root, "skills", name)
 		require.NoError(t, copyDir(src, filepath.Join(dst, name)),
 			"harness: copy system skill %s", name)

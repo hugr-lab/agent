@@ -1,0 +1,91 @@
+name: agent_followup_to_subagent
+session_id: scenario-followup-sub-1
+
+# Phase 1 contract — follow-up routing in the new fractal world.
+# When the user sends a refinement while a sub-agent is still running,
+# the FollowUpRouter classifies the message against the running
+# missions and routes it as a `user_message` into the matching
+# sub-agent's session. The root MUST NOT spawn a fresh mission for the
+# refinement.
+#
+# This is functionally equivalent to the existing `follow_up_routing`
+# scenario, but written against the Phase-1 default route
+# (root → subagent__meta_worker → ...) so it survives the migration.
+
+steps:
+  - say: |
+      Start a slow piece of work for me: summarise what "context
+      engineering" means in 1–2 sentences and promote the result so I
+      can see it. Use a sub-agent — do not answer yourself.
+    queries:
+      - name: kicked_off
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord or .metadata.coord_session_id == $coord)) | map({id, status, depth: .metadata.depth, role: .metadata.role, mission})"
+            ) {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-followup-sub-1
+
+  - wait_for_missions_running: 30s
+    say: |
+      Focus narrowly on LLM context-window engineering — designing
+      prompts and retrieved documents — not generic prompt
+      engineering.
+    queries:
+      # Refinement should land as a user_message inside the running
+      # sub-agent's session, NOT spawn a new mission. Count user_message
+      # events per child session.
+      - name: child_user_messages
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord or .metadata.coord_session_id == $coord)) | map({id, role: .metadata.role, user_messages: ((.events // []) | map(select(.event_type == \"user_message\")) | length)})"
+            ) {
+              hub { db { agent {
+                sessions {
+                  id parent_session_id metadata
+                  events { event_type }
+                }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-followup-sub-1
+
+      # Audit row on the root: user_followup_routed with target_mission_id
+      # filled in. The root MUST emit one of these and NOT a fresh
+      # subagent_dispatch tool_call for the refinement turn.
+      - name: root_followup_audit
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "user_followup_routed"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq content metadata }
+            }}}
+          }
+        vars:
+          sid: scenario-followup-sub-1
+
+  - wait_for_missions: 90s
+    queries:
+      - name: final_state
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map({id, type: .session_type, status, depth: .metadata.depth, parent: .parent_session_id, role: .metadata.role})"
+            ) {
+              hub { db { agent {
+                sessions { id session_type status parent_session_id metadata }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-followup-sub-1

@@ -1,0 +1,79 @@
+name: agent_worker_plans
+session_id: scenario-worker-plans-1
+
+# Phase 1 contract — when a worker (level=1) gets a multi-step task it
+# loads the `_meta.planner` role to decompose, then either spawns the
+# resulting sub-missions itself (depth=2 specialists) or aggregates via
+# `_meta.summarizer`.
+#
+# This scenario seeds a multi-step goal and observes the spawned graph.
+# Expected after Phase 1.3+:
+#   - root → 1 child (depth=1, skill=_meta, role=worker)
+#   - worker → ≥2 grandchildren (depth=2) covering the steps
+#
+# The harness fixture skill `domain` exposes `summariser` + `formatter`
+# specialists; the worker is allowed to dispatch them by name.
+
+final_wait: 60s
+
+steps:
+  - say: |
+      I need a two-step piece of work:
+        1) summariser: summarise what "context engineering" means in
+           1–2 sentences.
+        2) formatter: turn that summary into one tight headline
+           sentence (≤ 25 words).
+      Return control once the work is decomposed and dispatched — I
+      will check the result afterward.
+    queries:
+      # Full session tree — depth + parent + role per row.
+      - name: session_tree
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map({id, type: .session_type, depth: .metadata.depth, parent: .parent_session_id, skill: .metadata.skill, role: .metadata.role, mission})"
+            ) {
+              hub { db { agent {
+                sessions { id session_type parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-worker-plans-1
+
+      # Worker child should have skill=_meta, role=worker and at least
+      # one further child of its own (the planner OR the actual
+      # specialists, depending on how the worker chose to decompose).
+      - name: worker_grandchildren
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: "[.hub.db.agent.sessions | map(select(.parent_session_id == $coord and .metadata.role == \"worker\")) | .[]?.id] as $workers | .hub.db.agent.sessions | map(select(.parent_session_id as $p | $workers | index($p))) | map({id, depth: .metadata.depth, skill: .metadata.skill, role: .metadata.role, mission})"
+            ) {
+              hub { db { agent {
+                sessions { id parent_session_id metadata mission }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-worker-plans-1
+
+      # Tool-call events on the worker session — should show either
+      # subagent_dispatch (delegating each step) or skill_load("_meta")
+      # then planner.
+      - name: worker_tool_calls
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord and .metadata.role == \"worker\")) | .[0]? // {} | (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool: .tool_name})"
+            ) {
+              hub { db { agent {
+                sessions {
+                  id parent_session_id metadata
+                  events { seq event_type tool_name }
+                }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-worker-plans-1

@@ -299,6 +299,59 @@ func applyEnvFile(body string) {
 	}
 }
 
+// RegisterAgent inserts an agents row via direct GraphQL mutation —
+// the test-only stand-in for the deleted pkg/agent/store registry.
+// Idempotent: existing rows with the same id stay untouched.
+//
+// AgentTypeID always points at the seeded "hugr-data" type, so
+// callers don't need a pre-existing agent_types row to register
+// additional agents on top of testenv.Engine's seed.
+func RegisterAgent(t *testing.T, q types.Querier, agentID, shortID, name string) {
+	t.Helper()
+	mut := `mutation ($data: hub_db_agents_mut_input_data!) {
+		hub { db { insert_agents(data: $data) { id } } }
+	}`
+	resp, err := q.Query(context.Background(), mut, map[string]any{
+		"data": map[string]any{
+			"id":              agentID,
+			"agent_type_id":   "hugr-data",
+			"short_id":        shortID,
+			"name":            name,
+			"status":          "active",
+			"config_override": map[string]any{},
+		},
+	})
+	if err != nil {
+		// Existing row → unique constraint violation; ignore so the
+		// helper stays idempotent. Any other error fails the test.
+		if isAgentDuplicateErr(err.Error()) {
+			return
+		}
+		require.NoError(t, err, "register agent %s", agentID)
+	}
+	if resp != nil {
+		defer resp.Close()
+		if respErr := resp.Err(); respErr != nil {
+			if isAgentDuplicateErr(respErr.Error()) {
+				return
+			}
+			require.NoError(t, respErr, "register agent %s", agentID)
+		}
+	}
+}
+
+// isAgentDuplicateErr returns true when msg looks like a unique /
+// primary-key constraint violation — DuckDB and Postgres surface
+// these with different wording, so we match on the common
+// substrings case-insensitively.
+func isAgentDuplicateErr(msg string) bool {
+	low := strings.ToLower(msg)
+	return strings.Contains(low, "duplicate") ||
+		strings.Contains(low, "unique") ||
+		strings.Contains(low, "primary key") ||
+		strings.Contains(low, "already exists")
+}
+
 // MustQuery runs a GraphQL query and fails the test on transport or
 // GraphQL errors. The returned Response is auto-closed at test
 // teardown.

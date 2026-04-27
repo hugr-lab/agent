@@ -1,6 +1,6 @@
 // Package runtime assembles the full hugr-agent runtime (local engine,
 // session manager, memory/chat subsystems, tool providers, root LLM
-// agent, background workers) from a resolved *config.Config and a
+// agent, background workers) from a resolved *RuntimeConfig and a
 // minimal set of externally-provided auth / remote-client hooks.
 //
 // This is the single source of truth for "how the agent is wired"
@@ -39,7 +39,6 @@ import (
 	arts3 "github.com/hugr-lab/hugen/pkg/artifacts/storage/s3"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/chatcontext"
-	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/memory"
 	learnstore "github.com/hugr-lab/hugen/pkg/memory/learning/store"
 	memstore "github.com/hugr-lab/hugen/pkg/memory/store"
@@ -54,7 +53,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/sessions"
 	sessstore "github.com/hugr-lab/hugen/pkg/sessions/store"
 	"github.com/hugr-lab/hugen/pkg/skills"
-	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/hugr-lab/hugen/pkg/tools"
 
 	qe "github.com/hugr-lab/query-engine"
@@ -108,26 +106,41 @@ type Runtime struct {
 
 // Options carries the externally-built pieces the runtime cannot
 // construct itself without pulling in auth/bootstrap dependencies.
-// Zero values produce a fully-local runtime (scenarios, dev tests).
+//
+// Build does not construct queriers, the local engine, or the model
+// router internally — callers (cmd/agent, scenario harness) build
+// those via the helpers in externals.go and pass them through here.
+// This keeps pkg/runtime free of bootstrap-policy decisions about
+// when to spin up a local engine vs. when to lean on a remote hub.
 type Options struct {
 	// AuthStores feeds the inline MCP builder + any external MCP
 	// providers declared in cfg.Providers. Nil = no auth wrapping.
 	AuthStores map[string]auth.TokenStore
 
-	// HugrClient is the remote GraphQL querier. When nil, the local
-	// engine is used as both the "local" and "remote" slot in the
-	// router + as the memory/sessions querier. Production wiring
-	// supplies the live *client.Client here.
-	HugrClient qetypes.Querier
-
-	// HugrClientClose is called from Runtime.Close when set; lets
-	// production hand over subscription cleanup without this package
-	// importing hugr client types directly.
-	HugrClientClose func()
-
 	// BaseTransport for outbound MCP connections; defaults to
 	// http.DefaultTransport.
 	BaseTransport http.RoundTripper
+
+	// LocalQuerier is the embedded engine's Querier — nil when
+	// running against a remote hub only.
+	LocalQuerier qetypes.Querier
+
+	// RemoteQuerier is the remote hub client's Querier — nil when
+	// running fully locally. The runtime uses RemoteQuerier (when
+	// non-nil) for memory/sessions/tools; otherwise it falls back to
+	// LocalQuerier.
+	RemoteQuerier qetypes.Querier
+
+	// LocalEngine is the embedded engine handle so Runtime.Close can
+	// shut it down. nil when LocalQuerier is nil.
+	LocalEngine *qe.Service
+
+	// Router is the pre-built models.Router; required.
+	Router *models.Router
+
+	// ExtraClose accumulates extra cleanup callbacks the caller wants
+	// invoked on Runtime.Close (e.g. *client.Client.CloseSubscriptions).
+	ExtraClose []func()
 }
 
 // Build wires the full runtime. Returned Runtime owns no external
@@ -136,7 +149,7 @@ type Options struct {
 // resources via AppendCloser / HugrClientClose.
 func Build(
 	ctx context.Context,
-	cfg *config.Config,
+	cfg *RuntimeConfig,
 	logger *slog.Logger,
 	opts Options,
 ) (*Runtime, error) {
@@ -170,47 +183,26 @@ func Build(
 	}
 	closeOnErr := func() { rt.Close() }
 
-	var (
-		localQuerier qetypes.Querier
-		// remoteQuerier falls back to the local engine below when
-		// opts.HugrClient is nil (scenario / fully-local mode).
-		remoteQuerier = opts.HugrClient
-		localModels   []string
-	)
-	if cfg.LocalDBEnabled {
-		engine, ms, err := buildLocalHugr(ctx, cfg, logger)
-		if err != nil {
-			if opts.HugrClientClose != nil {
-				opts.HugrClientClose()
-			}
-			return nil, err
-		}
-		rt.Engine = engine
-		localQuerier = engine
-		localModels = ms
-	} else {
-		logger.Info("runtime: hub mode", "url", cfg.Hugr.URL)
+	if opts.Router == nil {
+		return nil, fmt.Errorf("runtime: Options.Router is required")
 	}
+	localQuerier := opts.LocalQuerier
+	remoteQuerier := opts.RemoteQuerier
 	if remoteQuerier == nil {
 		// No external remote client — funnel everything through local
 		// (scenario / fully-local mode). Router still needs a non-nil
-		// remote to satisfy its contract.
+		// remote to satisfy its contract; the caller's BuildRouter
+		// helper takes care of that fallback identically.
 		remoteQuerier = localQuerier
 	}
+	rt.Engine = opts.LocalEngine
 	memoryQuerier := remoteQuerier
 	if localQuerier != nil {
 		memoryQuerier = localQuerier
 	}
 	rt.Querier = memoryQuerier
 
-	router := models.NewRouter(
-		localQuerier,
-		remoteQuerier,
-		localModels,
-		cfg.LLM,
-		models.WithLogger(logger),
-		models.WithToolChoiceFunc(func() string { return "auto" }),
-	).WithLogger(logger)
+	router := opts.Router
 	for intentName, modelName := range cfg.LLM.Routes {
 		logger.Info("runtime: intent route", "intent", intentName, "model", modelName)
 	}
@@ -746,9 +738,7 @@ func Build(
 	sched.Start(bgCtx)
 	hugen.StartSessionCleanup(bgCtx, sessionMgr, 1*time.Hour, logger)
 
-	if opts.HugrClientClose != nil {
-		rt.extraClose = append(rt.extraClose, opts.HugrClientClose)
-	}
+	rt.extraClose = append(rt.extraClose, opts.ExtraClose...)
 	return rt, nil
 }
 
@@ -836,7 +826,7 @@ func (r *Runtime) Close() {
 // readConstitution loads the agent constitution file from the path
 // declared in cfg.Agent.Constitution. Missing / unreadable file is a
 // fatal config error since the constitution drives the system prompt.
-func readConstitution(cfg *config.Config) (string, error) {
+func readConstitution(cfg *RuntimeConfig) (string, error) {
 	path := cfg.Agent.Constitution
 	if path == "" {
 		return "", nil
@@ -915,7 +905,7 @@ func registerArtifactBackends() {
 // config and returns the live Storage. Logs a clear warning when
 // the operator picked the s3 stub so they can see at boot that
 // publishes will be refused.
-func openArtifactStorage(cfg config.ArtifactsConfig, logger *slog.Logger) (artstorage.Storage, error) {
+func openArtifactStorage(cfg ArtifactsConfig, logger *slog.Logger) (artstorage.Storage, error) {
 	switch cfg.Backend {
 	case "fs", "":
 		s, err := artstorage.Open(artfs.Name, artfs.Config{
@@ -950,10 +940,10 @@ func openArtifactStorage(cfg config.ArtifactsConfig, logger *slog.Logger) (artst
 }
 
 // approvalsConfigFromOperatorConfig translates the operator's
-// pkg/config.ApprovalsConfig into the approvals package's
+// pkg/ApprovalsConfig into the approvals package's
 // internal Config — keeps pkg/approvals free of any pkg/config
 // import (one-way dependency: runtime translates).
-func approvalsConfigFromOperatorConfig(cfg config.ApprovalsConfig) approvals.Config {
+func approvalsConfigFromOperatorConfig(cfg ApprovalsConfig) approvals.Config {
 	out := approvals.Config{
 		DefaultTimeout:         cfg.DefaultTimeout,
 		SafePolicyChange:       cfg.SafePolicyChange,
@@ -966,11 +956,11 @@ func approvalsConfigFromOperatorConfig(cfg config.ApprovalsConfig) approvals.Con
 }
 
 // artifactsConfigFromOperatorConfig translates the operator's
-// pkg/config.ArtifactsConfig into the manager's package-internal
+// pkg/ArtifactsConfig into the manager's package-internal
 // Config. Backend-specific keys (cfg.FS.Dir, cfg.S3.*) intentionally
 // do NOT cross this boundary — they were already consumed by
 // openArtifactStorage. The manager itself never reads them.
-func artifactsConfigFromOperatorConfig(cfg config.ArtifactsConfig) artifacts.Config {
+func artifactsConfigFromOperatorConfig(cfg ArtifactsConfig) artifacts.Config {
 	schemaInspect := true
 	if cfg.SchemaInspect != nil {
 		schemaInspect = *cfg.SchemaInspect
@@ -987,20 +977,3 @@ func artifactsConfigFromOperatorConfig(cfg config.ArtifactsConfig) artifacts.Con
 	}
 }
 
-// buildLocalHugr brings up the embedded query-engine backed by
-// cfg.LocalDB and returns it along with the LLM model names the router
-// should route to it.
-func buildLocalHugr(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*qe.Service, []string, error) {
-	engine, err := local.New(ctx, cfg.LocalDB, cfg.Identity, cfg.Embedding, logger)
-	if err != nil {
-		return nil, nil, fmt.Errorf("runtime: local engine: %w", err)
-	}
-	ms := make([]string, 0, len(cfg.LocalDB.Models))
-	for _, m := range cfg.LocalDB.Models {
-		if m.Type == "embedding" {
-			continue
-		}
-		ms = append(ms, m.Name)
-	}
-	return engine, ms, nil
-}

@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 	adksession "google.golang.org/adk/session"
 
-	agentstore "github.com/hugr-lab/hugen/pkg/agent/store"
 	"github.com/hugr-lab/hugen/internal/testenv"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/sessions"
@@ -37,19 +36,11 @@ type hubBackedDispatchHarness struct {
 
 func newHubBackedDispatchHarness(t *testing.T, script []models.ScriptedResponse) *hubBackedDispatchHarness {
 	t.Helper()
-	ctx := context.Background()
 
 	service, _ := testenv.Engine(t)
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
 
-	reg, err := agentstore.New(service, agentstore.Options{
-		AgentID: "agt_ag01", AgentShort: "ag01", Logger: logger,
-	})
-	require.NoError(t, err)
-	require.NoError(t, reg.RegisterAgent(ctx, agentstore.Agent{
-		ID: "agt_ag01", AgentTypeID: "hugr-data", ShortID: "ag01",
-		Name: "accum-test-agent", Status: "active",
-	}))
+	testenv.RegisterAgent(t, service, "agt_ag01", "ag01", "accum-test-agent")
 
 	skillsRoot := makeDispatchSkillsDir(t)
 	skMgr, err := skills.NewFileManager(skillsRoot)

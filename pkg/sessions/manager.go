@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -125,6 +126,13 @@ type Manager struct {
 	tools         *tools.Manager
 	hub           *sessstore.Client
 	constitution  string
+	// constitutionTmpl is parsed once from `constitution` (text/template
+	// syntax). Per-session render in Session.buildPrompt substitutes
+	// .Level / .ParentSessionID / .Mission / .Skill / .Role /
+	// .RoleDescription / .Format. Plain-text constitutions parse fine
+	// (no `{{` directives → identity render). nil ⇒ render falls back
+	// to the raw string verbatim.
+	constitutionTmpl *template.Template
 	logger        *slog.Logger
 	inlineBuilder    InlineProviderFactory
 	subagentBuilder SubAgentToolBuilder
@@ -156,18 +164,53 @@ func New(cfg Config) (*Manager, error) {
 		}
 		hub = c
 	}
+	tmpl, err := parseConstitutionTemplate(cfg.Constitution)
+	if err != nil {
+		return nil, fmt.Errorf("session: parse constitution template: %w", err)
+	}
 	return &Manager{
 		sessions:      make(map[string]*Session),
 		skills:        cfg.Skills,
 		tools:         cfg.Tools,
 		hub:           hub,
 		constitution:  cfg.Constitution,
+		constitutionTmpl: tmpl,
 		logger:        cfg.Logger,
 		inlineBuilder:   cfg.InlineBuilder,
 		subagentBuilder: cfg.SubAgentToolBuilder,
 		classifier:      cfg.Classifier,
 		scheduler:       cfg.Scheduler,
 	}, nil
+}
+
+// readMetaInt extracts an int from a session.metadata map. Tolerates
+// the shapes that come back from JSON unmarshalling (float64) and from
+// in-process writes (int / int64).
+func readMetaInt(meta map[string]any, key string) int {
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return 0
+	}
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	}
+	return 0
+}
+
+// parseConstitutionTemplate parses raw as a Go text/template. Plain-
+// text constitutions without `{{` directives parse identically (the
+// template engine is permissive about literal text). Returns nil on
+// empty input — buildPrompt then renders the empty string.
+func parseConstitutionTemplate(raw string) (*template.Template, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	return template.New("constitution").Parse(raw)
 }
 
 // publishEvent routes an ADK event to the classifier when one is
@@ -268,6 +311,7 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 		app := ""
 		skill := ""
 		role := ""
+		depth := 0
 		if row.Metadata != nil {
 			if v, ok := row.Metadata["app_name"].(string); ok {
 				app = v
@@ -278,6 +322,13 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 			if v, ok := row.Metadata["role"].(string); ok {
 				role = v
 			}
+			depth = readMetaInt(row.Metadata, "depth")
+		}
+		// Pre-Phase-1.5 rows have no `depth` in metadata. Sub-agent rows
+		// from that era predate the template branching, so a 0 default
+		// would render them as "root" — fall back to 1 instead.
+		if depth == 0 && row.SessionType == sessstore.SessionTypeSubAgent {
+			depth = 1
 		}
 		sess := m.newLocalWithLinkage(row.ID, app, row.OwnerID, subAgentLinkage{
 			sessionType:        row.SessionType,
@@ -285,6 +336,7 @@ func (m *Manager) RestoreOpen(ctx context.Context) error {
 			spawnedFromEventID: row.SpawnedFromEventID,
 			mission:            row.Mission,
 			forkAfterSeq:       row.ForkAfterSeq,
+			depth:              depth,
 			metaSkill:          skill,
 			metaRole:           role,
 		})
@@ -339,6 +391,21 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 	// keys before constructing the Session so the discriminator is
 	// available to applyAutoload below + the hub Record carries it.
 	linkage := linkageFromState(req.State)
+	// Phase 1.5: depth = parent.depth + 1 for sub-agents; 0 for root.
+	// Parent must exist in m.sessions because the dispatcher creates the
+	// child only after the parent has been registered. If lookup misses
+	// (race / restored stub never materialised), default to 1 — the
+	// resulting depth is still a strict signal of "not root".
+	if linkage.parentSessionID != "" {
+		m.mu.RLock()
+		parent, ok := m.sessions[linkage.parentSessionID]
+		m.mu.RUnlock()
+		if ok {
+			linkage.depth = parent.depth + 1
+		} else {
+			linkage.depth = 1
+		}
+	}
 
 	m.mu.Lock()
 	if _, exists := m.sessions[id]; exists {
@@ -372,6 +439,9 @@ func (m *Manager) Create(ctx context.Context, req *adksession.CreateRequest) (*a
 		if req.AppName != "" {
 			meta["app_name"] = req.AppName
 		}
+		// Phase 1.5: depth is always written so navigators see a
+		// consistent contract (no missing-key special case for root).
+		meta["depth"] = linkage.depth
 		if req.State != nil {
 			if v, ok := req.State[stateKeySkill].(string); ok && v != "" {
 				meta["skill"] = v
@@ -583,6 +653,7 @@ func (m *Manager) newLocalWithLinkage(id, app, user string, sub subAgentLinkage)
 		hub:                m.hub,
 		logger:             m.logger,
 		constitution:       m.constitution,
+		constitutionTmpl:   m.constitutionTmpl,
 		sessionType:        sub.sessionType,
 		parentSessionID:    sub.parentSessionID,
 		spawnedFromEventID: sub.spawnedFromEventID,
@@ -590,6 +661,7 @@ func (m *Manager) newLocalWithLinkage(id, app, user string, sub subAgentLinkage)
 		forkAfterSeq:       sub.forkAfterSeq,
 		metaSkill:          sub.metaSkill,
 		metaRole:           sub.metaRole,
+		depth:              sub.depth,
 	})
 }
 
@@ -602,6 +674,12 @@ type subAgentLinkage struct {
 	spawnedFromEventID string
 	mission            string
 	forkAfterSeq       *int
+	// depth is the agent-tree level (root = 0, root's child = 1, …).
+	// Computed at Create time from the parent session's depth + 1, or
+	// rehydrated from sessions.metadata.depth on RestoreOpen. Used by
+	// Session.renderConstitution to pick the level-aware constitution
+	// branch.
+	depth int
 	// Spec 006 §6: specialist identity sourced from CreateRequest.State
 	// (__skill__ / __role__) and merged into sessions.metadata at
 	// Create time. Plumbed onto Session so renderNotesBlock can resolve

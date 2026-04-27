@@ -1,0 +1,80 @@
+name: agent_planner_json_contract
+session_id: scenario-planner-json-1
+
+# Phase 1 contract — `_meta.planner` is a structured-output role: it
+# receives a goal, decomposes it, and returns a JSON envelope of shape
+#   {
+#     "kind": "single" | "graph" | "clarify" | "answer",
+#     "missions": [{"skill": str, "role": str, "task": str, "depends_on": [str]}],
+#     "edges": [...],          // optional, only for kind=graph
+#     "rationale": "..."       // free text
+#   }
+#
+# The role frontmatter declares `intent: tool_calling` (cheap model)
+# and `output_format: json` so the LLM router pins a JSON-friendly
+# completion mode and the worker can json.Unmarshal the result without
+# brittle regex parsing.
+#
+# This scenario invokes the planner directly via subagent_dispatch
+# (bypassing the worker) and dumps the agent_result content so a
+# human can read off whether the LLM produced valid JSON in the
+# required shape.
+
+steps:
+  - say: |
+      Use subagent_dispatch(skill: "_meta", role: "planner",
+      task: "Plan a 3-step report on the Q1 sales of widget X — load
+      schema, query top-10 customers, format as a markdown table.")
+      to delegate planning. Return whatever the planner gives back
+      verbatim so I can see the structured envelope.
+    queries:
+      # The planner sub-agent's session — single child of the root.
+      - name: planner_child_session
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord)) | map({id, depth: .metadata.depth, skill: .metadata.skill, role: .metadata.role, mission, status})"
+            ) {
+              hub { db { agent {
+                sessions { id parent_session_id metadata mission status }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-planner-json-1
+
+      # The planner's final llm_response — should be a JSON object
+      # parseable by json.Unmarshal. Dump content verbatim so the
+      # reader can eyeball it.
+      - name: planner_final_response
+        graphql: |
+          query ($coord: String!) {
+            jq(
+              query: ".hub.db.agent.sessions | map(select(.parent_session_id == $coord and .metadata.role == \"planner\")) | .[0]? // {} | (.events // []) | map(select(.event_type == \"llm_response\")) | last"
+            ) {
+              hub { db { agent {
+                sessions {
+                  id parent_session_id metadata
+                  events { seq event_type content }
+                }
+              }}}
+            }
+          }
+        vars:
+          coord: scenario-planner-json-1
+
+      # The agent_result row on the coordinator — its content is what
+      # the worker would consume. Should mirror the planner's last
+      # llm_response (after summary truncation).
+      - name: coord_agent_result
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq content metadata }
+            }}}
+          }
+        vars:
+          sid: scenario-planner-json-1

@@ -17,7 +17,7 @@ agent:
   short_id: ag01
   name: scenario-agent
   type: hugr-data
-  constitution: constitution/base.md      # harness makes absolute
+  constitution: constitution/agent.md     # harness makes absolute
 
 hugr:
   auth: hugr-auth

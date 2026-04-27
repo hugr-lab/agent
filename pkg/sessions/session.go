@@ -1,12 +1,14 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/skills"
@@ -34,6 +36,11 @@ type Session struct {
 	spawnedFromEventID string
 	mission            string
 	forkAfterSeq       *int
+	// depth is the agent hierarchy level — 0 for root, 1+ for sub-agents.
+	// Source-of-truth for the constitution template's .Level
+	// substitution. Phase 1.5 wires it from Manager.Create (parent depth
+	// + 1) and from RestoreOpen (sessions.metadata.depth).
+	depth int
 	// Cached sub-agent identity sourced from sessions.metadata at
 	// Create / restore time (spec 006 §6). Used by renderNotesBlock to
 	// prefix cross-session notes as "[from <skill>/<role>]" without
@@ -50,7 +57,8 @@ type Session struct {
 	hub     *sessstore.Client
 	logger  *slog.Logger
 
-	constitution string
+	constitution     string
+	constitutionTmpl *template.Template
 
 	mu           sync.RWMutex
 	updatedAt    time.Time
@@ -128,6 +136,8 @@ type sessionConfig struct {
 	hub          *sessstore.Client
 	logger       *slog.Logger
 	constitution string
+	// constitutionTmpl is the parsed Go template — nil falls back to raw string.
+	constitutionTmpl *template.Template
 
 	// Spec 006 sub-agent linkage. All optional — root sessions leave
 	// these empty / nil; the dispatcher populates them when opening a
@@ -137,6 +147,7 @@ type sessionConfig struct {
 	spawnedFromEventID string
 	mission            string
 	forkAfterSeq       *int
+	depth              int
 	metaSkill          string
 	metaRole           string
 }
@@ -151,6 +162,7 @@ func newSession(cfg sessionConfig) *Session {
 		spawnedFromEventID: cfg.spawnedFromEventID,
 		mission:            cfg.mission,
 		forkAfterSeq:       cfg.forkAfterSeq,
+		depth:              cfg.depth,
 		metaSkill:          cfg.metaSkill,
 		metaRole:           cfg.metaRole,
 		state:              NewState(),
@@ -161,6 +173,7 @@ func newSession(cfg sessionConfig) *Session {
 		hub:                cfg.hub,
 		logger:             cfg.logger,
 		constitution:       cfg.constitution,
+		constitutionTmpl:   cfg.constitutionTmpl,
 		updatedAt:          time.Now(),
 	}
 }
@@ -469,9 +482,61 @@ func (s *Session) bindSkillProvider(skillName string, spec skills.SkillProviderS
 	return nil
 }
 
+// constitutionContext is the data exposed to constitution/agent.md
+// when it is rendered as a Go text/template. Plain-text constitutions
+// without `{{` directives ignore the fields.
+type constitutionContext struct {
+	Level           int
+	ParentSessionID string
+	Mission         string
+	Skill           string
+	Role            string
+	RoleDescription string
+	Format          string
+}
+
+// renderConstitution executes the parsed constitution template against
+// the session's typed fields. Falls back to the raw constitution
+// string when the template is nil or Execute fails — guarantees the
+// system prompt always has a constitution prefix.
+func (s *Session) renderConstitution(ctx context.Context) string {
+	if s.constitutionTmpl == nil {
+		return s.constitution
+	}
+	level := s.depth
+	// Defensive fallback for restored stubs: if depth is 0 but the
+	// session type says sub-agent, treat as level 1 so the template
+	// renders the sub-agent branch.
+	if level == 0 && s.sessionType == sessstore.SessionTypeSubAgent {
+		level = 1
+	}
+	roleDesc := ""
+	if s.metaSkill != "" && s.metaRole != "" && s.skills != nil {
+		if sk, err := s.skills.Load(ctx, s.metaSkill); err == nil {
+			if spec, ok := sk.SubAgents[s.metaRole]; ok {
+				roleDesc = spec.Description
+			}
+		}
+	}
+	tctx := constitutionContext{
+		Level:           level,
+		ParentSessionID: s.parentSessionID,
+		Mission:         s.mission,
+		Skill:           s.metaSkill,
+		Role:            s.metaRole,
+		RoleDescription: roleDesc,
+	}
+	var buf bytes.Buffer
+	if err := s.constitutionTmpl.Execute(&buf, tctx); err != nil {
+		s.logger.Warn("session: constitution template execute", "session", s.id, "err", err)
+		return s.constitution
+	}
+	return buf.String()
+}
+
 func (s *Session) buildPrompt(ctx context.Context) string {
 	var b strings.Builder
-	b.WriteString(s.constitution)
+	b.WriteString(s.renderConstitution(ctx))
 
 	s.state.mu.RLock()
 	catalogOverride := s.state.CatalogSkills

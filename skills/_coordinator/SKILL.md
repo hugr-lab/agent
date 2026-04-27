@@ -5,8 +5,7 @@ description: >
   Coordinator identity, decision tree, delegation discipline, and
   mission-completion recognition. Autoloads into every root
   (user ↔ agent) session.
-autoload: true
-autoload_for: [root]
+autoload: false
 providers:
   - name: mission_tools
     provider: _mission_tools
